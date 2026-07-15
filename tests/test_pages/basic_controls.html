@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Basic Controls - AI Browser Test</title>
+  <style>
+    body { font-family: sans-serif; max-width: 800px; margin: 40px auto; }
+    section { margin: 24px 0; padding: 16px; border: 1px solid #ddd; border-radius: 8px; }
+    .hidden-by-attr { display: none; }
+    .hidden-by-visibility { visibility: hidden; }
+    .layout-wrapper { padding: 8px; background: #f5f5f5; }
+  </style>
+</head>
+<body>
+
+<h1>Basic Controls Test Page</h1>
+
+<section id="buttons">
+  <h2>Buttons</h2>
+  <button id="btn-primary" data-testid="primary-btn" title="Primary action">Primary</button>
+  <button id="btn-disabled" disabled>Disabled</button>
+  <button id="btn-aria-label" aria-label="Submit form">🔘</button>
+  <div role="button" id="btn-aria-role" tabindex="0" aria-label="ARIA role button">Div as Button</div>
+  <p id="click-counter">Clicked: 0 times</p>
+</section>
+
+<section id="text-inputs">
+  <h2>Text Inputs</h2>
+  <input type="text" id="input-text" placeholder="Type here..." aria-label="Search">
+  <input type="password" id="input-password" placeholder="Password">
+  <input type="search" id="input-search" placeholder="Search...">
+  <textarea id="textarea-message" placeholder="Message"></textarea>
+</section>
+
+<section id="checkboxes">
+  <h2>Checkboxes & Radios</h2>
+  <label><input type="checkbox" id="chk-agree" checked> I agree</label>
+  <label><input type="checkbox" id="chk-newsletter"> Subscribe to newsletter</label>
+  <label><input type="radio" name="size" id="rad-small" checked> Small</label>
+  <label><input type="radio" name="size" id="rad-large"> Large</label>
+</section>
+
+<section id="select">
+  <h2>Select</h2>
+  <select id="sel-fruit" aria-label="Choose fruit">
+    <option value="">-- Select --</option>
+    <option value="apple">Apple</option>
+    <option value="banana">Banana</option>
+    <option value="cherry">Cherry</option>
+  </select>
+</section>
+
+<section id="slider">
+  <h2>Slider</h2>
+  <input type="range" id="sld-volume" min="0" max="100" value="50" aria-label="Volume">
+</section>
+
+<section id="table">
+  <h2>Table</h2>
+  <table id="tbl-data">
+    <thead><tr><th>Name</th><th>Role</th><th>Status</th></tr></thead>
+    <tbody>
+      <tr><td>Alice</td><td>Developer</td><td>Active</td></tr>
+      <tr><td>Bob</td><td>Designer</td><td>Away</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- Hidden elements (should NOT appear in semantic tree) -->
+<div hidden id="div-hidden" class="hidden-by-attr">Hidden by hidden attribute</div>
+<div style="display:none" id="div-display-none">Hidden by display:none</div>
+<div style="visibility:hidden" id="div-visibility-hidden">
+  <button class="hidden-by-visibility">Hidden button</button>
+</div>
+<div aria-hidden="true" id="div-aria-hidden">Hidden by aria-hidden</div>
+
+<!-- Pure layout wrappers (should be denoised) -->
+<div class="layout-wrapper" id="wrapper-empty">
+  <div class="layout-wrapper">
+    <button id="btn-in-deep-wrapper">Button deep inside</button>
+  </div>
+</div>
+
+<!-- Dynamic insertion area -->
+<section id="dynamic-area">
+  <h2>Dynamic Content</h2>
+  <button id="btn-add-item">Add Item</button>
+  <ul id="list-dynamic"></ul>
+  <dialog id="dlg-modal">
+    <p>Modal content</p>
+    <button id="btn-close-modal">Close</button>
+  </dialog>
+  <button id="btn-open-modal">Open Modal</button>
+</section>
+
+<script>
+  // Click counter for action_binder tests
+  document.getElementById('btn-primary').addEventListener('click', () => {
+    const counter = document.getElementById('click-counter');
+    const current = parseInt(counter.textContent.match(/\d+/)[0]);
+    counter.textContent = `Clicked: ${current + 1} times`;
+  });
+
+  // Add item dynamically
+  document.getElementById('btn-add-item').addEventListener('click', () => {
+    const list = document.getElementById('list-dynamic');
+    const li = document.createElement('li');
+    li.textContent = `Item ${list.children.length + 1}`;
+    li.setAttribute('data-ai-id', `e:item-${Date.now()}`);
+    list.appendChild(li);
+  });
+
+  // Modal
+  document.getElementById('btn-open-modal').addEventListener('click', () => {
+    document.getElementById('dlg-modal').showModal();
+  });
+  document.getElementById('btn-close-modal').addEventListener('click', () => {
+    document.getElementById('dlg-modal').close();
+  });
+
+  // Input change listener
+  document.getElementById('input-text').addEventListener('input', (e) => {
+    console.log('input event fired:', e.target.value);
+  });
+  document.getElementById('input-text').addEventListener('change', (e) => {
+    console.log('change event fired:', e.target.value);
+  });
+
+  // Select change listener
+  document.getElementById('sel-fruit').addEventListener('change', (e) => {
+    console.log('select changed:', e.target.value);
+  });
+</script>
+
+</body>
+</html>

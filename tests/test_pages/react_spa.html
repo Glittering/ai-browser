@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>React SPA - AI Browser Test</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script>
+    const { useState } = React;
+
+    function App() {
+      const [text, setText] = useState('');
+      const [visible, setVisible] = useState(true);
+      const [items, setItems] = useState(['Item 1', 'Item 2']);
+
+      return React.createElement('div', null, [
+        React.createElement('h1', { key: 'h1' }, 'React SPA Test Page'),
+
+        // Controlled input
+        React.createElement('section', { key: 's1' }, [
+          React.createElement('h2', { key: 'h2' }, 'Controlled Input'),
+          React.createElement('input', {
+            key: 'ctrl-input',
+            id: 'input-controlled',
+            type: 'text',
+            value: text,
+            onChange: (e) => setText(e.target.value),
+            placeholder: 'Type here (React controlled)',
+            'aria-label': 'Controlled text input'
+          }),
+          React.createElement('p', { key: 'display' }, `Current value: "${text}"`)
+        ]),
+
+        // React button with onClick
+        React.createElement('section', { key: 's2' }, [
+          React.createElement('h2', { key: 'h2r' }, 'React onClick Button'),
+          React.createElement('button', {
+            key: 'btn-react',
+            id: 'btn-react-click',
+            onClick: () => alert('React button clicked!'),
+            'aria-label': 'React click button'
+          }, 'Click me (React)'),
+          React.createElement('p', { key: 'counter', id: 'react-click-result' }, 'Alert shown: no')
+        ]),
+
+        // Conditional rendering toggle
+        React.createElement('section', { key: 's3' }, [
+          React.createElement('h2', { key: 'h2t' }, 'Conditional Rendering'),
+          React.createElement('button', {
+            key: 'btn-toggle',
+            id: 'btn-toggle-visible',
+            onClick: () => setVisible(!visible),
+            'aria-label': 'Toggle visibility'
+          }, visible ? 'Hide content' : 'Show content'),
+          visible && React.createElement('div', { key: 'conditional', id: 'div-conditional' }, [
+            React.createElement('p', { key: 'cp1' }, 'This content is conditionally rendered'),
+            React.createElement('button', { key: 'cb', id: 'btn-conditional' }, 'Conditional button')
+          ])
+        ]),
+
+        // Dynamic list
+        React.createElement('section', { key: 's4' }, [
+          React.createElement('h2', { key: 'h2l' }, 'Dynamic List'),
+          React.createElement('button', {
+            key: 'btn-add',
+            id: 'btn-react-add',
+            onClick: () => setItems([...items, `Item ${items.length + 1}`]),
+            'aria-label': 'Add item'
+          }, 'Add Item'),
+          React.createElement('ul', { key: 'list', id: 'list-react' },
+            items.map((item, i) => React.createElement('li', { key: i, 'data-testid': `item-${i}` }, item))
+          )
+        ])
+      ]);
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(React.createElement(App));
+
+    // Hook into alert for test verification
+    const origAlert = window.alert;
+    window.alert = function(msg) {
+      document.getElementById('react-click-result').textContent = 'Alert shown: yes';
+      origAlert.call(window, msg);
+    };
+  </script>
+</body>
+</html>

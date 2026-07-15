@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Dynamic Content - AI Browser Test</title>
+</head>
+<body>
+
+<h1>Dynamic Content Test Page</h1>
+
+<section>
+  <h2>Async Content Loading</h2>
+  <div id="async-container">
+    <p>Loading...</p>
+  </div>
+</section>
+
+<section>
+  <h2>Mutation Observer Target</h2>
+  <button id="btn-insert-child">Insert Child</button>
+  <button id="btn-remove-child">Remove Last Child</button>
+  <button id="btn-toggle-disabled">Toggle Disabled</button>
+  <button id="btn-change-text">Change Text</button>
+  <button id="btn-batch-insert">Batch Insert 50</button>
+  <div id="mutation-target">
+    <p id="p-child-0">Initial paragraph</p>
+  </div>
+</section>
+
+<section>
+  <h2>Focus/Blur Tracking</h2>
+  <input type="text" id="input-focus-test" placeholder="Focus to test" aria-label="Focus test input">
+  <button id="btn-focus-test">Focus the input</button>
+</section>
+
+<section>
+  <h2>Dialog Tracking</h2>
+  <dialog id="dlg-dynamic">
+    <p>Dynamic dialog</p>
+    <button id="btn-close-dynamic">Close</button>
+  </dialog>
+  <button id="btn-open-dynamic">Open Dialog</button>
+</section>
+
+<script>
+  // Async fetch
+  setTimeout(() => {
+    const container = document.getElementById('async-container');
+    container.innerHTML = `
+      <h3 id="h-async-title">Data Loaded</h3>
+      <p id="p-async-content">Content loaded after 500ms delay</p>
+      <button id="btn-async">Async button</button>
+    `;
+  }, 500);
+
+  // Mutation operations
+  let childCount = 1;
+  let disabledState = false;
+
+  document.getElementById('btn-insert-child').addEventListener('click', () => {
+    const target = document.getElementById('mutation-target');
+    const p = document.createElement('p');
+    p.id = `p-child-${childCount}`;
+    p.textContent = `Child ${childCount}`;
+    target.appendChild(p);
+    childCount++;
+  });
+
+  document.getElementById('btn-remove-child').addEventListener('click', () => {
+    const target = document.getElementById('mutation-target');
+    const lastChild = target.lastElementChild;
+    if (lastChild && lastChild.id.startsWith('p-child-') && lastChild.id !== 'p-child-0') {
+      target.removeChild(lastChild);
+    }
+  });
+
+  document.getElementById('btn-toggle-disabled').addEventListener('click', () => {
+    disabledState = !disabledState;
+    document.getElementById('btn-insert-child').disabled = disabledState;
+  });
+
+  document.getElementById('btn-change-text').addEventListener('click', () => {
+    const p0 = document.getElementById('p-child-0');
+    p0.textContent = 'Updated paragraph text ' + Date.now();
+  });
+
+  document.getElementById('btn-batch-insert').addEventListener('click', () => {
+    const target = document.getElementById('mutation-target');
+    for (let i = 0; i < 50; i++) {
+      const p = document.createElement('p');
+      p.textContent = `Batch ${i}`;
+      p.setAttribute('data-batch', 'true');
+      target.appendChild(p);
+    }
+  });
+
+  // Focus tracking
+  document.getElementById('btn-focus-test').addEventListener('click', () => {
+    document.getElementById('input-focus-test').focus();
+  });
+
+  // Dialog
+  document.getElementById('btn-open-dynamic').addEventListener('click', () => {
+    document.getElementById('dlg-dynamic').showModal();
+  });
+  document.getElementById('btn-close-dynamic').addEventListener('click', () => {
+    document.getElementById('dlg-dynamic').close();
+  });
+</script>
+
+</body>
+</html>
