@@ -1,9 +1,133 @@
-// preload/semantic_extractor.js — DOM → SemanticUITree v2
-// Added: contenteditable detection, CodeMirror/Monaco/ProseMirror detection,
-//        action_hints for publish/submit buttons, editor_type field
+// preload/semantic_extractor.js — DOM → SemanticUITree v3
+// NEW: extractPageContext() → page-level semantic summary (modals, forms, page_type)
 export function extractTree() {
   return _extractTree(document.body);
 }
+
+// NEW: page-level context summary
+export function extractPageContext() {
+  const ctx = {
+    title: document.title,
+    url: document.URL,
+    page_type: inferPageType(),
+    forms: extractForms(),
+    modals: extractModals(),
+    session: inferSessionState(),
+  };
+  return ctx;
+}
+
+function inferPageType() {
+  const url = document.URL.toLowerCase();
+  const title = document.title.toLowerCase();
+  // editor / article / login / search / list / form / dashboard patterns
+  if (/editor|drafts|write|post|发表|撰写|写文章/.test(url + title)) return 'editor';
+  if (/login|signin|登录|auth/.test(url + title)) return 'login';
+  if (/search|query|q=/.test(url) || document.querySelector('input[type=search],input[name=q]')) return 'search';
+  if (/dashboard|后台|admin|settings|设置/.test(url + title)) return 'dashboard';
+  if (/article|blog|post|news|故事|文章/.test(url + title)) return 'article';
+  if (/list|catalog|category|topic|话题|首页|hot|trending/.test(url + title)) return 'list';
+  return 'page';
+}
+
+function extractForms() {
+  const forms = document.querySelectorAll('form');
+  const result = [];
+  for (const f of forms) {
+    if (f.offsetParent === null) continue;
+    const inputs = f.querySelectorAll('input,textarea,select');
+    const fields = [];
+    for (const inp of inputs) {
+      if (inp.type === 'hidden') continue;
+      fields.push({
+        id: inp.id || inp.name || '',
+        type: inp.type || inp.tagName.toLowerCase(),
+        placeholder: (inp.placeholder || '').slice(0, 40),
+        required: inp.required || false,
+        value: (inp.value || '').slice(0, 40),
+      });
+    }
+    const buttons = f.querySelectorAll('button,input[type=submit]');
+    const actions = [];
+    for (const btn of buttons) {
+      actions.push({
+        text: (btn.textContent || btn.value || '').trim().slice(0, 30),
+        disabled: btn.disabled || false,
+      });
+    }
+    if (fields.length || actions.length) {
+      result.push({ fields, actions });
+    }
+  }
+  return result.length ? result : null;
+}
+
+function extractModals() {
+  const modals = document.querySelectorAll('[class*=modal],[class*=dialog],[class*=popup],[class*=drawer],[role=dialog],[class*=overlay],[class*=mask]');
+  const result = [];
+  for (const modal of modals) {
+    if (modal.offsetParent === null) continue;
+    // Check if it's a meaningful modal (has buttons/inputs)
+    const buttons = modal.querySelectorAll('button,input[type=submit]');
+    const inputs = modal.querySelectorAll('input:not([type=hidden]),textarea');
+    if (buttons.length === 0 && inputs.length === 0) continue;
+
+    const btnList = [];
+    for (const btn of buttons) {
+      const text = (btn.textContent || btn.value || '').trim();
+      if (!text) continue;
+      btnList.push({
+        text: text.slice(0, 30),
+        disabled: btn.disabled || false,
+        primary: /primary|确定|提交|publish|submit|confirm/.test(btn.className + text),
+      });
+    }
+
+    const fieldList = [];
+    for (const inp of inputs) {
+      fieldList.push({
+        type: inp.type || inp.tagName.toLowerCase(),
+        placeholder: (inp.placeholder || inp.getAttribute('aria-label') || '').slice(0, 40),
+        required: inp.required || false,
+        value: (inp.value || '').slice(0, 30),
+      });
+    }
+
+    // Error messages inside modal
+    const errEls = modal.querySelectorAll('[class*=error],[class*=err],[class*=invalid],[class*=warn]');
+    const errors = [];
+    for (const e of errEls) {
+      const t = (e.textContent || '').trim();
+      if (t && t.length < 100) errors.push(t);
+    }
+
+    // Required indicators
+    const reqEls = modal.querySelectorAll('[class*=required],[class*=req],.byte-form-item__label');
+    const required = [];
+    for (const r of reqEls) {
+      const t = (r.textContent || '').trim();
+      if (t && t.length < 30 && !required.includes(t)) required.push(t);
+    }
+
+    result.push({
+      buttons: btnList,
+      fields: fieldList,
+      errors: errors.length ? errors : null,
+      required_hints: required.length ? required : null,
+    });
+  }
+  return result.length ? result : null;
+}
+
+function inferSessionState() {
+  const hasPasswordInput = document.querySelector('input[type=password]');
+  const hasLoginText = document.body.innerText.indexOf('登录') >= 0 || document.body.innerText.indexOf('Sign In') >= 0;
+  return {
+    logged_in: !hasPasswordInput && !hasLoginText,
+  };
+}
+
+// === TREE EXTRACTION (v2: editor_type + action_hints) ===
 
 function _extractTree(root) {
   const seen = new WeakSet();
@@ -38,9 +162,7 @@ function _extractTree(root) {
     const hasAria = Array.from(el.attributes).some(a => a.name.startsWith('aria-'));
     const hasDataAttr = Array.from(el.attributes).some(a => a.name.startsWith('data-') && a.name !== 'data-ai-id');
     const hasInteractiveChild = Array.from(el.children).some(ch => isSemantic(ch));
-    // NEW: contenteditable divs are NOT pure layout
     if (el.contentEditable === 'true' || el.getAttribute('contenteditable') === 'true') return false;
-    // NEW: CodeMirror / Monaco / ProseMirror editors are NOT pure layout
     const cls = (el.className || '').toLowerCase();
     if (cls.indexOf('codemirror') >= 0 || cls.indexOf('prosemirror') >= 0 || cls.indexOf('monaco') >= 0) return false;
     if (hasRole || hasOnClick || hasAria || hasDataAttr || hasInteractiveChild) return false;
@@ -61,17 +183,14 @@ function _extractTree(root) {
     if (interactiveTags.has(tag)) return true;
     if (el.hasAttribute('role')) return true;
     if (typeof el.onclick === 'function') return true;
-    // NEW: contenteditable elements are semantic
     if (el.contentEditable === 'true' || el.getAttribute('contenteditable') === 'true') return true;
     if (isPureLayout(el)) return false;
     if (tag === 'div' || tag === 'span') return false;
     return true;
   }
 
-  // NEW: detect rich editor type from class/attributes/contenteditable
   function detectEditorType(el) {
     if (el.contentEditable === 'true' || el.getAttribute('contenteditable') === 'true') return 'contenteditable';
-    // Check self + children for editor class patterns
     const allEls = [el, ...Array.from(el.querySelectorAll('*'))];
     for (const sub of allEls) {
       const cls = (sub.className || '').toLowerCase();
@@ -84,10 +203,8 @@ function _extractTree(root) {
     return el.tagName.toLowerCase() === 'textarea' ? 'textarea' : null;
   }
 
-  // NEW: derive action_hints from class/id/aria-label — publish/submit/cancel etc.
   function deriveActionHints(el, role) {
     const hints = new Set();
-    // Check aria-label, title, class, id, text content
     const aria = (el.getAttribute('aria-label') || el.getAttribute('title') || '').toLowerCase();
     const cls = (el.className || '').toLowerCase();
     const id = (el.id || '').toLowerCase();
@@ -125,7 +242,6 @@ function _extractTree(root) {
     if (tag === 'option') return 'option';
     const ariaRole = (el.getAttribute('role') || '').toLowerCase();
     if (ariaRole) return ariaRole;
-    // NEW: contenteditable div/span → textbox
     if (el.contentEditable === 'true' || el.getAttribute('contenteditable') === 'true') return 'textbox';
     if (typeof el.onclick === 'function') return 'button';
     return 'generic';
@@ -137,7 +253,6 @@ function _extractTree(root) {
       case 'link':
         return ['click', 'focus', 'hover'];
       case 'textbox':
-        // NEW: text editors support type + setContent + clear
         return ['type', 'setContent', 'clear', 'focus'];
       case 'select':
         return ['select', 'focus'];
@@ -240,7 +355,6 @@ function _extractTree(root) {
       attributes: Object.keys(attributes).length ? attributes : undefined,
     };
 
-    // NEW: attach editor metadata and action hints
     if (editorType) node.editor_type = editorType;
     if (actionHints) node.action_hints = actionHints;
 

@@ -51,12 +51,15 @@ describe('WebSocket Protocol', () => {
     expect(ws.readyState).toBe(WebSocket.OPEN);
   });
 
-  it('WS-002: get_tree returns valid tree', async () => {
+  it('WS-002: get_tree returns valid tree with context', async () => {
     const response = await rpcCall('ui.get_tree', {});
     expect(response.result).toBeDefined();
     expect(response.result.tree).toBeDefined();
     expect(response.result.tree.id).toBeDefined();
     expect(response.result.tree.role).toBeDefined();
+    // v3: also has page context
+    expect(response.result.context).toBeDefined();
+    expect(response.result.context.page_type).toBeDefined();
   });
 
   it('WS-003: response id matches request', async () => {

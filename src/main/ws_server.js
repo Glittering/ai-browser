@@ -46,8 +46,9 @@ export function startWSServer(pageManager, port = 9223) {
       try {
         switch (method) {
           case 'ui.get_tree': {
-            const tree = await pageManager.getTree(params.focusedOnly);
-            send({ jsonrpc: '2.0', id, result: { tree } });
+            const result = await pageManager.getTree(params.focusedOnly);
+            // result now is {tree, context} from bridge v3
+            send({ jsonrpc: '2.0', id, result });
             break;
           }
           case 'ui.act': {

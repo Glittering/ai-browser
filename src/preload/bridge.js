@@ -1,6 +1,97 @@
 // preload/bridge.js — IPC bridge (CommonJS for Electron preload)
 const { contextBridge, ipcRenderer } = require('electron');
 
+// === Page Context Summary (v3) ===
+// Extracts page-level semantic info: modals, forms, page_type, session
+function extractPageContext() {
+  var url = document.URL.toLowerCase();
+  var title = document.title.toLowerCase();
+  var pageType = 'page';
+  if (/editor|drafts|write|post|发表|撰写|写文章/.test(url + title)) pageType = 'editor';
+  else if (/login|signin|登录|auth/.test(url + title)) pageType = 'login';
+  else if (/search|query|q=/.test(url) || document.querySelector('input[type=search],input[name=q]')) pageType = 'search';
+  else if (/dashboard|后台|admin|settings|设置/.test(url + title)) pageType = 'dashboard';
+  else if (/article|blog|post|news|故事|文章/.test(url + title)) pageType = 'article';
+  else if (/list|catalog|category|hot|trending|首页/.test(url + title)) pageType = 'list';
+
+  // Forms
+  var forms = document.querySelectorAll('form');
+  var formList = [];
+  for (var fi = 0; fi < forms.length; fi++) {
+    var f = forms[fi];
+    if (f.offsetParent === null) continue;
+    var inputs = f.querySelectorAll('input,textarea,select');
+    var fields = [];
+    for (var ii = 0; ii < inputs.length; ii++) {
+      if (inputs[ii].type === 'hidden') continue;
+      fields.push({
+        id: inputs[ii].id || inputs[ii].name || '',
+        type: inputs[ii].type || inputs[ii].tagName.toLowerCase(),
+        placeholder: (inputs[ii].placeholder || '').slice(0, 40),
+        required: inputs[ii].required || false,
+      });
+    }
+    if (fields.length) formList.push({ fields: fields });
+  }
+
+  // Modals
+  var modals = document.querySelectorAll('[class*=modal],[class*=dialog],[class*=popup],[class*=drawer],[role=dialog],[class*=overlay]');
+  var modalList = [];
+  for (var mi = 0; mi < modals.length; mi++) {
+    var modal = modals[mi];
+    if (modal.offsetParent === null) continue;
+    var btns = modal.querySelectorAll('button,input[type=submit]');
+    var inp = modal.querySelectorAll('input:not([type=hidden]),textarea');
+    if (btns.length === 0 && inp.length === 0) continue;
+
+    var btnList = [];
+    for (var bi = 0; bi < btns.length; bi++) {
+      var text = (btns[bi].textContent || btns[bi].value || '').trim();
+      if (!text) continue;
+      btnList.push({ text: text.slice(0, 30), disabled: btns[bi].disabled || false });
+    }
+
+    var fieldList = [];
+    for (var fi2 = 0; fi2 < inp.length; fi2++) {
+      fieldList.push({
+        type: inp[fi2].type || inp[fi2].tagName.toLowerCase(),
+        placeholder: (inp[fi2].placeholder || '').slice(0, 40),
+        required: inp[fi2].required || false,
+      });
+    }
+
+    var errs = modal.querySelectorAll('[class*=error],[class*=err],[class*=invalid]');
+    var errorMsgs = [];
+    for (var ei = 0; ei < errs.length; ei++) {
+      var t = (errs[ei].textContent || '').trim();
+      if (t && t.length < 100) errorMsgs.push(t);
+    }
+
+    var reqs = modal.querySelectorAll('[class*=required]');
+    var required = [];
+    for (var ri = 0; ri < reqs.length; ri++) {
+      var rt = (reqs[ri].textContent || '').trim();
+      if (rt && rt.length < 30 && required.indexOf(rt) < 0) required.push(rt);
+    }
+
+    modalList.push({
+      buttons: btnList,
+      fields: fieldList,
+      errors: errorMsgs.length ? errorMsgs : null,
+      required_hints: required.length ? required : null,
+    });
+  }
+
+  return {
+    title: document.title,
+    url: document.URL,
+    page_type: pageType,
+    forms: formList.length ? formList : null,
+    modals: modalList.length ? modalList : null,
+    session: { logged_in: !document.querySelector('input[type=password]') && document.body.innerText.indexOf('登录') < 0 }
+  };
+}
+
 // Inline extractTree (no ESM import)
 function extractTree() {
   const seen = new WeakSet();
@@ -319,7 +410,7 @@ contextBridge.exposeInMainWorld('__ai_browser__', {
   sendDiff: (changes) => ipcRenderer.send('ai:diff', changes),
 });
 
-// Respond to extract requests from main
+// Respond to extract requests from main (v3: include page_context)
 ipcRenderer.on('ai:extract', (_event, params) => {
   let tree = extractTree();
   if (params?.focusedOnly && tree) {
@@ -330,7 +421,9 @@ ipcRenderer.on('ai:extract', (_event, params) => {
     }
     tree = findFocused(tree) || tree;
   }
-  ipcRenderer.send('ai:tree', tree);
+  // Extract page context summary
+  var ctx = extractPageContext();
+  ipcRenderer.send('ai:tree', { tree: tree, context: ctx });
 });
 
 // Respond to action requests from main
