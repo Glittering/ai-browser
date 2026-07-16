@@ -34,6 +34,10 @@ function extractTree() {
     const hasOnClick = typeof el.onclick === 'function';
     const hasAria = Array.from(el.attributes).some(a => a.name.startsWith('aria-'));
     const hasDataAttr = Array.from(el.attributes).some(a => a.name.startsWith('data-') && a.name !== 'data-ai-id');
+    // contenteditable / CodeMirror / Monaco / ProseMirror are NOT pure layout
+    if (el.contentEditable === 'true' || el.getAttribute('contenteditable') === 'true') return false;
+    const cls = (el.className || '').toLowerCase();
+    if (cls.indexOf('codemirror') >= 0 || cls.indexOf('prosemirror') >= 0 || cls.indexOf('monaco') >= 0) return false;
     if (hasRole || hasOnClick || hasAria || hasDataAttr) return false;
     return true;
   }
@@ -53,6 +57,8 @@ function extractTree() {
     if (interactiveTags.has(tag)) return true;
     if (el.hasAttribute('role')) return true;
     if (typeof el.onclick === 'function') return true;
+    // contenteditable elements are semantic
+    if (el.contentEditable === 'true' || el.getAttribute('contenteditable') === 'true') return true;
     if (isPureLayout(el)) return false;
     if (tag === 'div' || tag === 'span') return false;
     return true;
@@ -76,6 +82,8 @@ function extractTree() {
     if (tag === 'option') return 'option';
     const ariaRole = (el.getAttribute('role') || '').toLowerCase();
     if (ariaRole) return ariaRole;
+    // contenteditable div/span → textbox
+    if (el.contentEditable === 'true' || el.getAttribute('contenteditable') === 'true') return 'textbox';
     if (typeof el.onclick === 'function') return 'button';
     return 'generic';
   }
@@ -83,13 +91,40 @@ function extractTree() {
   function extractActions(el, role) {
     switch (role) {
       case 'button': case 'link': return ['click', 'focus', 'hover'];
-      case 'textbox': return ['type', 'clear', 'focus'];
+      case 'textbox': return ['type', 'setContent', 'clear', 'focus'];
       case 'select': return ['select', 'focus'];
       case 'slider': return ['scroll_to', 'focus'];
       case 'checkbox': case 'radio': return ['click', 'focus'];
       case 'dialog': return ['open', 'close'];
       default: return [];
     }
+  }
+
+  function deriveActionHints(el, role) {
+    var hints = [];
+    var aria = (el.getAttribute('aria-label') || el.getAttribute('title') || '').toLowerCase();
+    var cls = (el.className || '').toLowerCase();
+    var id = (el.id || '').toLowerCase();
+    var text = (el.textContent || '').toLowerCase().trim().slice(0, 50);
+    var combined = aria + '|' + cls + '|' + id + '|' + text;
+    if (role === 'button' || role === 'link' || typeof el.onclick === 'function') {
+      if (/发布|submit|publish|post|发表|提交/.test(combined)) hints.push('publish');
+      if (/保存|save|draft/.test(combined)) hints.push('save');
+      if (/取消|cancel|discard/.test(combined)) hints.push('cancel');
+      if (/删除|delete|remove/.test(combined)) hints.push('delete');
+      if (/登录|login|signin/.test(combined)) hints.push('login');
+    }
+    return hints.length ? hints : null;
+  }
+
+  function detectEditorType(el) {
+    if (el.contentEditable === 'true' || el.getAttribute('contenteditable') === 'true') return 'contenteditable';
+    var cls = (el.className || '').toLowerCase();
+    if (cls.indexOf('codemirror') >= 0) return 'codemirror';
+    if (cls.indexOf('prosemirror') >= 0) return 'prosemirror';
+    if (cls.indexOf('monaco') >= 0) return 'monaco';
+    if (el.tagName.toLowerCase() === 'textarea') return 'textarea';
+    return null;
   }
 
   function extractLabel(el) {
@@ -150,6 +185,8 @@ function extractTree() {
     const bounds = extractBounds(el);
     const attributes = extractAttributes(el);
     const nativeId = el.id || '';
+    const editorType = detectEditorType(el);
+    const actionHints = deriveActionHints(el, role);
     let aiId = nativeId;
     if (!aiId) aiId = `e:${el.tagName.toLowerCase()}-${counter++}`;
     el.setAttribute('data-ai-id', aiId);
@@ -167,6 +204,8 @@ function extractTree() {
       actions, bounds,
       attributes: Object.keys(attributes).length ? attributes : undefined,
     };
+    if (editorType) node.editor_type = editorType;
+    if (actionHints) node.action_hints = actionHints;
 
     const children = [];
     for (const child of el.children) {
@@ -183,25 +222,72 @@ function extractTree() {
   return process(document.body) || { id: 'root', role: 'generic', label: '', states: ['visible'], actions: [], bounds: {}, attributes: {} };
 }
 
-// Inline executeAction
+// Inline executeAction (v2 — supports setContent for rich editors)
 function executeAction(elementId, action, params) {
   params = params || {};
-  const el = document.querySelector(`[data-ai-id="${elementId}"]`);
+  const el = document.querySelector('[data-ai-id="' + elementId + '"]');
   if (!el) return { success: false, error: 'Target not found' };
   try {
     switch (action) {
       case 'click': el.click(); return { success: true };
       case 'type':
-        if (el.tagName.toLowerCase() !== 'input' && el.tagName.toLowerCase() !== 'textarea')
+        if (el.tagName.toLowerCase() !== 'input' && el.tagName.toLowerCase() !== 'textarea' &&
+            el.contentEditable !== 'true')
           return { success: false, error: 'Invalid action' };
         el.value = params.text || '';
         el.dispatchEvent(new Event('input', { bubbles: true }));
         el.dispatchEvent(new Event('change', { bubbles: true }));
         return { success: true };
+      // NEW: setContent — write to any editor (contenteditable, CodeMirror, etc.)
+      case 'setContent':
+        var text = params.text || '';
+        // 1. contenteditable div
+        if (el.contentEditable === 'true' || el.getAttribute('contenteditable') === 'true') {
+          el.focus();
+          el.innerHTML = text.replace(/\n/g, '<br>');
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          return { success: true };
+        }
+        // 2. textarea
+        if (el.tagName.toLowerCase() === 'textarea') {
+          el.value = text;
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          return { success: true };
+        }
+        // 3. Look inside for CodeMirror / Monaco / ProseMirror editor sub-elements
+        var cmEditors = el.querySelectorAll('[class*=CodeMirror], [class*=codemirror]');
+        for (var i = 0; i < cmEditors.length; i++) {
+          var cm = cmEditors[i];
+          if (cm.CodeMirror) {
+            cm.CodeMirror.setValue(text);
+            return { success: true };
+          }
+        }
+        // 4. Monaco editor
+        var monacoEls = el.querySelectorAll('[class*=monaco-editor]');
+        for (var j = 0; j < monacoEls.length; j++) {
+          var monacoEditor = monacoEls[j].__monaco_editor__;
+          if (monacoEditor && monacoEditor.setValue) {
+            monacoEditor.setValue(text);
+            return { success: true };
+          }
+        }
+        // 5. ProseMirror — dispatch paste event? Complex. Fallback to contenteditable
+        var proseEls = el.querySelectorAll('[class*=ProseMirror], [contenteditable=true]');
+        if (proseEls.length > 0) {
+          proseEls[0].focus();
+          proseEls[0].innerHTML = text.replace(/\n/g, '<br>');
+          proseEls[0].dispatchEvent(new Event('input', { bubbles: true }));
+          return { success: true };
+        }
+        return { success: false, error: 'No editable element found in target' };
       case 'clear':
-        if (el.tagName.toLowerCase() !== 'input' && el.tagName.toLowerCase() !== 'textarea')
+        if (el.tagName.toLowerCase() !== 'input' && el.tagName.toLowerCase() !== 'textarea' &&
+            el.contentEditable !== 'true')
           return { success: false, error: 'Invalid action' };
         el.value = '';
+        if (el.contentEditable === 'true') el.innerHTML = '';
         el.dispatchEvent(new Event('input', { bubbles: true }));
         el.dispatchEvent(new Event('change', { bubbles: true }));
         return { success: true };

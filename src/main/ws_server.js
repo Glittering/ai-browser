@@ -4,8 +4,8 @@ import { parseMessage, ERROR_CODES } from '../shared/protocol.js';
 
 let wss = null;
 
-export function startWSServer(pageManager) {
-  wss = new WebSocketServer({ port: 9223 });
+export function startWSServer(pageManager, port = 9223) {
+  wss = new WebSocketServer({ port });
 
   wss.on('connection', (ws, _req) => {
     const sessionId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -100,6 +100,6 @@ export function startWSServer(pageManager) {
     });
   });
 
-  console.log('AI Browser WS server listening on ws://localhost:9223');
+  console.log('AI Browser WS server listening on ws://localhost:' + port);
   return { close: () => wss?.close() };
 }
