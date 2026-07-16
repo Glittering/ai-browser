@@ -229,7 +229,13 @@ function executeAction(elementId, action, params) {
   if (!el) return { success: false, error: 'Target not found' };
   try {
     switch (action) {
-      case 'click': el.click(); return { success: true };
+      case 'click':
+        // Full mouse event sequence for SPA frameworks (Vue/React/Next.js)
+        el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window, button: 0 }));
+        el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window, button: 0 }));
+        el.click();
+        el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window, button: 0 }));
+        return { success: true };
       case 'type':
         if (el.tagName.toLowerCase() !== 'input' && el.tagName.toLowerCase() !== 'textarea' &&
             el.contentEditable !== 'true')
