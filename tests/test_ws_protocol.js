@@ -57,9 +57,9 @@ describe('WebSocket Protocol', () => {
     expect(response.result.tree).toBeDefined();
     expect(response.result.tree.id).toBeDefined();
     expect(response.result.tree.role).toBeDefined();
-    // v3: also has page context
+    // v6: context has modals/forms/session/stats (no more page_type — Agent infers)
     expect(response.result.context).toBeDefined();
-    expect(response.result.context.page_type).toBeDefined();
+    expect(response.result.context.session).toBeDefined();
   });
 
   it('WS-003: response id matches request', async () => {
