@@ -156,6 +156,7 @@ class PageManager {
         preload: this._preloadPath,
         contextIsolation: true,
         nodeIntegration: false,
+        partition: 'persist:ai-browser',
       },
     });
     this.tabs.set(tabId, view);
@@ -209,15 +210,16 @@ class PageManager {
 
   setActive(tabId) {
     if (!this.tabs.has(tabId)) return false;
-    // Hide all views
+    // Remove all browser views from window, then re-add only the active one
     for (const [id, view] of this.tabs) {
-      if (id !== tabId) {
-        view.setBackgroundColor('#000000');
-      }
+      try { this.window.removeBrowserView(view); } catch(e) {}
     }
     this.activeTab = tabId;
     const view = this._getView(tabId);
-    if (view) this._layoutView(view);
+    if (view) {
+      this.window.addBrowserView(view);
+      this._layoutView(view);
+    }
     return true;
   }
 
