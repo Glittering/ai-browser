@@ -163,6 +163,11 @@ class PageManager {
     this.window.addBrowserView(view);
     this._layoutView(view);
 
+    // Mask automation fingerprint: remove Electron from UA
+    view.webContents.setUserAgent(
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
+    );
+
     // Intercept window.open / new-window → create new tab instead
     view.webContents.on('new-window', (event, urlToOpen) => {
       event.preventDefault();
