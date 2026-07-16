@@ -118,6 +118,8 @@ function extractTree() {
     if (cls.indexOf("monaco") >= 0) return "monaco";
     if (cls.indexOf("ql-editor") >= 0) return "quill";
     if (cls.indexOf("draft") >= 0 || (el.querySelector && el.querySelector(".public-DraftEditor-content"))) return "draft";
+    // Also check parent for Draft.js (DraftEditor-content is nested)
+    if (el.querySelector && el.querySelector("[class*=DraftEditor]")) return "draft";
     if (el.tagName.toLowerCase() === "textarea") return "textarea";
     return null;
   }
