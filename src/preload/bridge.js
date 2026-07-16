@@ -90,6 +90,20 @@ function extractPageContext() {
       var rt = (reqs[ri].textContent || '').trim();
       if (rt && rt.length < 30 && required.indexOf(rt) < 0) required.push(rt);
     }
+    // Scan for character/length limits and Chinese hints
+    var mLines = (modal.innerText || '').split('\n');
+    for (var li = 0; li < mLines.length; li++) {
+      var m = mLines[li].match(/(\d+)\s*\/\s*(\d+)/);
+      if (m) { var trimmed = mLines[li].trim().slice(0, 50); if (required.indexOf(trimmed) < 0) required.push(trimmed); }
+      if (/字数/.test(mLines[li])) { var t2 = mLines[li].trim().slice(0, 50); if (required.indexOf(t2) < 0) required.push(t2); }
+    }
+    var hintMatch = modalText.match(/请\s*[选择填写输入].{0,20}/g);
+    if (hintMatch) {
+      for (var hi = 0; hi < hintMatch.length; hi++) {
+        var h2 = hintMatch[hi].trim().slice(0, 30);
+        if (required.indexOf(h2) < 0) required.push(h2);
+      }
+    }
 
     modalList.push({
       buttons: btnList,

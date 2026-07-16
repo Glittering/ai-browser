@@ -124,6 +124,21 @@ function extractModals() {
       const t = (r.textContent || '').trim();
       if (t && t.length < 30 && !required.includes(t)) required.push(t);
     }
+    // Scan modal text for character/length limits (e.g. "0/256", "字数:")
+    const mLines = (modal.innerText || '').split('\n');
+    for (const line of mLines) {
+      const m = line.match(/(\d+)\s*\/\s*(\d+)/);
+      if (m) required.push(line.trim().slice(0, 50));
+      if (/字数/.test(line)) required.push(line.trim().slice(0, 50));
+    }
+    // Scan for "请选择"/"请填写" hints
+    const hintMatch = modalText.match(/请\s*[选择填写输入].{0,20}/g);
+    if (hintMatch) {
+      for (const h of hintMatch) {
+        const trimmed = h.trim().slice(0, 30);
+        if (!required.includes(trimmed)) required.push(trimmed);
+      }
+    }
 
     result.push({
       buttons: btnList,
