@@ -86,6 +86,8 @@ function refreshTabBar() {
 }
 
 app.whenReady().then(() => {
+  // Set persistent user data directory so session survives process restart
+  app.setPath('userData', path.join(app.getPath('home'), '.ai-browser'));
   createWindow();
 });
 
