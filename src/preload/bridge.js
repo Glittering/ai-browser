@@ -60,11 +60,28 @@ function extractPageContext() {
       });
     }
 
-    var errs = modal.querySelectorAll('[class*=error],[class*=err],[class*=invalid]');
+    // Error messages — check multiple selector patterns
+    var errSelectors = ['[class*=error]','[class*=err]','[class*=invalid]',
+      '[class*=toast]','[class*=message]','[class*=notification]',
+      '[class*=alert]','[class*=warning]','[class*=fail]','[class*=tip]'];
     var errorMsgs = [];
-    for (var ei = 0; ei < errs.length; ei++) {
-      var t = (errs[ei].textContent || '').trim();
-      if (t && t.length < 100) errorMsgs.push(t);
+    for (var si = 0; si < errSelectors.length; si++) {
+      var errs = modal.querySelectorAll(errSelectors[si]);
+      for (var ei = 0; ei < errs.length; ei++) {
+        var t = (errs[ei].textContent || '').trim();
+        if (t && t.length < 200 && errorMsgs.indexOf(t) < 0) errorMsgs.push(t);
+      }
+    }
+    // Also scan for key phrases in modal body text
+    var modalText = modal.innerText || '';
+    var keyPhrases = ['不存在','失败','错误','不能为空','请选择','请填写',
+      'not found','failed','error','required','cannot be empty'];
+    for (var ki = 0; ki < keyPhrases.length; ki++) {
+      var idx = modalText.indexOf(keyPhrases[ki]);
+      if (idx >= 0) {
+        var snippet = modalText.slice(Math.max(0, idx - 10), idx + keyPhrases[ki].length + 40);
+        if (errorMsgs.indexOf(snippet) < 0) errorMsgs.push(snippet);
+      }
     }
 
     var reqs = modal.querySelectorAll('[class*=required]');

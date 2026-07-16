@@ -93,12 +93,28 @@ function extractModals() {
       });
     }
 
-    // Error messages inside modal
-    const errEls = modal.querySelectorAll('[class*=error],[class*=err],[class*=invalid],[class*=warn]');
+    // Error messages inside modal — expanded selectors + key phrase scan
+    const errSelectors = ['[class*=error]','[class*=err]','[class*=invalid]',
+      '[class*=toast]','[class*=message]','[class*=notification]',
+      '[class*=alert]','[class*=warning]','[class*=fail]','[class*=tip]'];
     const errors = [];
-    for (const e of errEls) {
-      const t = (e.textContent || '').trim();
-      if (t && t.length < 100) errors.push(t);
+    for (const sel of errSelectors) {
+      const errEls = modal.querySelectorAll(sel);
+      for (const e of errEls) {
+        const t = (e.textContent || '').trim();
+        if (t && t.length < 200 && !errors.includes(t)) errors.push(t);
+      }
+    }
+    // Key phrase scan from modal body text
+    const modalText = modal.innerText || '';
+    const keyPhrases = ['不存在','失败','错误','不能为空','请选择','请填写',
+      'not found','failed','error','required','cannot be empty'];
+    for (const kp of keyPhrases) {
+      const idx = modalText.indexOf(kp);
+      if (idx >= 0) {
+        const snippet = modalText.slice(Math.max(0, idx - 10), idx + kp.length + 40);
+        if (!errors.includes(snippet)) errors.push(snippet);
+      }
     }
 
     // Required indicators
