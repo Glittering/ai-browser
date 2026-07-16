@@ -1,6 +1,6 @@
-// main/index.js — Electron entry v4 (multi-tab)
-// One process, one WS server, multiple tabs.
-import { app, BrowserWindow, BrowserView, ipcMain } from 'electron';
+// main/index.js — Electron entry v5 (multi-tab, real UI)
+// One process, one WS server, multiple tabs with real tab bar.
+import { app, BrowserWindow, BrowserView, ipcMain, shell } from 'electron';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startWSServer } from './ws_server.js';
@@ -10,6 +10,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PORT = 9223;
+const TAB_BAR_HEIGHT = 36;
 
 let mainWindow = null;
 let wsServer = null;
@@ -25,44 +26,63 @@ function createWindow() {
     },
   });
 
-  // Tab bar — a thin BrowserView at the top
+  // Tab bar — needs nodeIntegration for ipcRenderer
   tabBarView = new BrowserView({
     webPreferences: {
-      contextIsolation: true,
+      contextIsolation: false,
       nodeIntegration: true,
     },
   });
   mainWindow.addBrowserView(tabBarView);
-  tabBarView.setBounds({ x: 0, y: 0, width: 1280, height: 36 });
+  tabBarView.setBounds({ x: 0, y: 0, width: 1280, height: TAB_BAR_HEIGHT });
   tabBarView.webContents.loadFile(path.join(__dirname, '../renderer/tab_bar.html'));
 
-  // Init PageManager and set preload path
+  // Init PageManager
   const manager = PageManager.getInstance(mainWindow);
   manager._preloadPath = path.join(__dirname, '../preload/bridge.js');
 
-  // Create first tab with default test page
-  manager.newTab(path.join(__dirname, '../../tests/test_pages/basic_controls.html'));
+  // Create first tab
+  manager.newTab('https://www.baidu.com');
 
   // Start WS server
   wsServer = startWSServer(manager, PORT);
 
-  // Handle tab bar IPC
-  ipcMain.on('tab:new', () => manager.newTab(null));
-  ipcMain.on('tab:close', (_e, tabId) => manager.closeTab(tabId));
-  ipcMain.on('tab:activate', (_e, tabId) => manager.setActive(tabId));
-  ipcMain.on('tab:list', (e) => {
-    e.returnValue = manager.listTabs();
+  // === Tab bar IPC ===
+  ipcMain.on('tab:new', () => {
+    manager.newTab('https://www.baidu.com');
+    refreshTabBar();
+  });
+  ipcMain.on('tab:close', (_e, tabId) => {
+    manager.closeTab(tabId);
+    refreshTabBar();
+  });
+  ipcMain.on('tab:activate', (_e, tabId) => {
+    manager.setActive(tabId);
+    refreshTabBar();
+  });
+  ipcMain.handle('tab:list', () => manager.listTabs());
+
+  // Intercept new-window / window.open → new tab instead of new window
+  ipcMain.on('tab:new-url', (_e, url) => {
+    manager.newTab(url);
+    refreshTabBar();
   });
 
   // Resize handler
   mainWindow.on('resize', () => {
     const bounds = mainWindow.getContentBounds();
-    tabBarView.setBounds({ x: 0, y: 0, width: bounds.width, height: 36 });
-    manager._layoutAllViews?.(bounds);
-    // Re-layout active tab
-    const activeView = manager._getView(manager.activeTab);
-    if (activeView) activeView.setBounds({ x: 0, y: 36, width: bounds.width, height: bounds.height - 36 });
+    tabBarView.setBounds({ x: 0, y: 0, width: bounds.width, height: TAB_BAR_HEIGHT });
+    manager._layoutAllViews(bounds);
   });
+
+  // Refresh tab bar periodically
+  setInterval(refreshTabBar, 2000);
+}
+
+function refreshTabBar() {
+  if (tabBarView && !tabBarView.webContents.isDestroyed()) {
+    tabBarView.webContents.executeJavaScript('renderTabs && renderTabs()').catch(() => {});
+  }
 }
 
 app.whenReady().then(() => {

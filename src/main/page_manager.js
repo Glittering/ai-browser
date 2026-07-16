@@ -150,6 +150,7 @@ class PageManager {
 
   newTab(url = null) {
     const tabId = ++this.tabCounter;
+    const self = this;
     const view = new BrowserView({
       webPreferences: {
         preload: this._preloadPath,
@@ -160,7 +161,17 @@ class PageManager {
     this.tabs.set(tabId, view);
     this.window.addBrowserView(view);
     this._layoutView(view);
-    
+
+    // Intercept window.open / new-window → create new tab instead
+    view.webContents.on('new-window', (event, urlToOpen) => {
+      event.preventDefault();
+      self.newTab(urlToOpen);
+    });
+    view.webContents.setWindowOpenHandler(({ url: urlToOpen }) => {
+      self.newTab(urlToOpen);
+      return { action: 'deny' };
+    });
+
     if (url) {
       view.webContents.loadURL(url);
     }

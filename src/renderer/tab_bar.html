@@ -74,36 +74,42 @@
 <script>
 const { ipcRenderer } = require('electron');
 
-function renderTabs() {
-  const tabs = ipcRenderer.sendSync('tab:list');
-  const container = document.getElementById('tabs');
-  container.innerHTML = '';
-  for (const tab of tabs) {
-    const el = document.createElement('div');
-    el.className = 'tab' + (tab.active ? ' active' : '');
-    el.innerHTML = '<span class="tab-id">[' + tab.id + ']</span>' +
-      '<span class="tab-title">' + (tab.title || tab.url || 'New Tab') + '</span>' +
-      '<span class="tab-close" data-id="' + tab.id + '">×</span>';
-    el.addEventListener('click', function(e) {
-      if (e.target.classList.contains('tab-close')) {
-        ipcRenderer.send('tab:close', parseInt(e.target.dataset.id));
-      } else {
-        ipcRenderer.send('tab:activate', tab.id);
-      }
-      setTimeout(renderTabs, 100);
-    });
-    container.appendChild(el);
+async function renderTabs() {
+  try {
+    const tabs = await ipcRenderer.invoke('tab:list');
+    const container = document.getElementById('tabs');
+    container.innerHTML = '';
+    for (const tab of tabs) {
+      const el = document.createElement('div');
+      el.className = 'tab' + (tab.active ? ' active' : '');
+      const title = (tab.title || tab.url || 'New Tab').slice(0, 30);
+      el.innerHTML = '<span class="tab-id">[' + tab.id + ']</span>' +
+        '<span class="tab-title">' + title + '</span>' +
+        '<span class="tab-close" data-id="' + tab.id + '">&times;</span>';
+      el.addEventListener('click', function(e) {
+        if (e.target.classList.contains('tab-close')) {
+          ipcRenderer.send('tab:close', parseInt(e.target.dataset.id));
+        } else {
+          ipcRenderer.send('tab:activate', tab.id);
+        }
+      });
+      container.appendChild(el);
+    }
+  } catch(e) {
+    // ipcRenderer not ready yet
   }
 }
 
+// expose for main process to call
+window.renderTabs = renderTabs;
+
 document.getElementById('new-tab').addEventListener('click', function() {
   ipcRenderer.send('tab:new');
-  setTimeout(renderTabs, 100);
 });
 
-// Refresh tab titles every 2 seconds
+// Initial render + periodic refresh
 renderTabs();
-setInterval(renderTabs, 2000);
+setInterval(renderTabs, 1500);
 </script>
 </body>
 </html>
