@@ -492,6 +492,72 @@ function bindObserver() {
     observer.observe(document.body, { childList: true, subtree: true, attributes: true });
   }
 }
+// === Error/Toast watcher — pushes page messages to Agent in real-time ===
+function scanMessages() {
+  var selectors = [
+    '[class*=toast]', '[class*=message]', '[class*=notification]',
+    '[class*=alert]', '[class*=warning]', '[class*=error-msg]',
+    '[class*=error-tip]', '[class*=err-text]', '[class*=notice]',
+    '[class*=snack]', '[class*=tip-text]', '[class*=hint]',
+    '[role=alert]', '[role=status]', '[aria-live]'
+  ];
+  var seen = new Set();
+  var messages = [];
+  for (var si = 0; si < selectors.length; si++) {
+    var els = document.querySelectorAll(selectors[si]);
+    for (var ei = 0; ei < els.length; ei++) {
+      var el = els[ei];
+      if (el.offsetParent === null) continue;
+      var text = (el.textContent || '').trim();
+      if (!text || text.length > 200) continue;
+      if (seen.has(text)) continue;
+      seen.add(text);
+      var r = el.getBoundingClientRect();
+      messages.push({
+        text: text,
+        cls: String(el.className || '').slice(0, 60),
+        bounds: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) }
+      });
+    }
+  }
+  return messages;
+}
+
+var lastMessageSig = '';
+function checkMessages() {
+  var msgs = scanMessages();
+  if (msgs.length > 0) {
+    var sig = JSON.stringify(msgs.map(function(m) { return m.text + '|' + m.bounds.x + ',' + m.bounds.y; }));
+    if (sig !== lastMessageSig) {
+      lastMessageSig = sig;
+      ipcRenderer.send('ai:event', { event: 'message_appeared', data: { messages: msgs } });
+    }
+  } else {
+    lastMessageSig = '';
+  }
+}
+
+// Integrate message scan into existing MutationObserver
+var oldBindObserver = bindObserver;
+bindObserver = function() {
+  if (observer) observer.disconnect();
+  observer = new MutationObserver(function() {
+    // Existing captcha scan
+    var found = scanCaptcha();
+    if (found.length > 0) {
+      var sig = JSON.stringify(found.map(function(f) { return f.cls + '|' + f.bounds.x + ',' + f.bounds.y + ',' + f.bounds.width + ',' + f.bounds.height; }));
+      if (sig !== lastCaptchaSig) {
+        lastCaptchaSig = sig;
+        ipcRenderer.send('ai:event', { event: 'captcha_appeared', data: { elements: found } });
+      }
+    }
+    // NEW: message/error scan
+    checkMessages();
+  });
+  if (document.body) {
+    observer.observe(document.body, { childList: true, subtree: true, attributes: true });
+  }
+};
 bindObserver();
-document.addEventListener('DOMContentLoaded', () => { setTimeout(bindObserver, 500); });
-window.addEventListener('load', () => { bindObserver(); const found = scanCaptcha(); if (found.length) { lastCaptchaSig = JSON.stringify(found.map(f=>f.cls+'|'+f.bounds.x+','+f.bounds.y+','+f.bounds.width+','+f.bounds.height)); ipcRenderer.send('ai:event', {event:'captcha_appeared', data:{elements:found}}); } });
+document.addEventListener('DOMContentLoaded', function() { setTimeout(bindObserver, 500); });
+window.addEventListener('load', function() { bindObserver(); checkMessages(); });
