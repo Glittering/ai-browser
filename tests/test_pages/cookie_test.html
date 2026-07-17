@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Cookie Persistence Test</title></head>
+<body>
+<h1>Cookie 持久化测试</h1>
+<div id="status">检查中...</div>
+<button onclick="setLogin()">模拟登录</button>
+<button onclick="clearLogin()">清除登录</button>
+<button onclick="checkLogin()">检查状态</button>
+<script>
+function setLogin() {
+  document.cookie = 'test_login_token=abc123; max-age=86400; path=/';
+  localStorage.setItem('test_user', 'AI Browser Tester');
+  localStorage.setItem('test_login_time', new Date().toISOString());
+  document.getElementById('status').textContent = '已设置 login cookie + localStorage';
+}
+function clearLogin() {
+  document.cookie = 'test_login_token=; max-age=0; path=/';
+  localStorage.removeItem('test_user');
+  localStorage.removeItem('test_login_time');
+  document.getElementById('status').textContent = '已清除';
+}
+function checkLogin() {
+  var cookie = document.cookie;
+  var hasToken = cookie.indexOf('test_login_token') >= 0;
+  var user = localStorage.getItem('test_user');
+  var loginTime = localStorage.getItem('test_login_time');
+  document.getElementById('status').textContent =
+    'cookie: ' + (hasToken ? 'YES' : 'NO') +
+    ' | user: ' + (user || 'none') +
+    ' | loginTime: ' + (loginTime || 'none');
+}
+checkLogin();
+</script>
+</body></html>

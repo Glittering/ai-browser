@@ -9,6 +9,10 @@ import { PageManager } from './page_manager.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// CRITICAL: set userData BEFORE app.whenReady — session/cookie storage
+// is initialized during ready, so setting it after loses persistence.
+app.setPath('userData', path.join(app.getPath('home'), '.ai-browser'));
+
 const PORT = 9223;
 const TAB_BAR_HEIGHT = 36;
 
@@ -86,8 +90,6 @@ function refreshTabBar() {
 }
 
 app.whenReady().then(() => {
-  // Set persistent user data directory so session survives process restart
-  app.setPath('userData', path.join(app.getPath('home'), '.ai-browser'));
   createWindow();
 });
 

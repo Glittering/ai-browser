@@ -157,6 +157,10 @@ class PageManager {
         contextIsolation: true,
         nodeIntegration: false,
         partition: 'persist:ai-browser',
+        // Ensure persistent storage for cookies, localStorage, IndexedDB
+        persistStorage: true,
+        webSecurity: true,
+        allowRunningInsecureContent: false,
       },
     });
     this.tabs.set(tabId, view);
