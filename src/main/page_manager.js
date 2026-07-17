@@ -234,6 +234,53 @@ class PageManager {
     view.setBounds({ x: 0, y: TAB_BAR_HEIGHT, width: bounds.width, height: bounds.height - TAB_BAR_HEIGHT });
   }
 
+  addSubscription(sessionId, events) {
+    const existing = this.subscriptions.get(sessionId) || new Set();
+    events.forEach(e => existing.add(e));
+    this.subscriptions.set(sessionId, existing);
+    if (events.includes('network') || events.includes('network_response')) this._startNetworkMonitor(sessionId);
+  }
+
+  removeSubscription(sessionId, events) {
+    const existing = this.subscriptions.get(sessionId);
+    if (!existing) return;
+    events.forEach(e => existing.delete(e));
+    if (existing.size === 0) {
+      this.subscriptions.delete(sessionId);
+      this._stopNetworkMonitor(sessionId);
+    }
+  }
+
+  _networkMonitors = new Map();
+  async _startNetworkMonitor(sessionId) {
+    if (this._networkMonitors.has(sessionId)) return;
+    const monitors = new Map();
+    this._networkMonitors.set(sessionId, monitors);
+    for (const [tabId, view] of this.tabs) {
+      try {
+        const wc = view.webContents;
+        wc.debugger.attach('1.3');
+        monitors.set(tabId, wc);
+        wc.debugger.sendCommand('Network.enable');
+        wc.debugger.on('message', (_event, method, params) => {
+          if (method === 'Network.responseReceived') {
+            const r = params.response;
+            this._broadcast('network_response', { url: r.url, status: r.status, statusText: r.statusText, mimeType: r.mimeType, tabId });
+          }
+          if (method === 'Network.loadingFailed') {
+            this._broadcast('network_response', { url: params.requestId || '', status: 0, statusText: 'Failed', errorText: params.errorText || '', tabId });
+          }
+        });
+      } catch(e) {}
+    }
+  }
+  async _stopNetworkMonitor(sessionId) {
+    const monitors = this._networkMonitors.get(sessionId);
+    if (!monitors) return;
+    for (const [, wc] of monitors) { try { wc.debugger.detach(); } catch(e) {} }
+    this._networkMonitors.delete(sessionId);
+  }
+
   close() {
     for (const [id, view] of this.tabs) {
       (view.webContents).destroy();
