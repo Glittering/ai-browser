@@ -167,6 +167,7 @@ function extractTree() {
     if (seen.has(el)) return null;
     seen.add(el);
     if (!el.isConnected) return null;
+    var tag = el.tagName.toLowerCase();
     if (!isSemantic(el)) {
       var elChildren = el.children;
       if (elChildren && elChildren.length > 0) {
@@ -778,9 +779,18 @@ contextBridge.exposeInMainWorld("__ai_browser__", {
 
 // Extract tree request
 ipcRenderer.on("ai:extract", function(_event, params) {
-  var tree = extractTree();
-  var ctx = extractPageContext();
-  ipcRenderer.send("ai:tree", { tree: tree, context: ctx });
+  try {
+    var tree = extractTree();
+    var ctx = extractPageContext();
+    ipcRenderer.send("ai:tree", { tree: tree, context: ctx });
+  } catch(e) {
+    console.error("[bridge] extractTree crash:", e.message, e.stack);
+    // Return empty fallback
+    ipcRenderer.send("ai:tree", {
+      tree: { id: "root", role: "generic", label: "[error: " + e.message + "]", states: ["visible"], actions: [], bounds: { x: 0, y: 0, width: 0, height: 0 } },
+      context: { modals: [], forms: [], session: {}, stats: {} }
+    });
+  }
 });
 
 // Action request
