@@ -4,6 +4,14 @@ import { parseMessage, ERROR_CODES } from '../shared/protocol.js';
 
 let wss = null;
 
+// Helper: search tree by field value
+function findInTree(node, field, value) {
+  if (!node) return null;
+  if (node[field] && node[field].indexOf && node[field].indexOf(value) >= 0) return node;
+  if (node.children) for (const c of node.children) { const f = findInTree(c, field, value); if (f) return f; }
+  return null;
+}
+
 export function startWSServer(pageManager, port = 9223) {
   wss = new WebSocketServer({ port });
 
@@ -106,6 +114,58 @@ export function startWSServer(pageManager, port = 9223) {
           case 'ui.get_focused': {
             const result = await pageManager.getFocused(tabId);
             send({ jsonrpc: '2.0', id, result });
+            break;
+          }
+          // === ui.wait — poll until condition or timeout ===
+          case 'ui.wait': {
+            // params: { condition: 'button_enabled'|'modal_appeared'|'text_contains', target, text, timeout_ms }
+            const timeoutMs = params.timeout_ms || 10000;
+            const pollMs = 500;
+            const startTime = Date.now();
+            let satisfied = false;
+
+            const poll = async () => {
+              while (Date.now() - startTime < timeoutMs) {
+                const result = await pageManager.getTree(false, tabId);
+                const tree = result?.tree;
+                const ctx = result?.context;
+
+                if (params.condition === 'button_enabled' && params.target) {
+                  // Find button by label in tree
+                  const btn = findInTree(tree, 'label', params.target);
+                  if (btn && (!btn.states || btn.states.indexOf('disabled') < 0)) {
+                    satisfied = true; break;
+                  }
+                }
+                if (params.condition === 'modal_appeared') {
+                  if (ctx?.modals && ctx.modals.length > 0) { satisfied = true; break; }
+                }
+                if (params.condition === 'text_contains' && params.text) {
+                  const bodyText = await pageManager.evaluate('document.body.innerText', tabId);
+                  if (bodyText && bodyText.indexOf(params.text) >= 0) { satisfied = true; break; }
+                }
+                if (params.condition === 'url_contains' && params.text) {
+                  const url = await pageManager.evaluate('location.href', tabId);
+                  if (url && url.indexOf(params.text) >= 0) { satisfied = true; break; }
+                }
+
+                await new Promise(r => setTimeout(r, pollMs));
+              }
+            };
+
+            await poll();
+            send({ jsonrpc: '2.0', id, result: { satisfied, elapsed_ms: Date.now() - startTime } });
+            break;
+          }
+          // === ui.scroll — scroll page or element ===
+          case 'ui.scroll': {
+            const direction = params.direction || 'down';
+            const amount = params.amount || 500;
+            const js = params.target
+              ? `document.querySelector('[data-ai-id="${params.target}"]').scrollIntoView({behavior:'instant',block:'center'})`
+              : `window.scrollBy(0, ${direction === 'down' ? amount : -amount})`;
+            await pageManager.evaluate(js, tabId);
+            send({ jsonrpc: '2.0', id, result: { ok: true } });
             break;
           }
           default:

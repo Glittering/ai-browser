@@ -662,30 +662,80 @@ function scanMessages() {
 
 function bindObserver() {
   if (observer) observer.disconnect();
-  observer = new MutationObserver(function() {
-    // Captcha detection
-    var cap = scanCaptcha();
-    if (cap.length > 0) {
-      var sig = JSON.stringify(cap.map(function(c) { return c.cls + "|" + c.bounds.width + "x" + c.bounds.height; }));
-      if (sig !== lastCaptchaSig) {
-        lastCaptchaSig = sig;
-        ipcRenderer.send("ai:event", { event: "captcha_appeared", data: { elements: cap } });
+  observer = new MutationObserver(function(mutations) {
+    var stateChanges = [];
+
+    for (var mi = 0; mi < mutations.length; mi++) {
+      var m = mutations[mi];
+
+      // Captcha detection (deduplicated)
+      var cap = scanCaptcha();
+      if (cap.length > 0) {
+        var sig = JSON.stringify(cap.map(function(c) { return c.cls + "|" + c.bounds.width + "x" + c.bounds.height; }));
+        if (sig !== lastCaptchaSig) {
+          lastCaptchaSig = sig;
+          ipcRenderer.send("ai:event", { event: "captcha_appeared", data: { elements: cap } });
+        }
+      }
+
+      // Message/toast detection (deduplicated)
+      var msg = scanMessages();
+      if (msg.length > 0) {
+        var msig = JSON.stringify(msg.map(function(m) { return m.text; }));
+        if (msig !== lastMessageSig) {
+          lastMessageSig = msig;
+          ipcRenderer.send("ai:event", { event: "message_appeared", data: { messages: msg } });
+        }
+      }
+
+      // State changes — disabled, class, open, checked, aria-expanded
+      if (m.type === "attributes") {
+        var attrName = (m.attributeName || "").toLowerCase();
+        var trackedAttrs = ["disabled", "class", "open", "checked", "aria-expanded", "aria-selected", "hidden", "value", "readonly"];
+        if (trackedAttrs.indexOf(attrName) >= 0) {
+          var el = m.target;
+          if (el instanceof HTMLElement) {
+            var aiId = el.getAttribute("data-ai-id");
+            if (aiId) {
+              stateChanges.push({
+                type: "state_changed",
+                targetId: aiId,
+                attribute: attrName,
+                value: el.getAttribute(attrName)
+              });
+            }
+          }
+        }
+      }
+
+      // DOM structure changes
+      if (m.type === "childList") {
+        var parentId = m.target instanceof HTMLElement ? m.target.getAttribute("data-ai-id") : null;
+        if (m.addedNodes.length > 0 || m.removedNodes.length > 0) {
+          stateChanges.push({
+            type: "dom_changed",
+            parentId: parentId,
+            added: m.addedNodes.length,
+            removed: m.removedNodes.length
+          });
+        }
       }
     }
 
-    // Message/toast detection
-    var msg = scanMessages();
-    if (msg.length > 0) {
-      var msig = JSON.stringify(msg.map(function(m) { return m.text; }));
-      if (msig !== lastMessageSig) {
-        lastMessageSig = msig;
-        ipcRenderer.send("ai:event", { event: "message_appeared", data: { messages: msg } });
-      }
+    // Batch send state changes
+    if (stateChanges.length > 0) {
+      var batch = [];
+      for (var si = 0; si < Math.min(stateChanges.length, 20); si++) batch.push(stateChanges[si]);
+      ipcRenderer.send("ai:event", { event: "state_changed", data: { changes: batch } });
     }
   });
 
   observer.observe(document.body, {
-    childList: true, subtree: true, attributes: true
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ["disabled", "class", "open", "checked", "aria-expanded", "aria-selected", "hidden", "value", "readonly"],
+    characterData: true
   });
 
   // Initial scan
