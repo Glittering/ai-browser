@@ -23,21 +23,39 @@ class PageManager {
   }
 
   _setupIPC() {
-    // Tree from renderer — now includes tabId
+    const self = this;
+    // Store pending requests keyed by requestId: { resolve, reject, webContentsId }
     ipcMain.on('ai:tree', (_event, payload) => {
-      // payload is {tree, context} from bridge v3
-      for (const [id, pending] of this._pendingRequests) {
+      const senderId = _event.sender.id;
+      // Match pending request from the same webContents
+      for (const [id, pending] of self._pendingRequests) {
+        if (pending.webContentsId === senderId) {
+          pending.resolve(payload);
+          self._pendingRequests.delete(id);
+          return;
+        }
+      }
+      // Fallback: resolve first pending if sender matching fails
+      for (const [id, pending] of self._pendingRequests) {
         pending.resolve(payload);
-        this._pendingRequests.delete(id);
-        break;
+        self._pendingRequests.delete(id);
+        return;
       }
     });
 
     ipcMain.on('ai:action_result', (_event, result) => {
-      for (const [id, pending] of this._pendingRequests) {
+      const senderId = _event.sender.id;
+      for (const [id, pending] of self._pendingRequests) {
+        if (pending.webContentsId === senderId) {
+          pending.resolve(result);
+          self._pendingRequests.delete(id);
+          return;
+        }
+      }
+      for (const [id, pending] of self._pendingRequests) {
         pending.resolve(result);
-        this._pendingRequests.delete(id);
-        break;
+        self._pendingRequests.delete(id);
+        return;
       }
     });
 
@@ -105,7 +123,7 @@ class PageManager {
 
     return new Promise((resolve, reject) => {
       const id = ++this._requestId;
-      this._pendingRequests.set(id, { resolve, reject });
+      this._pendingRequests.set(id, { resolve, reject, webContentsId: view.webContents.id });
       view.webContents.send('ai:extract', { focusedOnly });
       setTimeout(() => {
         if (this._pendingRequests.has(id)) {
@@ -123,7 +141,7 @@ class PageManager {
 
     return new Promise((resolve, reject) => {
       const id = ++this._requestId;
-      this._pendingRequests.set(id, { resolve, reject });
+      this._pendingRequests.set(id, { resolve, reject, webContentsId: view.webContents.id });
       view.webContents.send('ai:action', { action, target, params });
       setTimeout(() => {
         if (this._pendingRequests.has(id)) {
