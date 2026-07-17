@@ -70,6 +70,9 @@ function extractTree() {
     if (el.contentEditable === "true" || el.getAttribute("contenteditable") === "true") return true;
     if (isPureLayout(el)) return false;
     if (tag === "div" || tag === "span") return false;
+    // Non-interactive/non-visible tags — never semantic
+    var EXCLUDED_TAGS = ["script", "link", "style", "meta", "noscript", "br", "wbr", "param", "source", "track"];
+    if (EXCLUDED_TAGS.indexOf(tag) >= 0) return false;
     return true;
   }
 

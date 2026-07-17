@@ -24,18 +24,8 @@ class PageManager {
 
   _setupIPC() {
     const self = this;
-    // Store pending requests keyed by requestId: { resolve, reject, webContentsId }
     ipcMain.on('ai:tree', (_event, payload) => {
-      const senderId = _event.sender.id;
-      // Match pending request from the same webContents
-      for (const [id, pending] of self._pendingRequests) {
-        if (pending.webContentsId === senderId) {
-          pending.resolve(payload);
-          self._pendingRequests.delete(id);
-          return;
-        }
-      }
-      // Fallback: resolve first pending if sender matching fails
+      // Simple FIFO — works for single-client, breaks with multiple
       for (const [id, pending] of self._pendingRequests) {
         pending.resolve(payload);
         self._pendingRequests.delete(id);
@@ -44,14 +34,6 @@ class PageManager {
     });
 
     ipcMain.on('ai:action_result', (_event, result) => {
-      const senderId = _event.sender.id;
-      for (const [id, pending] of self._pendingRequests) {
-        if (pending.webContentsId === senderId) {
-          pending.resolve(result);
-          self._pendingRequests.delete(id);
-          return;
-        }
-      }
       for (const [id, pending] of self._pendingRequests) {
         pending.resolve(result);
         self._pendingRequests.delete(id);
@@ -123,7 +105,7 @@ class PageManager {
 
     return new Promise((resolve, reject) => {
       const id = ++this._requestId;
-      this._pendingRequests.set(id, { resolve, reject, webContentsId: view.webContents.id });
+      this._pendingRequests.set(id, { resolve, reject });
       view.webContents.send('ai:extract', { focusedOnly });
       setTimeout(() => {
         if (this._pendingRequests.has(id)) {
@@ -141,7 +123,7 @@ class PageManager {
 
     return new Promise((resolve, reject) => {
       const id = ++this._requestId;
-      this._pendingRequests.set(id, { resolve, reject, webContentsId: view.webContents.id });
+      this._pendingRequests.set(id, { resolve, reject });
       view.webContents.send('ai:action', { action, target, params });
       setTimeout(() => {
         if (this._pendingRequests.has(id)) {
