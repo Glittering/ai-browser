@@ -10,6 +10,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 function extractTree() {
   var seen = new WeakSet();
   var counter = 0;
+  var VERSION_TAG = "v6.9";
 
   function isHidden(el) {
     if (!(el instanceof HTMLElement)) return true;
@@ -56,7 +57,7 @@ function extractTree() {
     "a","button","input","select","textarea","option","details","dialog",
     "summary","video","audio","canvas","svg","img",
     "table","ul","ol","li","h1","h2","h3","h4","h5","h6","p","label","form",
-    "nav","main","header","footer","section","article","aside"
+    "nav","main","header","footer","section","article","aside","iframe"
   ];
 
   function isSemantic(el) {
@@ -211,6 +212,14 @@ function extractTree() {
       actions: actions,
       bounds: bounds
     };
+    // Attach current value for input/textarea/contenteditable
+    if (tag === "input" || tag === "textarea" || tag === "select") {
+      var v = el.value;
+      if (v !== undefined && v !== "" && v !== null) node.value = v.slice(0, 200);
+    } else if (el.contentEditable === "true" || el.getAttribute("contenteditable") === "true") {
+      var innerText = el.innerText;
+      if (innerText && innerText.trim()) node.value = innerText.slice(0, 200);
+    }
     if (Object.keys(attributes).length) node.attributes = attributes;
     if (editorType) node.editor_type = editorType;
 
@@ -245,9 +254,76 @@ function extractTree() {
   }
 
   var root = process(document.body);
+  // Fallback: explicitly scan for iframes missed by process() traversal
+  var allIframes = document.querySelectorAll("iframe");
+  var extraIframes = [];
+  for (var ii = 0; ii < allIframes.length; ii++) {
+    var ifr = allIframes[ii];
+    var iframeBody = null;
+    var iframeText = "";
+    try {
+      var ifrDoc = ifr.contentDocument || ifr.contentWindow.document;
+      if (ifrDoc && ifrDoc.body) {
+        iframeText = (ifrDoc.body.innerText || "").slice(0, 200);
+        // Use a fresh sub-process for iframe body
+        var cb = function(el) {
+          if (!el || seen.has(el)) return null;
+          seen.add(el);
+          if (!el.isConnected) return null;
+          var tg = el.tagName.toLowerCase();
+          var lbl = el.getAttribute("aria-label") || el.getAttribute("title") || (el.textContent || "").slice(0, 40) || el.getAttribute("placeholder") || "";
+          var rl = tg;
+          if (tg === "button") rl = "button";
+          else if (tg === "input") { var ty = (el.getAttribute("type") || "").toLowerCase(); rl = (ty === "checkbox") ? "checkbox" : (ty === "radio") ? "radio" : "textbox"; }
+          else if (tg === "textarea") rl = "textbox";
+          else if (tg === "a") rl = "link";
+          else if (tg === "img") rl = "image";
+          else if (tg === "iframe") rl = "iframe";
+          else if (el.contentEditable === "true" || el.getAttribute("contenteditable") === "true") rl = "textbox";
+          var ariaRole = (el.getAttribute("role") || "").toLowerCase();
+          if (ariaRole) rl = ariaRole;
+          // Skip pure layout divs/spans inside iframe too
+          if (tg === "div" || tg === "span") {
+            if (!el.hasAttribute("role") && !(el.contentEditable === "true" || el.getAttribute("contenteditable") === "true")) {
+              // recurse into children but don't create a node
+              var ch = el.children;
+              if (ch && ch.length) {
+                var results = [];
+                for (var ci = 0; ci < ch.length; ci++) { var cn = cb(ch[ci]); if (cn) { if (Array.isArray(cn)) results.push.apply(results, cn); else results.push(cn); } }
+                return results.length ? results : null;
+              }
+              return null;
+            }
+          }
+          var nd = { id: "iframe-el-" + counter++, role: rl, label: lbl };
+          var ch2 = el.children;
+          if (ch2 && ch2.length) {
+            var cc = [];
+            for (var ci2 = 0; ci2 < ch2.length; ci2++) { var cn2 = cb(ch2[ci2]); if (cn2) { if (Array.isArray(cn2)) cc.push.apply(cc, cn2); else cc.push(cn2); } }
+            if (cc.length) nd.children = cc;
+          }
+          return nd;
+        };
+        iframeBody = cb(ifrDoc.body);
+      }
+    } catch(e) {}
+    if (iframeBody) {
+      extraIframes.push({ id: "iframe-" + counter++, role: "iframe_body", label: (ifr.title || ifr.name || "iframe content"), children: iframeBody.children || (Array.isArray(iframeBody) ? iframeBody : [iframeBody]), text: iframeText });
+    } else if (iframeText) {
+      extraIframes.push({ id: "iframe-text-" + counter++, role: "iframe_body", label: ifr.title || ifr.name || "iframe content", text: iframeText });
+    } else {
+      // At least add the iframe node itself
+      extraIframes.push({ id: "iframe-empty-" + counter++, role: "iframe", label: ifr.title || ifr.name || "iframe" });
+    }
+  }
+  if (extraIframes.length && root) {
+    if (!root.children) root.children = [];
+    root.children.push.apply(root.children, extraIframes);
+  }
   if (!root) {
     return { id: "root", role: "generic", label: "", states: ["visible"], actions: [], bounds: { x: 0, y: 0, width: 0, height: 0 } };
   }
+  root._debug = { iframe_count: extraIframes.length, version: VERSION_TAG };
   return root;
 }
 

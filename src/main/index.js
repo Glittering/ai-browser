@@ -1,6 +1,6 @@
 // main/index.js — Electron entry v5 (multi-tab, real UI)
 // One process, one WS server, multiple tabs with real tab bar.
-import { app, BrowserWindow, BrowserView, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, BrowserView, ipcMain, shell, session } from 'electron';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startWSServer } from './ws_server.js';
@@ -90,7 +90,11 @@ function refreshTabBar() {
 }
 
 app.whenReady().then(() => {
-  createWindow();
+  session.fromPartition('persist:ai-browser').clearCache().then(() => {
+    createWindow();
+  }).catch(() => {
+    createWindow();
+  });
 });
 
 app.on('window-all-closed', () => {
