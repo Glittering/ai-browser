@@ -168,6 +168,12 @@ export function startWSServer(pageManager, port = 9223) {
             send({ jsonrpc: '2.0', id, result: { ok: true } });
             break;
           }
+          // === ui.network_body — get HTTP response body by URL pattern ===
+          case 'ui.network_body': {
+            const body = await pageManager.getNetworkBody(params.url_pattern || '', tabId);
+            send({ jsonrpc: '2.0', id, result: { body: body } });
+            break;
+          }
           default:
             send({ jsonrpc: '2.0', id, error: { code: -32601, message: 'Method not found' } });
             break;

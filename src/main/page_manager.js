@@ -241,6 +241,26 @@ class PageManager {
     if (events.includes('network') || events.includes('network_response')) this._startNetworkMonitor(sessionId);
   }
 
+  _networkRequestMap = new Map(); // requestId -> {url, tabId, finished}
+
+  async getNetworkBody(urlPattern, tabId) {
+    // Find matching finished request and get body via CDP
+    const tid = tabId !== undefined ? tabId : this.activeTab;
+    for (const [requestId, entry] of this._networkRequestMap) {
+      if (entry.tabId === tid && entry.finished && entry.url.indexOf(urlPattern) >= 0) {
+        const monitors = this._networkMonitors.get([...this._networkMonitors.keys()].pop());
+        if (!monitors) continue;
+        const wc = monitors.get(tid);
+        if (!wc) continue;
+        try {
+          const result = await wc.debugger.sendCommand('Network.getResponseBody', { requestId });
+          return result.body ? result.body.slice(0, 5000) : null;
+        } catch(e) { return null; }
+      }
+    }
+    return null;
+  }
+
   removeSubscription(sessionId, events) {
     const existing = this.subscriptions.get(sessionId);
     if (!existing) return;
@@ -265,10 +285,23 @@ class PageManager {
         wc.debugger.on('message', (_event, method, params) => {
           if (method === 'Network.responseReceived') {
             const r = params.response;
+            const requestId = params.requestId;
+            // Store requestId -> url mapping for body retrieval
+            self._networkRequestMap.set(requestId, { url: r.url, tabId });
             this._broadcast('network_response', { url: r.url, status: r.status, statusText: r.statusText, mimeType: r.mimeType, tabId });
           }
+          if (method === 'Network.loadingFinished') {
+            const requestId = params.requestId;
+            // Tag request as body-available
+            const entry = self._networkRequestMap.get(requestId);
+            if (entry) entry.finished = true;
+          }
           if (method === 'Network.loadingFailed') {
-            this._broadcast('network_response', { url: params.requestId || '', status: 0, statusText: 'Failed', errorText: params.errorText || '', tabId });
+            const requestId = params.requestId || '';
+            // Tag failure
+            const entry = self._networkRequestMap.get(requestId);
+            const url = entry ? entry.url : requestId;
+            this._broadcast('network_response', { url: url, status: 0, statusText: 'Failed', errorText: params.errorText || '', tabId });
           }
         });
       } catch(e) {}

@@ -280,11 +280,36 @@ function extractPageContext() {
 
       var fieldList = [];
       for (var fi = 0; fi < inps.length; fi++) {
-        fieldList.push({
-          type: inps[fi].type || inps[fi].tagName.toLowerCase(),
-          placeholder: (inps[fi].placeholder || "").slice(0, 40),
-          required: inps[fi].required || false
-        });
+        var inp = inps[fi];
+        var fieldEntry = {
+          type: inp.type || inp.tagName.toLowerCase(),
+          placeholder: (inp.placeholder || "").slice(0, 40),
+          required: inp.required || false
+        };
+
+        // Field-level error: aria-describedby or adjacent error sibling
+        var fieldError = null;
+        var descId = inp.getAttribute("aria-describedby");
+        if (descId) {
+          var descEl = document.getElementById(descId);
+          if (descEl && descEl.offsetParent !== null) {
+            var dt = (descEl.textContent || "").trim();
+            if (dt && dt.length < 100) fieldError = dt;
+          }
+        }
+        if (!fieldError) {
+          // Check siblings/parent for error-class elements near this field
+          var parent = inp.parentElement;
+          if (parent) {
+            var siblings = parent.querySelectorAll("[class*=error],[class*=err],[class*=invalid],[role=alert]");
+            for (var sbi = 0; sbi < siblings.length; sbi++) {
+              var st = (siblings[sbi].textContent || "").trim();
+              if (st && st.length > 0 && st.length < 100) { fieldError = st; break; }
+            }
+          }
+        }
+        if (fieldError) fieldEntry.error = fieldError;
+        fieldList.push(fieldEntry);
       }
 
       // Errors — 14 selectors + key phrase scan
@@ -813,6 +838,21 @@ ipcRenderer.on("ai:evaluate", function(_event, data) {
 // Start watchers on DOM ready
 function startWatchers() {
   bindObserver();
+
+  // Catch JS errors — push to Agent
+  var oldOnError = window.onerror;
+  window.onerror = function(msg, url, line, col, err) {
+    ipcRenderer.send("ai:event", { event: "js_error", data: { message: String(msg), url: String(url), line: line, col: col, stack: (err && err.stack ? String(err.stack).slice(0, 300) : "") } });
+    if (oldOnError) return oldOnError.apply(this, arguments);
+    return false;
+  };
+
+  // Catch unhandled promise rejections
+  window.addEventListener("unhandledrejection", function(ev) {
+    var reason = ev.reason;
+    var msg = reason instanceof Error ? reason.message : String(reason);
+    ipcRenderer.send("ai:event", { event: "js_error", data: { message: msg, type: "unhandledrejection", stack: (reason instanceof Error && reason.stack ? String(reason.stack).slice(0, 300) : "") } });
+  });
 }
 if (document.readyState === "complete" || document.readyState === "interactive") {
   startWatchers();
