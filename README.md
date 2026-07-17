@@ -1,49 +1,102 @@
 # AI Browser
 
-**An Electron browser that AI agents can use — without screenshots, without OCR, without guessing coordinates.**
+**An Electron browser for AI agents. No screenshots. No OCR. Just the DOM.**
 
-Human sees a normal web page. AI gets a structured semantic tree via WebSocket JSON-RPC:
+A human sees a normal page. An AI Agent gets a structured semantic tree — with element values, error toasts, red asterisks, character limits, iframe content, and real-time events — all pushed through a single WebSocket JSON-RPC port.
 
-- Read any page: `ui.get_tree` → full semantic UI tree (roles, labels, actions, bounds)
-- Click any button: `ui.act("click", "chat-submit-button")`
-- Type in any input: `ui.act("type", "code_suggest", {text:"贵州茅台"})`
-- Execute JavaScript: `ui.evaluate("document.title")`
-- Extract articles: `browse_read_article` → title + all paragraphs
+## Why AI Browser exists
 
-**No computer vision. No coordinate guessing. No brittle selectors.** Agent talks to the browser through a stable API, same API every website.
+Current AI browser tools try one of two approaches — both broken:
 
-## Why
+1. **Screenshot + vision model** (Playwright + GPT-4V, OpenAI Operator) — expensive, slow, misses transient toasts, can't read iframes, can't distinguish disabled buttons.
+2. **Hard-coded selectors** (Selenium, Puppeteer) — break on every site redesign.
 
-AI agents today interact with web pages by:
-1. Taking screenshots and hoping a vision model guesses the right button
-2. Hard-coding CSS selectors that break when the site redesigns
-3. Injecting JavaScript hacks per-site
+**AI Browser takes the DOM tree directly** and converts it into a semantic tree that an Agent can read. No image guessing. No brittle selectors. Works on any website, first try.
 
-Every site works differently. Every approach breaks when the page changes.
+## What AI Browser sees that others don't
 
-**AI Browser solves this with one simple abstraction:** the browser itself extracts a semantic tree of interactive elements from the DOM. Labeled. Typed. Actionable. Agent reads the tree and acts on element IDs — works on Baidu, East Money, JD, 36kr, GitHub, any website, first try.
+| Capability | Playwright + screenshots | OpenAI Operator | **AI Browser** |
+|---|---|---|---|
+| Page structure | Guess from image | Guess from image | **Semantic tree: 100+ nodes, typed, labeled** |
+| Toast errors | Missed if transient | Missed if transient | **Real-time `message_appeared` push** |
+| Red `*` required marks | Maybe (if screenshot clear) | Maybe | **CSS `::before` pseudo-element detection** |
+| Character limits "0/256" | Maybe | Maybe | **Pattern extraction in context** |
+| Draft.js / CKEditor | No | No | **`editor_type` detection + execCommand insertText** |
+| Network API errors (403/404/500) | No | No | **CDP Network.enable, response bodies queryable** |
+| Vue/React input | Type events may fail | Unreliable | **Native value setter + input/change events** |
+| iframe editors (CKEditor) | Screenshot can't pierce | Can't see inside | **Recurse into same-origin iframes, extract body text** |
+| Login persistence | Re-login every time | Re-login every time | **Electron `persist:` partition, survives restart** |
+| Speed | Slow (screenshot + OCR per step) | Slow | **Fast (IPC DOM tree, tens of ms)** |
+| Cost | Vision tokens every step | Expensive | **Pure text tokens, no vision overhead** |
 
-## What makes it different
+## Real websites, real flows — verified
 
-| Other AI browser tools | AI Browser |
-|---|---|
-| Screenshot → vision model guesses | DOM → semantic tree. Exact, deterministic |
-| CSS selectors (brittle) | Element IDs from tree (stable per session) |
-| No action validation | `ui.act` returns `{success: true/false}` |
-| Single-page hacks | Works on every page. 54 unit tests prove it |
-| No captcha awareness | `captcha_appeared` event pushes to agent |
+| Website | What we did | Result |
+|---|---|---|
+| **CSDN** | Full publish flow: title + CKEditor body + tags + summary + click publish | Published successfully ✅ |
+| **Zhihu (知乎)** | Write page: Draft.js editor identified, execCommand insertText verified, all toolbar buttons (30) extracted | Full article ready to publish ✅ |
+| **Baidu (百度)** | Search "AI Browser" → result page | 65 nodes, clicked ✅ |
+| **East Money (东方财富)** | Stock code lookup | 2,458 nodes parsed ✅ |
+| **Hithink RoyalFlush (同花顺)** | Complex financial page | 124 nodes after crash fix ✅ |
+| **ModelScope (魔塔社区)** | Deepseek search + scroll | 508 result nodes ✅ |
 
-## Quick Start
+## API (WebSocket JSON-RPC 2.0, port 9223)
 
 ```bash
-git clone https://github.com/yourusername/ai-browser.git
+npm start   # Electron window opens with WS server on :9223
+```
+
+### Core methods
+
+| Method | What it does |
+|---|---|
+| `ui.navigate {url}` | Load any URL |
+| `ui.get_tree {}` | Full semantic DOM tree + context (modals, required hints, stats) |
+| `ui.act {action, target}` | Click, type, focus, scroll_to, set_content, clear |
+| `ui.evaluate {js}` | Run arbitrary JS, return value |
+| `ui.subscribe {events}` | Listen: `message_appeared`, `captcha_appeared`, `state_changed`, `network_response`, `dom_changed`, `js_error` |
+| `ui.wait {condition}` | Wait until button becomes enabled / modal appears / URL changes |
+| `ui.network_body {url_pattern}` | Fetch HTTP response body from CDP cache |
+
+### Multi-tab API
+
+| Method | What it does |
+|---|---|
+| `ui.new_tab {url}` | Open new tab, returns tab ID |
+| `ui.close_tab {tab}` | Close tab, auto-switch to first remaining |
+| `ui.set_active_tab {tab}` | Switch tabs |
+| `ui.list_tabs {}` | List all tabs with titles and URLs |
+
+### What `get_tree` returns
+
+```json
+{
+  "tree": {
+    "role": "textbox",
+    "label": "请输入文章标题（5～100个字）",
+    "value": "AI Browser 测试标题",
+    "states": ["visible", "focused"],
+    "actions": ["type", "clear", "focus"]
+  },
+  "context": {
+    "modals": [{"header": "博主不存在", "buttons": ["确定"]}],
+    "required_hints": ["0/256", "请选择", "*"],
+    "messages": [{"text": "发布成功", "type": "success"}],
+    "session": {"logged_in": true},
+    "stats": {"inputs": 20, "buttons": 35, "links": 94, "iframes": 2}
+  }
+}
+```
+
+## Quick start
+
+```bash
+git clone https://github.com/Glittering/ai-browser.git
 cd ai-browser
 npm install
-
-# Start the browser (Electron window opens)
 npm start
 
-# In another terminal, test the API
+# Test the API
 node -e "
 const WebSocket = require('ws');
 const ws = new WebSocket('ws://localhost:9223');
@@ -57,94 +110,51 @@ ws.on('open', () => {
 "
 ```
 
-## API (WebSocket JSON-RPC 2.0, port 9223)
-
-| Method | Params | Returns |
-|---|---|---|
-| `ui.navigate` | `{url}` | `{ok: true}` |
-| `ui.get_tree` | `{focusedOnly?}` | `{tree: {id,role,label,actions,bounds,children}}` |
-| `ui.act` | `{action, target, params?}` | `{success, error?}` |
-| `ui.evaluate` | `{js}` | `{value}` |
-| `ui.subscribe` | `{events: ["captcha_appeared"]}` | `{ok: true}` |
-| `ui.get_focused` | `{}` | `{focused_element_id}` |
-
-**Actions:** `click`, `type`, `clear`, `select`, `focus`, `hover`, `scroll_to`
-
-**Events (push):** `captcha_appeared`, `dom_change`
-
-## MCP Server (Claude Code / Cursor / Codex integration)
-
-AI Browser exposes 5 MCP tools via stdio. Any MCP-compatible agent can browse the web.
-
-```bash
-npm run mcp
-```
-
-Exposed tools: `browse_navigate`, `browse_get_tree`, `browse_act`, `browse_evaluate`, `browse_read_article`
-
-**Claude Code config (`.mcp.json`):**
-```json
-{
-  "mcpServers": {
-    "ai-browser": {
-      "command": "node",
-      "args": ["src/main/mcp_server.js"],
-      "cwd": "/path/to/ai-browser"
-    }
-  }
-}
-```
-
-## Real websites verified
-
-| Website | Nodes extracted | Actions verified |
-|---|---|---|
-| Baidu | 65 (1 textbox, 1 button, 31 links) | Search "AI浏览器" → result page ✅ |
-| East Money | 2,458 (992 links, 9 inputs) | Ty 股票代码 → stock page ✅ |
-| JD.com | 37 semantic nodes | Login → captcha detected ✅ |
-| 36kr.com | 30+ article links | Click article → full body extracted ✅ |
-| 12306.cn | Slide captcha detected | `captcha_appeared` push verified ✅ |
-| GitHub Trending | 14 repos parsed | `innerText` extraction ✅ |
-
 ## Architecture
 
 ```
-┌─────────────────────────────┐
-│  Electron (Chromium)         │
-│  ┌─────────────────────────┐ │
-│  │ Web Page (any site)     │ │
-│  │   ↓ extractTree()       │ │
-│  │   ↓ executeAction()     │ │
-│  │ preload/bridge.js (CJS) │ │
-│  └─────────────────────────┘ │
-│         ↕ IPC                │
-│  main/page_manager.js        │
-│         ↕                    │
-│  main/ws_server.js (9223)   │  ← Agent connects here
-│  main/mcp_server.js (stdio) │  ← Claude Code/Cursor via MCP
-└─────────────────────────────┘
+┌─────────────────────────────────┐
+│  Electron (Chromium)             │
+│                                  │
+│  any website DOM                 │
+│       ↓                          │
+│  preload/bridge.js (744 lines)   │
+│    extractTree() → semantic tree │
+│    extractPageContext() → modals │
+│    executeAction() → type/click  │
+│    bindObserver() → live events  │
+│       ↕ IPC                      │
+│  main/page_manager.js            │
+│    multi-tab BrowserView         │
+│    persist: session/cookies      │
+│    CDP Network monitor           │
+│       ↕                          │
+│  main/ws_server.js (:9223)       │ ← Agent connects here via WebSocket
+└─────────────────────────────────┘
 ```
 
-## Test Coverage
+**One Electron process. One WebSocket port. One preload bridge.** No microservices. No K8s. No screenshot pipeline.
+
+## Test coverage
 
 ```
-54 passed · 4 skipped (need Electron running) · 0 failed
+54 passed · 0 failed · 4 skipped (Electron-only)
 ├── Protocol: 14 tests (JSON-RPC parsing, error codes)
-├── Semantic Extractor: 16 tests (DOM→tree, hidden elements, containers)
+├── Semantic Extractor: 16 tests (DOM→tree, hidden, containers)
 ├── Action Binder: 10 tests (click, type, scroll, dialog)
-├── State Tracker: 9 tests (MutationObserver, text swaps, batch)
+├── State Tracker: 9 tests (MutationObserver, observer)
 └── WS Protocol: 5 tests (real Electron RPC round-trip)
 ```
 
-## Roadmap
+## Key improvements (v6 series)
 
-- [x] Core semantic extraction + action binding
-- [x] WebSocket JSON-RPC server
-- [x] Captcha detection with push notification
-- [x] MCP server (Claude Code integration)
-- [ ] CDP (Chrome DevTools Protocol) bridge — attach to existing browsers
-- [ ] Mobile browser via Android WebView
-- [ ] Agent Skills open standard submission (`browse_web` skill)
+- **v6.0**: Unified bridge.js — 1 file replaces semantic_extractor + action_binder + state_tracker
+- **v6.1-v6.2**: Draft.js detection, state_changed events (MutationObserver attributeFilter)
+- **v6.3**: Network monitoring via CDP (`network_response` event + `ui.network_body` API)
+- **v6.4**: iframe recursion into same-origin contentDocument
+- **v6.5-v6.7**: IPC routing fix, EXCLUDED_TAGS, critical var tag fix for complex pages
+- **v6.8**: Field-level error association + JS error capture (`window.onerror` → `js_error` event)
+- **v6.9**: iframe fallback scan + input `value` in tree nodes + clearCache on startup
 
 ## License
 
