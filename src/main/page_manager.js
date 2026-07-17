@@ -7,7 +7,7 @@ class PageManager {
   constructor(browserWindow) {
     this.window = browserWindow;
     this.tabs = new Map();       // tabId -> BrowserView
-    this.activeTab = 0;
+    this.activeTab = null;
     this.tabCounter = 0;
     this.subscriptions = new Map();
     this._pendingRequests = new Map();
@@ -160,8 +160,6 @@ class PageManager {
       },
     });
     this.tabs.set(tabId, view);
-    this.window.addBrowserView(view);
-    this._layoutView(view);
 
     // Mask automation fingerprint: remove Electron from UA
     view.webContents.setUserAgent(
@@ -169,10 +167,6 @@ class PageManager {
     );
 
     // Intercept window.open / new-window → create new tab instead
-    view.webContents.on('new-window', (event, urlToOpen) => {
-      event.preventDefault();
-      self.newTab(urlToOpen);
-    });
     view.webContents.setWindowOpenHandler(({ url: urlToOpen }) => {
       self.newTab(urlToOpen);
       return { action: 'deny' };
@@ -181,6 +175,7 @@ class PageManager {
     if (url) {
       view.webContents.loadURL(url);
     }
+    // setActive handles addBrowserView + layout — don't add twice
     this.setActive(tabId);
     return tabId;
   }
@@ -191,11 +186,17 @@ class PageManager {
     this.window.removeBrowserView(view);
     (view.webContents).destroy();
     this.tabs.delete(tabId);
-    if (this.activeTab === tabId) {
-      // switch to first remaining tab
+    if (this.activeTab === tabId || this.activeTab === null) {
+      // switch to first remaining tab — must re-addBrowserView
       const first = this.tabs.keys().next();
-      this.activeTab = first.done ? 0 : first.value;
-      if (!first.done) this._layoutView(this._getView(this.activeTab));
+      this.activeTab = first.done ? null : first.value;
+      if (!first.done) {
+        const nextView = this._getView(this.activeTab);
+        this.window.addBrowserView(nextView);
+        this._layoutView(nextView);
+        // Force repaint
+        nextView.webContents.setBackgroundThrottling(false);
+      }
     }
     return true;
   }
@@ -224,6 +225,9 @@ class PageManager {
     if (view) {
       this.window.addBrowserView(view);
       this._layoutView(view);
+      // Force focus + repaint — fixes white screen on tab switch
+      view.webContents.focus();
+      view.webContents.setBackgroundThrottling(false);
     }
     return true;
   }
