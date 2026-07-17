@@ -210,19 +210,32 @@ function extractTree() {
     if (Object.keys(attributes).length) node.attributes = attributes;
     if (editorType) node.editor_type = editorType;
 
-    // Children
+    // Children — including iframe content if same-origin
     var elChildren = el.children;
+    var childNodes = [];
+
+    // Recurse into same-origin iframes
+    if (tag === "iframe") {
+      try {
+        var iframeDoc = el.contentDocument || el.contentWindow.document;
+        if (iframeDoc && iframeDoc.body) {
+          var iframeBody = process(iframeDoc.body);
+          if (iframeBody) childNodes.push({ id: "iframe-" + (el.id || counter), role: "iframe_body", label: (el.title || el.name || "iframe content"), children: iframeBody.children || [iframeBody] });
+        }
+      } catch(e) { /* cross-origin */ }
+    }
+
     if (elChildren && elChildren.length) {
-      var children = [];
       for (var ci = 0; ci < elChildren.length; ci++) {
         var childNode = process(elChildren[ci]);
         if (childNode) {
-          if (Array.isArray(childNode)) children.push.apply(children, childNode);
-          else children.push(childNode);
+          if (Array.isArray(childNode)) childNodes.push.apply(childNodes, childNode);
+          else childNodes.push(childNode);
         }
       }
-      if (children.length) node.children = children;
     }
+
+    if (childNodes.length) node.children = childNodes;
 
     return node;
   }
