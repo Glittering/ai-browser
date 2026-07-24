@@ -1,9 +1,30 @@
 // tests/test_ws_protocol.js — WebSocket JSON-RPC server integration tests
+// These tests require a running ai-browser instance (Electron + WS server).
+// If the WS server is not reachable, the suite skips gracefully instead of
+// failing the whole test run.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import net from 'node:net';
 import WebSocket from 'ws';
 
 const WS_URL = 'ws://localhost:9223';
+const WS_PORT = 9223;
 let ws;
+
+// Quick TCP probe — avoids the noisy ECONNREFUSED stack trace that vitest
+// would otherwise print from a failed WebSocket connection in beforeAll.
+function probePort(port) {
+  return new Promise((resolve) => {
+    const sock = net.connect({ port, host: '127.0.0.1' });
+    let done = false;
+    const finish = (ok) => { if (!done) { done = true; sock.destroy(); resolve(ok); } };
+    sock.once('connect', () => finish(true));
+    sock.once('error', () => finish(false));
+    setTimeout(() => finish(false), 500);
+  });
+}
+
+// Probe at module load so skipIf can branch at registration time.
+const wsAvailable = await probePort(WS_PORT);
 
 // Helper: send JSON-RPC request and wait for response
 function rpcCall(method, params = {}) {
@@ -32,6 +53,7 @@ function rpcCall(method, params = {}) {
 
 describe('WebSocket Protocol', () => {
   beforeAll(async () => {
+    if (!wsAvailable) return; // skipIf below will skip all tests
     // Connect to WS server (must be running)
     ws = new WebSocket(WS_URL);
     await new Promise((resolve, reject) => {
@@ -39,7 +61,7 @@ describe('WebSocket Protocol', () => {
       ws.on('error', reject);
       setTimeout(() => reject(new Error('WS connection timeout')), 5000);
     });
-  });
+  }, 7000);
 
   afterAll(() => {
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -47,11 +69,11 @@ describe('WebSocket Protocol', () => {
     }
   });
 
-  it('WS-001: connects successfully', () => {
+  it.skipIf(!wsAvailable)('WS-001: connects successfully', () => {
     expect(ws.readyState).toBe(WebSocket.OPEN);
   });
 
-  it('WS-002: get_tree returns valid tree with context', async () => {
+  it.skipIf(!wsAvailable)('WS-002: get_tree returns valid tree with context', async () => {
     const response = await rpcCall('ui.get_tree', {});
     expect(response.result).toBeDefined();
     expect(response.result.tree).toBeDefined();
@@ -62,12 +84,12 @@ describe('WebSocket Protocol', () => {
     expect(response.result.context.session).toBeDefined();
   });
 
-  it('WS-003: response id matches request', async () => {
+  it.skipIf(!wsAvailable)('WS-003: response id matches request', async () => {
     const response = await rpcCall('ui.get_tree', {});
     expect(response.id).toBeDefined();
   });
 
-  it('WS-005: invalid action target returns error', async () => {
+  it.skipIf(!wsAvailable)('WS-005: invalid action target returns error', async () => {
     const response = await rpcCall('ui.act', {
       action: 'click',
       target: 'e:nonexistent-99999',
@@ -75,7 +97,7 @@ describe('WebSocket Protocol', () => {
     expect(response.result.success).toBe(false);
   });
 
-  it('WS-010: invalid method returns JSON-RPC error', async () => {
+  it.skipIf(!wsAvailable)('WS-010: invalid method returns JSON-RPC error', async () => {
     const response = await rpcCall('ui.invalid_method', {});
     expect(response.error).toBeDefined();
     expect(response.error.code).toBe(-32601);

@@ -50,22 +50,65 @@ npm start   # Electron window opens with WS server on :9223
 
 | Method | What it does |
 |---|---|
-| `ui.navigate {url}` | Load any URL |
-| `ui.get_tree {}` | Full semantic DOM tree + context (modals, required hints, stats) |
-| `ui.act {action, target}` | Click, type, focus, scroll_to, set_content, clear |
-| `ui.evaluate {js}` | Run arbitrary JS, return value |
+| `ui.navigate {url, tab?}` | Load any URL |
+| `ui.get_tree {focusedOnly?, tab?}` | Full semantic DOM tree + context (modals, required hints, stats) |
+| `ui.act {action, target, params?, tab?}` | Click, type, focus, scroll_to, set_content, clear |
+| `ui.evaluate {js, tab?}` | Run arbitrary JS, return value |
 | `ui.subscribe {events}` | Listen: `message_appeared`, `captcha_appeared`, `state_changed`, `network_response`, `dom_changed`, `js_error` |
-| `ui.wait {condition}` | Wait until button becomes enabled / modal appears / URL changes |
-| `ui.network_body {url_pattern}` | Fetch HTTP response body from CDP cache |
+| `ui.wait {condition, tab?}` | Wait until button becomes enabled / modal appears / URL changes |
+| `ui.scroll {direction, amount?, target?, tab?}` | Scroll page or scroll element into view |
+| `ui.network_body {url_pattern, tab?}` | Fetch HTTP response body from CDP cache |
+| `ui.quit {}` | Gracefully shut down the Electron process |
 
 ### Multi-tab API
 
 | Method | What it does |
 |---|---|
-| `ui.new_tab {url}` | Open new tab, returns tab ID |
+| `ui.new_tab {url?}` | Open new tab, returns tab ID |
 | `ui.close_tab {tab}` | Close tab, auto-switch to first remaining |
 | `ui.set_active_tab {tab}` | Switch tabs |
 | `ui.list_tabs {}` | List all tabs with titles and URLs |
+
+## MCP server (Model Context Protocol)
+
+AI Browser ships with an MCP server so any MCP-compatible agent (Claude Code,
+Cursor, Codex) can drive the browser as a tool — **including owning the full
+process lifecycle** (auto-launch on first call, auto-shutdown when done).
+
+```bash
+npm run mcp   # starts stdio MCP server; auto-spawns Electron if not running
+```
+
+### MCP tools (14)
+
+| Tool | Description |
+|---|---|
+| `browse_navigate {url, tab?}` | Navigate active or specified tab to a URL |
+| `browse_get_tree {focused_only?, tab?}` | Get the semantic tree of the page |
+| `browse_act {action, target, text?, value?, tab?}` | Click / type / clear / focus / hover / scroll_to |
+| `browse_evaluate {js, tab?}` | Run JS in page context (length + Node-identifier guard) |
+| `browse_read_article {tab?}` | Extract main article (title + paragraphs) from common selectors |
+| `browse_scroll {direction, amount?, target?, tab?}` | Scroll page or element |
+| `browse_wait {condition, target?, text?, timeout_ms?, tab?}` | Wait until condition met |
+| `browse_list_tabs {}` | List all open tabs |
+| `browse_new_tab {url?}` | Open a new tab |
+| `browse_close_tab {tab}` | Close a tab by id |
+| `browse_set_active_tab {tab}` | Switch active tab |
+| `browse_network_body {url_pattern, tab?}` | Fetch HTTP response body |
+| `browse_subscribe {events}` | Subscribe to page events |
+| `browse_quit {}` | Shut down the Electron process |
+
+### Agent-driven lifecycle
+
+The MCP server probes port 9223 on startup; if not listening, it spawns
+`npm start` (detached) and waits up to 30s for the WS server to come up. The
+agent can call `browse_quit` when done to release the Electron process. No
+human needs to start or stop the browser — the agent owns the full lifecycle.
+
+**Security:** `contextIsolation:true` + `nodeIntegration:false` block renderer
+access to Node; `browse_evaluate` additionally enforces a 5000-char limit and
+rejects Node-specific identifiers (`process.`, `require(`, `child_process`,
+`globalThis.process`) as defense-in-depth.
 
 ### What `get_tree` returns
 
@@ -138,13 +181,17 @@ ws.on('open', () => {
 ## Test coverage
 
 ```
-54 passed · 0 failed · 4 skipped (Electron-only)
+49 passed · 0 failed · 9 skipped (WS suite skips when Electron not running)
 ├── Protocol: 14 tests (JSON-RPC parsing, error codes)
 ├── Semantic Extractor: 16 tests (DOM→tree, hidden, containers)
 ├── Action Binder: 10 tests (click, type, scroll, dialog)
 ├── State Tracker: 9 tests (MutationObserver, observer)
-└── WS Protocol: 5 tests (real Electron RPC round-trip)
+└── WS Protocol: 5 tests (real Electron RPC round-trip, skip-if-down)
 ```
+
+End-to-end MCP lifecycle test (17 steps: spawn MCP → auto-launch Electron →
+navigate zhihu/10jqka → click → read article → multi-tab → wait → quit)
+verified green; full browser process exits cleanly on `browse_quit`.
 
 ## Key improvements (v6 series)
 
@@ -155,6 +202,10 @@ ws.on('open', () => {
 - **v6.5-v6.7**: IPC routing fix, EXCLUDED_TAGS, critical var tag fix for complex pages
 - **v6.8**: Field-level error association + JS error capture (`window.onerror` → `js_error` event)
 - **v6.9**: iframe fallback scan + input `value` in tree nodes + clearCache on startup
+- **v6.10**: MCP server with 14 tools + auto-launch Electron + `browse_quit` lifecycle
+- **v6.10.1**: IPC request id routing (replaces fragile FIFO matching under concurrent calls)
+- **v6.10.2**: Process hardening — single-instance lock, `render-process-gone` logging, `no-sandbox` switch, `cleanupAndQuit` rejects pending IPC
+- **v6.10.3**: `ui.scroll` argument escaping (no JS injection from `target`), `browse_evaluate` Node-identifier blocklist
 
 ## License
 

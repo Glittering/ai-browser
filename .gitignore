@@ -7,3 +7,4 @@ Electron.app/
 cache/
 screenshots/
 tools/
+.exec-trail/

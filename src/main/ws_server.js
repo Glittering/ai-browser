@@ -12,7 +12,7 @@ function findInTree(node, field, value) {
   return null;
 }
 
-export function startWSServer(pageManager, port = 9223) {
+export function startWSServer(pageManager, port = 9223, onQuit = null) {
   wss = new WebSocketServer({ port });
 
   wss.on('connection', (ws, _req) => {
@@ -160,18 +160,42 @@ export function startWSServer(pageManager, port = 9223) {
           // === ui.scroll — scroll page or element ===
           case 'ui.scroll': {
             const direction = params.direction || 'down';
-            const amount = params.amount || 500;
-            const js = params.target
-              ? `document.querySelector('[data-ai-id="${params.target}"]').scrollIntoView({behavior:'instant',block:'center'})`
-              : `window.scrollBy(0, ${direction === 'down' ? amount : -amount})`;
-            await pageManager.evaluate(js, tabId);
-            send({ jsonrpc: '2.0', id, result: { ok: true } });
+            const amount = Math.max(-10000, Math.min(10000, Number(params.amount) || 500));
+            // Pass target/direction/amount as JSON-encoded args — never
+            // interpolate params.target into JS source, otherwise a malicious
+            // caller can inject `target = "']); fetch('...') //"`.
+            const target = typeof params.target === 'string' ? params.target : null;
+            const js = `(function(t, d, a){
+              if (t) {
+                var all = document.querySelectorAll('[data-ai-id]');
+                for (var i = 0; i < all.length; i++) {
+                  if (all[i].getAttribute('data-ai-id') === t) {
+                    all[i].scrollIntoView({ behavior: 'instant', block: 'center' });
+                    return { ok: true };
+                  }
+                }
+                return { ok: false, error: 'target not found' };
+              }
+              window.scrollBy(0, d === 'down' ? a : -a);
+              return { ok: true };
+            })(${JSON.stringify(target)}, ${JSON.stringify(direction)}, ${amount})`;
+            const result = await pageManager.evaluate(js, tabId).catch(() => ({ ok: false }));
+            send({ jsonrpc: '2.0', id, result: result || { ok: true } });
             break;
           }
           // === ui.network_body — get HTTP response body by URL pattern ===
           case 'ui.network_body': {
             const body = await pageManager.getNetworkBody(params.url_pattern || '', tabId);
             send({ jsonrpc: '2.0', id, result: { body: body } });
+            break;
+          }
+          // === ui.quit — let MCP clients shut down the browser gracefully ===
+          // The agent owns the browser lifecycle; without this it has no way
+          // to release the process after finishing a task.
+          case 'ui.quit': {
+            send({ jsonrpc: '2.0', id, result: { ok: true } });
+            // Defer so the response actually flushes before the WS closes.
+            if (onQuit) setTimeout(() => { try { onQuit(); } catch (e) {} }, 200);
             break;
           }
           default:
@@ -189,5 +213,14 @@ export function startWSServer(pageManager, port = 9223) {
   });
 
   console.log('AI Browser WS server listening on ws://localhost:' + port);
-  return { close: () => wss?.close() };
+  return {
+    close: () => {
+      if (!wss) return;
+      for (const client of wss.clients) {
+        try { client.terminate(); } catch (e) {}
+      }
+      wss.close();
+      wss = null;
+    }
+  };
 }

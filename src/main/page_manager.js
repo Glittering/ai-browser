@@ -24,20 +24,37 @@ class PageManager {
 
   _setupIPC() {
     const self = this;
+    // Match by request id — robust under concurrent requests / multi-tab.
+    // FIFO broke when getTree/executeAction/evaluate raced: the first response
+    // resolved whichever pending promise happened to be first in the map,
+    // not the one that actually triggered it.
     ipcMain.on('ai:tree', (_event, payload) => {
-      // Simple FIFO — works for single-client, breaks with multiple
-      for (const [id, pending] of self._pendingRequests) {
-        pending.resolve(payload);
+      const id = payload && payload.id;
+      const pending = (id !== undefined) ? self._pendingRequests.get(id) : null;
+      if (pending) {
         self._pendingRequests.delete(id);
-        return;
+        pending.resolve(payload);
       }
     });
 
     ipcMain.on('ai:action_result', (_event, result) => {
-      for (const [id, pending] of self._pendingRequests) {
-        pending.resolve(result);
+      const id = result && result.id;
+      const pending = (id !== undefined) ? self._pendingRequests.get(id) : null;
+      if (pending) {
         self._pendingRequests.delete(id);
-        return;
+        // Strip routing id from the payload before resolving.
+        const { id: _drop, ...clean } = result;
+        pending.resolve(clean);
+      }
+    });
+
+    ipcMain.on('ai:evaluate_result', (_event, result) => {
+      const id = result && result.id;
+      const pending = (id !== undefined) ? self._pendingRequests.get(id) : null;
+      if (pending) {
+        self._pendingRequests.delete(id);
+        if (result.error) pending.reject(new Error(result.error));
+        else pending.resolve(result.value);
       }
     });
 
@@ -106,7 +123,7 @@ class PageManager {
     return new Promise((resolve, reject) => {
       const id = ++this._requestId;
       this._pendingRequests.set(id, { resolve, reject });
-      view.webContents.send('ai:extract', { focusedOnly });
+      view.webContents.send('ai:extract', { focusedOnly, id });
       setTimeout(() => {
         if (this._pendingRequests.has(id)) {
           this._pendingRequests.delete(id);
@@ -124,7 +141,7 @@ class PageManager {
     return new Promise((resolve, reject) => {
       const id = ++this._requestId;
       this._pendingRequests.set(id, { resolve, reject });
-      view.webContents.send('ai:action', { action, target, params });
+      view.webContents.send('ai:action', { action, target, params, id });
       setTimeout(() => {
         if (this._pendingRequests.has(id)) {
           this._pendingRequests.delete(id);
@@ -143,7 +160,18 @@ class PageManager {
     const tid = tabId !== undefined ? tabId : this.activeTab;
     const view = this._getView(tid);
     if (!view) return Promise.reject(new Error('Tab not found'));
-    return view.webContents.executeJavaScript(js);
+
+    return new Promise((resolve, reject) => {
+      const id = ++this._requestId;
+      this._pendingRequests.set(id, { resolve, reject });
+      view.webContents.send('ai:evaluate', { js, id });
+      setTimeout(() => {
+        if (this._pendingRequests.has(id)) {
+          this._pendingRequests.delete(id);
+          reject(new Error('evaluate timeout'));
+        }
+      }, 5000);
+    });
   }
 
   // === Tab lifecycle ===
@@ -157,7 +185,6 @@ class PageManager {
         contextIsolation: true,
         nodeIntegration: false,
         partition: 'persist:ai-browser',
-        // Ensure persistent storage for cookies, localStorage, IndexedDB
         persistStorage: true,
         webSecurity: true,
         allowRunningInsecureContent: false,
@@ -181,14 +208,37 @@ class PageManager {
     }
     // setActive handles addBrowserView + layout — don't add twice
     this.setActive(tabId);
+
+    // Force repaint after load — BrowserView content can be loaded but not
+    // painted by the compositor. Remove + re-add forces a full repaint.
+    if (url) {
+      view.webContents.on('dom-ready', () => {
+        self._forceRepaint(view);
+      });
+      view.webContents.on('did-finish-load', () => {
+        self._forceRepaint(view);
+      });
+    }
     return tabId;
+  }
+
+  _forceRepaint(view) {
+    // Remove and re-add the BrowserView to force the compositor to paint it.
+    try {
+      this.window.removeBrowserView(view);
+      this.window.addBrowserView(view);
+      this._layoutView(view);
+    } catch(e) {}
   }
 
   closeTab(tabId) {
     const view = this._getView(tabId);
     if (!view) return false;
     this.window.removeBrowserView(view);
-    (view.webContents).destroy();
+    if (view.webContents && !view.webContents.isDestroyed()) {
+      try { view.webContents.debugger.detach(); } catch(e) {}
+      view.webContents.close();
+    }
     this.tabs.delete(tabId);
     if (this.activeTab === tabId || this.activeTab === null) {
       // switch to first remaining tab — must re-addBrowserView
@@ -229,7 +279,6 @@ class PageManager {
     if (view) {
       this.window.addBrowserView(view);
       this._layoutView(view);
-      // Force focus + repaint — fixes white screen on tab switch
       view.webContents.focus();
       view.webContents.setBackgroundThrottling(false);
     }
@@ -320,12 +369,23 @@ class PageManager {
   }
 
   close() {
+    for (const sessionId of this._networkMonitors.keys()) {
+      this._stopNetworkMonitor(sessionId);
+    }
+    // Reject any in-flight requests so callers don't hang on close.
+    for (const [id, pending] of this._pendingRequests) {
+      try { pending.reject(new Error('PageManager closing')); } catch (e) {}
+    }
+    this._pendingRequests.clear();
     for (const [id, view] of this.tabs) {
-      (view.webContents).destroy();
+      if (view.webContents && !view.webContents.isDestroyed()) {
+        view.webContents.close();
+      }
     }
     this.tabs.clear();
     ipcMain.removeAllListeners('ai:tree');
     ipcMain.removeAllListeners('ai:action_result');
+    ipcMain.removeAllListeners('ai:evaluate_result');
     ipcMain.removeAllListeners('ai:diff');
     ipcMain.removeAllListeners('ai:event');
   }
