@@ -72,7 +72,7 @@ function createWindow() {
 
   // Init PageManager
   pageManager = PageManager.getInstance(mainWindow);
-  pageManager._preloadPath = path.join(__dirname, '../preload/bridge.js');
+  pageManager._preloadPath = path.join(__dirname, '../preload/bridge.cjs');
 
   // Create first tab
   pageManager.newTab('https://www.baidu.com');

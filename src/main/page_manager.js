@@ -184,7 +184,7 @@ class PageManager {
         preload: this._preloadPath,
         contextIsolation: true,
         nodeIntegration: false,
-        // Required for the CommonJS preload (bridge.js) to `require()` local
+        // Required for the CommonJS preload (bridge.cjs) to `require()` local
         // modules (./extractor.cjs, ./actions.cjs, ./watcher.cjs). A sandboxed
         // preload can only require Electron's whitelist. Security is unchanged:
         // nodeIntegration stays false + contextIsolation true, so page code
