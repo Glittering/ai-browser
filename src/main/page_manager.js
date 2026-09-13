@@ -371,16 +371,20 @@ class PageManager {
   _networkRequestMap = new Map(); // requestId -> {url, tabId, finished}
 
   async getNetworkBody(urlPattern, tabId) {
-    // Find matching finished request and get body via CDP
+    // Find matching finished request and get body via CDP.
+    // The debugger is attached per-webContents (a tab attaches once, regardless
+    // of how many client sessions subscribe), so reach the tab's debugger
+    // directly instead of guessing which session map recorded it. Picking
+    // "the last session" ([...keys()].pop()) leaked across clients and was
+    // wrong whenever the target tab was owned by a different session.
     const tid = tabId !== undefined ? tabId : this.activeTab;
+    const view = this._getView(tid);
+    const dbg = view && view.webContents && view.webContents.debugger;
+    if (!dbg || typeof dbg.isAttached !== 'function' || !dbg.isAttached()) return null;
     for (const [requestId, entry] of this._networkRequestMap) {
       if (entry.tabId === tid && entry.finished && entry.url.indexOf(urlPattern) >= 0) {
-        const monitors = this._networkMonitors.get([...this._networkMonitors.keys()].pop());
-        if (!monitors) continue;
-        const wc = monitors.get(tid);
-        if (!wc) continue;
         try {
-          const result = await wc.debugger.sendCommand('Network.getResponseBody', { requestId });
+          const result = await dbg.sendCommand('Network.getResponseBody', { requestId });
           return result.body ? result.body.slice(0, 5000) : null;
         } catch(e) { return null; }
       }
