@@ -6,5 +6,8 @@ dist/
 Electron.app/
 cache/
 screenshots/
-tools/
+# tools/ holds a WS helper the committed e2e/ suite depends on (../tools/browser.cjs);
+# archive it so CI/repros don't break, keep the one real asset tracked.
+tools/**
+!tools/browser.cjs
 .exec-trail/
