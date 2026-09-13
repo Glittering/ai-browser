@@ -156,11 +156,55 @@ class PageManager {
     return result?.tree?.focused_element_id || null;
   }
 
-  evaluate(js, tabId) {
+  async evaluate(js, tabId) {
     const tid = tabId !== undefined ? tabId : this.activeTab;
     const view = this._getView(tid);
-    if (!view) return Promise.reject(new Error('Tab not found'));
+    if (!view) throw new Error('Tab not found');
 
+    // Preferred path: CDP Runtime.evaluate. It runs on the DevTools protocol
+    // channel and is NOT subject to the page's CSP code-generation (eval)
+    // restrictions, so it works on strict sites (Bing, Gmail, ...) where the
+    // in-page `eval()` used by the preload bridge is blocked. It runs in the
+    // page's main world, identical privilege to the page's own JS (no Node:
+    // nodeIntegration:false + contextIsolation:true are unchanged).
+    try {
+      return await this._evaluateViaCdp(view, js);
+    } catch (e) {
+      // Fallback: the original preload (ai:evaluate) path, for views without a
+      // usable CDP debugger (and for the vitest unit tests that mock IPC).
+      return await this._evaluateViaPreload(view, js);
+    }
+  }
+
+  // Execute JS via chromedebugger + Runtime.evaluate on a per-tab webContents.
+  async _evaluateViaCdp(view, js) {
+    const wc = view.webContents;
+    const dbg = wc && wc.debugger;
+    if (!dbg || typeof dbg.isAttached !== 'function') throw new Error('no-cdp');
+    try {
+      if (!dbg.isAttached()) dbg.attach('1.3');
+    } catch (e) {
+      // Already attached (e.g. by the network monitor); reuse the same session.
+    }
+    const cmd = dbg.sendCommand('Runtime.evaluate', {
+      expression: js,
+      returnByValue: true,
+      awaitPromise: false,
+    });
+    const timeout = new Promise((_, rej) =>
+      setTimeout(() => rej(new Error('cdp evaluate timeout')), 5000));
+    const res = await Promise.race([cmd, timeout]);
+    if (res && res.exceptionDetails) {
+      const ex = res.exceptionDetails.exception;
+      const msg = (ex && (ex.description || ex.value)) || res.exceptionDetails.text || 'evaluate error';
+      throw new Error(String(msg).slice(0, 300));
+    }
+    const r = res && res.result;
+    if (r && r.subtype === 'error') throw new Error(String(r.description || 'evaluate error').slice(0, 300));
+    return r ? r.value : undefined;
+  }
+
+  _evaluateViaPreload(view, js) {
     return new Promise((resolve, reject) => {
       const id = ++this._requestId;
       this._pendingRequests.set(id, { resolve, reject });
