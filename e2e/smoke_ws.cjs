@@ -1,0 +1,178 @@
+// e2e/smoke_ws.cjs — Real-WebContents integration smoke over the live WS API.
+// Self-contained: spawns Electron, serves a local CSP-strict page (no 'unsafe-eval'),
+// and asserts the core contracts an agent depends on — get_tree, data-ai-id backref,
+// act-click, evaluate-under-CSP (regression lock), multi-tab lifecycle.
+// Exits non-zero if any check fails.
+//
+// Run:  npm run smoke
+
+const http = require("node:http");
+const net = require("node:net");
+const { spawn } = require("node:child_process");
+const path = require("node:path");
+
+const ROOT = path.resolve(__dirname, "..");
+const WS_HOST = "127.0.0.1";
+const WS_PORT = 9223;
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ---- local page served with a CSP that forbids eval ----
+const BUTTON_PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>SmokeCSP</title></head>
+<body>
+  <button id="btn">点我</button>
+  <input id="name" placeholder="名字">
+  <a id="lnk" href="https://example.com">外链</a>
+  <script>
+    window.__c = 0;
+    document.getElementById('btn').addEventListener('click', function(){ window.__c++; });
+  </script>
+</body></html>`;
+const TITLE_PAGE = (title) => `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title></head>
+<body><h1 id="h">${title}</h1></body></html>`;
+
+function startServer() {
+  return new Promise((resolve) => {
+    const server = http.createServer((req, res) => {
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      // Allows self + inline scripts, but NOT 'unsafe-eval' -> in-page `eval()` is
+      // blocked here, so any evaluate implemented via eval() would fail on this page.
+      res.setHeader(
+        "Content-Security-Policy",
+        "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:;"
+      );
+      const p = req.url.split("?")[0];
+      if (p === "/a") res.end(TITLE_PAGE("TabASmoke"));
+      else if (p === "/b") res.end(TITLE_PAGE("TabBSmoke"));
+      else res.end(BUTTON_PAGE);
+    });
+    server.listen(0, "127.0.0.1", () => resolve(server));
+  });
+}
+
+function waitForPort(port, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const t0 = Date.now();
+    function once() {
+      const s = net.connect(port, WS_HOST);
+      s.once("connect", () => { s.destroy(); resolve(); });
+      s.once("error", () => {
+        s.destroy();
+        if (Date.now() - t0 > timeoutMs) return reject(new Error("timeout waiting port " + port));
+        setTimeout(once, 250);
+      });
+    }
+    once();
+  });
+}
+
+let PASS = 0, FAIL = 0;
+const check = (name, cond, detail) => { cond ? PASS++ : FAIL++; console.log(`  ${cond ? "PASS" : "FAIL"} | ${name}${detail !== undefined ? " — " + detail : ""}`); };
+
+async function main() {
+  const server = await startServer();
+  const PAGE_URL = `http://127.0.0.1:${server.address().port}/`;
+
+  // own the instance: fail if something already holds 9223
+  try {
+    await waitForPort(WS_PORT, 600);
+    console.error("!! port " + WS_PORT + " is busy — stop the running ai-browser first.");
+    process.exit(3);
+  } catch { /* free */ }
+
+  const electronPath = require("electron");
+  console.log("spawn electron @", electronPath);
+  const child = spawn(electronPath, ["."], { cwd: ROOT, stdio: "ignore", detached: true });
+  await waitForPort(WS_PORT, 30000);
+  console.log("WS ready on", WS_PORT);
+
+  // lazily require the WS helper only after spawn checks
+  const { Browser } = require("../tools/browser.cjs");
+  const b = new Browser();
+  await b.ready();
+
+  console.log("\n[get_tree on CSP page]");
+  await b.call("ui.new_tab", { url: PAGE_URL });
+  await sleep(1500);
+  let raw = await b.call("ui.get_tree", {});
+  let root = (raw && raw.result && (raw.result.tree || raw.result.root)) || raw;
+  const ids = () => {
+    const out = new Set();
+    (function walk(x) {
+      if (Array.isArray(x)) return x.forEach(walk);
+      if (!x || typeof x !== "object") return;
+      if (x.id) out.add(x.id);
+      if (x.children) x.children.forEach(walk);
+      if (x.nodes) x.nodes.forEach(walk);
+    })(root);
+    return out;
+  };
+  const idSet = ids();
+  check("tree returned", idSet.size > 0, idSet.size + " nodes");
+  check("button #btn present in tree", idSet.has("btn"));
+
+  console.log("\n[evaluate under CSP — regression lock]");
+  // The fixture serves a CSP with no 'unsafe-eval'. CDP Runtime.evaluate is, by
+  // Chromium design, exempt from page CSP (same as Puppeteer page.evaluate), which
+  // is exactly what lets an agent run code on strict sites. The meaningful check
+  // is that the call returns a value on a CSP page, not that CSP "blocks" it.
+  const title = await b.call("ui.evaluate", { js: "document.title" });
+  const titleVal = title && title.result && title.result.value;
+  check("ui.evaluate works under CSP (CDP path)", !title.error && titleVal === "SmokeCSP", "title=" + titleVal);
+
+  console.log("\n[data-ai-id backref under CSP]");
+  const br = await b.call("ui.evaluate", { js: "(function(){var el=document.querySelector('[data-ai-id=\"btn\"]');return el?el.tagName+'#'+el.id:'missing';})()" });
+  const brVal = br && br.result && br.result.value;
+  check("querySelector backrefs #btn", brVal && String(brVal).includes("#btn"), brVal);
+
+  console.log("\n[act click hits real DOM]");
+  await b.call("ui.act", { action: "click", target: "btn" });
+  await sleep(700);
+  const c = await b.call("ui.evaluate", { js: "window.__c" });
+  const cVal = c && c.result && c.result.value;
+  check("activated click incremented __c to 1", cVal === 1, "c=" + cVal);
+
+  console.log("\n[multi-tab lifecycle (local, deterministic)]");
+  const listCount = async () => {
+    const l = await b.call("ui.list_tabs", {});
+    const o = (l && l.result) || {};
+    const raw = o.tabs || o;
+    const arr = Array.isArray(raw) ? raw : (raw.tabs || []);
+    return arr;
+  };
+  const T0 = (await listCount()).length; // baseline includes the app's default tab + '/' page
+  const HOST = `http://127.0.0.1:${server.address().port}`;
+  await b.call("ui.new_tab", { url: HOST + "/a" });
+  await b.call("ui.new_tab", { url: HOST + "/b" });
+  await sleep(1400); // let local nav URLs commit
+  const tabs = await listCount();
+  check("adding 2 tabs grew list to " + (T0 + 2), tabs.length === T0 + 2, tabs.length);
+  const target = Array.isArray(tabs) && tabs.find((t) => (t.url || "").includes("/a"));
+  if (!target) {
+    console.log("  [diagnostic]", tabs.map((t) => ({ url: t.url, title: t.title, active: t.active })));
+  }
+  if (target) {
+    const id = target.id;
+    // switch to /a then confirm the ACTIVE context changed to TabA via document.title
+    await b.call("ui.set_active_tab", { tab: id });
+    await sleep(800);
+    const tA = await b.call("ui.evaluate", { js: "document.title" });
+    const tAVal = tA && tA.result && tA.result.value;
+    check("set_active_tab switched to /a (title=TabASmoke)", tAVal === "TabASmoke", "title=" + tAVal);
+    await b.call("ui.close_tab", { tab: id });
+    const tab2 = await listCount();
+    check("close_tab shrank to " + (T0 + 1), tab2.length === T0 + 1, tab2.length);
+  } else {
+    check("found /a tab for switch test", false, "not matched");
+  }
+
+  console.log("\n==== smoke PASS=" + PASS + " FAIL=" + FAIL + " ====");
+  b.close();
+  try { server.close(); } catch {}
+  try { process.kill(-child.pid, "SIGTERM"); } catch {}
+  setTimeout(() => { try { process.kill(-child.pid, "SIGKILL"); } catch {} }, 3000);
+  process.exit(FAIL ? 1 : 0);
+}
+
+main().catch((e) => { console.error("smoke error:", e.message); process.exit(2); });
+setTimeout(() => { console.error("smoke TIMEOUT"); process.exit(2); }, 60000);

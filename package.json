@@ -8,6 +8,7 @@
     "start": "electron .",
     "test": "vitest run",
     "test:watch": "vitest",
+    "smoke": "node e2e/smoke_ws.cjs",
     "mcp": "node src/main/mcp_server.js"
   },
   "dependencies": {
