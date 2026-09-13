@@ -12,6 +12,7 @@ const { spawn } = require("node:child_process");
 const path = require("node:path");
 
 const ROOT = path.resolve(__dirname, "..");
+const { Browser } = require(path.join(ROOT, "tools/browser.cjs"));
 const WS_HOST = "127.0.0.1";
 const WS_PORT = 9223;
 
@@ -39,9 +40,10 @@ function startServer() {
       // blocked here, so any evaluate implemented via eval() would fail on this page.
       res.setHeader(
         "Content-Security-Policy",
-        "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:;"
+        "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'self';"
       );
       const p = req.url.split("?")[0];
+      if (p === "/net") { res.setHeader("Content-Type", "text/plain; charset=utf-8"); return res.end("NET-PAYLOAD-42"); }
       if (p === "/a") res.end(TITLE_PAGE("TabASmoke"));
       else if (p === "/b") res.end(TITLE_PAGE("TabBSmoke"));
       else res.end(BUTTON_PAGE);
@@ -87,7 +89,6 @@ async function main() {
   console.log("WS ready on", WS_PORT);
 
   // lazily require the WS helper only after spawn checks
-  const { Browser } = require("../tools/browser.cjs");
   const b = new Browser();
   await b.ready();
 
@@ -165,6 +166,52 @@ async function main() {
   } else {
     check("found /a tab for switch test", false, "not matched");
   }
+
+  console.log("\n[network monitor — multi-client regression locks]");
+  // Two independent WS clients both subscribe to the same network events.
+  const A = new Browser();
+  const B = new Browser();
+  await Promise.all([A.ready(), B.ready()]);
+  const netTab = (await b.call("ui.new_tab", { url: HOST })).result?.tab;
+  await sleep(1300); // let the CSP page load so in-page fetch works
+
+  const eventsOf = (c) => { const out = []; c.on("network_response", (d) => { if (d && String(d.url).includes("/net")) out.push(d); }); return out; };
+  const aEv = eventsOf(A), bEv = eventsOf(B);
+  await A.call("ui.subscribe", { events: ["network_response"] });
+  await B.call("ui.subscribe", { events: ["network_response"] });
+  await sleep(300);
+  const fire = async () => { await b.call("ui.evaluate", { js: "fetch('/net'); 'ok'", tab: netTab }); await sleep(1500); };
+
+  await fire();
+  check("NF-1 client A delivered exactly 1 network_response", aEv.length === 1, aEv.length);
+  check("NF-2 client B delivered exactly 1 (each client its own)", bEv.length === 1, "A=" + aEv.length + " B=" + bEv.length);
+
+  // B unsubscribes; the shared per-tab debugger must NOT be detached while A remains.
+  await B.call("ui.unsubscribe", { events: ["network_response"] });
+  await sleep(300);
+  await fire();
+  check("NF-3 A still receives after B unsubscribes (no premature detach)", aEv.length === 2, "A=" + aEv.length);
+
+  // Cross-client network body lookup returns real body regardless of session.
+  const bodyA = await b.call("ui.network_body", { url_pattern: "/net", tab: netTab });
+  const bodyAVal = bodyA?.result?.body || null;
+  const bodyB = await A.call("ui.network_body", { url_pattern: "/net", tab: netTab });
+  const bodyBVal = bodyB?.result?.body || null;
+  check("NF-4 network_body correct via ws + via client A", bodyAVal === "NET-PAYLOAD-42" && bodyBVal === "NET-PAYLOAD-42", JSON.stringify([bodyAVal, bodyBVal]));
+
+  // Closing the tab tears down its per-tab debugger + cache without error.
+  const closed = await b.call("ui.close_tab", { tab: netTab });
+  check("NF-5 close_tab on monitored tab ok (cleanup path)", !!(closed && closed.result), JSON.stringify(closed && closed.result));
+
+  console.log("\n[evaluate guard rails on raw WS (P0 security)]");
+  const eProc = await b.call("ui.evaluate", { js: "process.version" });
+  check("SEC-1 reject process.* on raw WS", eProc?.error?.code === -32602, JSON.stringify(eProc && (eProc.error || eProc.result)));
+  const long = "(" + " ".padEnd(6000, "x") + ")"; // >5000 chars
+  const eLong = await b.call("ui.evaluate", { js: long });
+  check("SEC-2 reject >5000 char script", eLong?.error?.code === -32602, "err=" + (eLong && eLong.error && eLong.error.message));
+  const eOk = await b.call("ui.evaluate", { js: "2+2" });
+  check("SEC-3 guard rails do not break normal evaluate", !eOk?.error && eOk?.result?.value === 4, String(eOk && eOk.result && eOk.result.value));
+  A.close(); B.close();
 
   console.log("\n==== smoke PASS=" + PASS + " FAIL=" + FAIL + " ====");
   b.close();

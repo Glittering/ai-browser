@@ -71,7 +71,19 @@ export function startWSServer(pageManager, port = 9223, onQuit = null) {
             break;
           }
           case 'ui.evaluate': {
-            const value = await pageManager.evaluate(params.js, tabId);
+            const js = String(params.js ?? '');
+            // Guard rails on the raw WS path too. The MCP layer already rejects
+            // these, but a direct ws client bypasses MCP, so enforce the same
+            // contract here: cap length and reject obvious Node-exfil patterns.
+            if (js.length > 5000) {
+              send({ jsonrpc: '2.0', id, error: { code: -32602, message: 'script exceeds 5000 char limit' } });
+              break;
+            }
+            if (/\bprocess\.\b|\brequire\s*\(|\bchild_process\b|\bglobalThis\.process\b/.test(js)) {
+              send({ jsonrpc: '2.0', id, error: { code: -32602, message: 'script contains disallowed Node-specific identifier' } });
+              break;
+            }
+            const value = await pageManager.evaluate(js, tabId);
             send({ jsonrpc: '2.0', id, result: { value } });
             break;
           }
