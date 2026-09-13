@@ -1,4 +1,4 @@
-// tests/test_semantic_extractor.js — Tests for preload/semantic_extractor.js
+// tests/test_semantic_extractor.js — Tests for preload/extractor.cjs
 // Uses jsdom via vitest environment
 // @vitest-environment jsdom
 
@@ -19,9 +19,11 @@ beforeAll(async () => {
   // Wait for scripts to execute (jsdom runs them inline)
   await new Promise(r => setTimeout(r, 0));
 
-  // Dynamic import — the module must work in jsdom (no Electron APIs)
-  const mod = await import('../src/preload/semantic_extractor.js');
-  extractTree = mod.extractTree;
+  // Dynamic import — the module must work in jsdom (no Electron APIs).
+  // extractor.cjs is CommonJS, so it is exposed under `.default`.
+  const mod = await import('../src/preload/extractor.cjs');
+  const ns = mod.default || mod;
+  extractTree = ns.extractTree;
 });
 
 describe('extractTree()', () => {

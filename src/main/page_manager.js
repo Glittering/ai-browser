@@ -184,6 +184,12 @@ class PageManager {
         preload: this._preloadPath,
         contextIsolation: true,
         nodeIntegration: false,
+        // Required for the CommonJS preload (bridge.js) to `require()` local
+        // modules (./extractor.cjs, ./actions.cjs, ./watcher.cjs). A sandboxed
+        // preload can only require Electron's whitelist. Security is unchanged:
+        // nodeIntegration stays false + contextIsolation true, so page code
+        // has no Node access regardless of the OS-level renderer sandbox.
+        sandbox: false,
         partition: 'persist:ai-browser',
         persistStorage: true,
         webSecurity: true,
@@ -240,6 +246,9 @@ class PageManager {
       view.webContents.close();
     }
     this.tabs.delete(tabId);
+    // Release per-tab network resources so a closed tab can never leak its
+    // debugger attachment or cached request entries / stale monitors.
+    this._cleanupTabResources(tabId);
     if (this.activeTab === tabId || this.activeTab === null) {
       // switch to first remaining tab — must re-addBrowserView
       const first = this.tabs.keys().next();
@@ -253,6 +262,23 @@ class PageManager {
       }
     }
     return true;
+  }
+
+  // Tear down a closed tab's network-monitoring bookkeeping:
+  //  - drop that tab from every session's monitor map and detach its debugger
+  //  - drop cached request entries made on that tab
+  _cleanupTabResources(tabId) {
+    for (const [sessionId, monitors] of this._networkMonitors) {
+      const wc = monitors.get(tabId);
+      if (wc) {
+        try { wc.debugger.detach(); } catch(e) {}
+        monitors.delete(tabId);
+      }
+      if (monitors.size === 0) this._networkMonitors.delete(sessionId);
+    }
+    for (const [requestId, entry] of this._networkRequestMap) {
+      if (entry.tabId === tabId) this._networkRequestMap.delete(requestId);
+    }
   }
 
   listTabs() {

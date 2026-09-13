@@ -1,4 +1,4 @@
-// tests/test_action_binder.js — Tests for preload/action_binder.js
+// tests/test_action_binder.js — Tests for preload/actions.cjs
 // @vitest-environment jsdom
 
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
@@ -10,11 +10,16 @@ const basicHTML = readFileSync(htmlPath, 'utf-8');
 
 let executeAction;
 
+async function loadModule(pathStr) {
+  const mod = await import(pathStr);
+  return mod.default || mod;
+}
+
 beforeAll(async () => {
   document.documentElement.innerHTML = basicHTML;
   await new Promise(r => setTimeout(r, 0));
-  const mod = await import('../src/preload/action_binder.js');
-  executeAction = mod.executeAction;
+  const ns = await loadModule('../src/preload/actions.cjs');
+  executeAction = ns.executeAction;
 });
 
 // Helper: get element id from semantic extractor, preferring nativeElement id
@@ -24,7 +29,7 @@ async function getSemanticId(nativeId) {
     return node.getAttribute('data-ai-id');
   }
   // Fallback: walk semantic tree by native id
-  const { extractTree } = await import('../src/preload/semantic_extractor.js');
+  const { extractTree } = await loadModule('../src/preload/extractor.cjs');
   const tree = extractTree();
   function find(node) {
     if (node.id && node.attributes && node.attributes['id'] === nativeId) return node.id;
@@ -59,9 +64,10 @@ describe('executeAction — click', () => {
     if (!id) return; // skip if extractor not working yet
     const result = executeAction(id, 'click', {});
     expect(result.success).toBe(true);
-    // Check counter incremented
+    // Exactly one click fires now — counter must show "1"
     const counter = document.getElementById('click-counter');
     expect(counter.textContent).toContain('1');
+    expect(counter.textContent).not.toContain('2');
   });
 
   it('AB-002: click button triggers React onClick', async () => {
@@ -70,7 +76,7 @@ describe('executeAction — click', () => {
     document.documentElement.innerHTML = readFileSync(reactPath, 'utf-8');
     await new Promise(r => setTimeout(r, 100));
 
-    const { extractTree } = await import('../src/preload/semantic_extractor.js');
+    const { extractTree } = await loadModule('../src/preload/extractor.cjs');
     const tree = extractTree();
     // Find React button
     function findByRole(node, role) {
