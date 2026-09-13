@@ -168,42 +168,55 @@ ws.on('open', () => {
 ## Architecture
 
 ```
-┌─────────────────────────────────┐
-│  Electron (Chromium)             │
-│                                  │
-│  any website DOM                 │
-│       ↓                          │
-│  preload/bridge.js (744 lines)   │
-│    extractTree() → semantic tree │
-│    extractPageContext() → modals │
-│    executeAction() → type/click  │
-│    bindObserver() → live events  │
-│       ↕ IPC                      │
-│  main/page_manager.js            │
-│    multi-tab BrowserView         │
-│    persist: session/cookies      │
-│    CDP Network monitor           │
-│       ↕                          │
-│  main/ws_server.js (:9223)       │ ← Agent connects here via WebSocket
-└─────────────────────────────────┘
+┌───────────────────────────────────────┐
+│ External agent (Claude/Cursor/Codex)   │
+│   ├─ MCP stdio · 13 browse_* tools    │
+│   └─ WS JSON-RPC · :9223 · ui.*       │
+└──────────┬────────────────────────────┘
+           ↕
+┌──────────▼────────────────────────────┐
+│ Electron main process                 │
+│   index.js         entry / tab strip  │
+│   ws_server.js     RPC route / events │
+│   page_manager.js  tabs · IPC id match│
+│     CDP shared session (one attach)   │
+│       Network.enable → network_response│
+│       Runtime.enable → js_error (main)│
+└──────────┬────────────────────────────┘
+           ↕ IPC (request-id matched)
+┌──────────▼────────────────────────────┐
+│ preload (contextIsolation:true)       │
+│   bridge.cjs     IPC wiring / dispatch│
+│   extractor.cjs  semantic tree / ai-id│
+│   actions.cjs    click/setContent/... │
+│   watcher.cjs    captcha/message scan │
+└──────────┬────────────────────────────┘
+           ↕ DOM data-ai-id (live)
+┌──────────▼────────────────────────────┐
+│ DOM → semantic tree (no screenshots)  │
+└───────────────────────────────────────┘
 ```
 
 **One Electron process. One WebSocket port. One preload bridge.** No microservices. No K8s. No screenshot pipeline.
 
+- **preload 分层（dev）**：单文件 `bridge.js` 已拆为 `bridge.cjs`（IPC 接线）+ `extractor.cjs`（语义树/`data-ai-id`）+ `actions.cjs`（click/setContent·富编辑器/toggle/submit）+ `watcher.cjs`（captcha/message 扫描）。
+- **CDP 统一会话（dev）**：`page_manager.js` 的 `_cdpTabs` 让每个 tab 只 `attach('1.3')` 一次，共享 Network 与 Runtime 两个 domain；会话级引用计数，末位才 teardown，订阅后新建 tab 自动继承。
+- **`js_error` 归位（dev）**：preload 的 `window.onerror` 受 `contextIsolation` 隔离看不到页面主 world 异常（实际失效）——已改为主进程 CDP `Runtime.exceptionThrown` 广播 `js_error`，能捕获主 world 抛错。
+
 ## Test coverage
 
 ```
-49 passed · 0 failed · 9 skipped (WS suite skips when Electron not running)
-├── Protocol: 14 tests (JSON-RPC parsing, error codes)
-├── Semantic Extractor: 16 tests (DOM→tree, hidden, containers)
-├── Action Binder: 10 tests (click, type, scroll, dialog)
-├── State Tracker: 9 tests (MutationObserver, observer)
-└── WS Protocol: 5 tests (real Electron RPC round-trip, skip-if-down)
+vitest  51 passed · 0 failed · 9 skipped   (jsdom 单测：extractor/actions/watcher 纯逻辑)
+e2e smoke 27 PASS                          (真实 WebContents 契约层)
+  ├─ evaluate under CSP / data-ai-id 回溯 / act 命中
+  ├─ 多标签：new_tab → set_active_tab → close_tab
+  ├─ 富编辑器 setContent ×3 + submit/toggle（AC-1..4）
+  ├─ 观测：captcha/message + js_error（CDP）
+  ├─ 网络监控 NF-1..5（多客户端 / 退订 / 关 tab 清理）
+  └─ evaluate 安全护栏 SEC-1..3
 ```
 
-End-to-end MCP lifecycle test (17 steps: spawn MCP → auto-launch Electron →
-navigate zhihu/10jqka → click → read article → multi-tab → wait → quit)
-verified green; full browser process exits cleanly on `browse_quit`.
+`npm run smoke` 起本地 Electron + HTTP fixture，离线、可复跑、失败即非零退出；是"稳定"承诺的真实校验层（历史上 preload ESM 崩溃、CSP 禁 `eval` 两次回归都由它而非 jsdom 抓到）。完整黑盒/白盒用例与覆盖评估见 `docs/test_plan_blackbox_whitebox.md`。
 
 ## Key improvements (v6 series)
 
@@ -218,6 +231,7 @@ verified green; full browser process exits cleanly on `browse_quit`.
 - **v6.10.1**: IPC request id routing (replaces fragile FIFO matching under concurrent calls)
 - **v6.10.2**: Process hardening — single-instance lock, `render-process-gone` logging, `no-sandbox` switch, `cleanupAndQuit` rejects pending IPC
 - **v6.10.3**: `ui.scroll` argument escaping (no JS injection from `target`), `browse_evaluate` Node-identifier blocklist
+- **dev (v6.11+)**: preload split into `bridge.cjs`+`extractor.cjs`+`actions.cjs`+`watcher.cjs`; `js_error` re-routed via CDP `Runtime.exceptionThrown` (preload `onerror` is dead under `contextIsolation`); MCP tool face cut 14→13 with lean schemas; shared per-tab CDP session `_cdpTabs`; real-WebContents smoke (27) + CSP-safe `evaluate` via CDP; click double-fire fixed; closeTab shared-debugger leak fixed
 
 ## License
 
