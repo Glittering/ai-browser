@@ -242,6 +242,12 @@ class PageManager {
     });
     this.tabs.set(tabId, view);
 
+    // Tabs created after a subscribe should inherit the CDP domains already
+    // active, so network_response / js_error keep flowing without re-subscribing.
+    // _ensureCdp attach + enable is idempotent (attach guarded by _cdpTabs).
+    if (this._runtimeSubscribers.size > 0) this._ensureCdp(tabId, view, 'Runtime');
+    if (this._networkSubscribers.size > 0) this._ensureCdp(tabId, view, 'Network');
+
     // Mask automation fingerprint: remove Electron from UA
     view.webContents.setUserAgent(
       'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
@@ -313,13 +319,13 @@ class PageManager {
   //    unaffected — each tab owns its own webContents debugger)
   //  - drop cached request entries made on that tab
   _cleanupTabResources(tabId) {
-    const wc = this._cdpNetworkTabs.get(tabId);
-    if (wc) {
-      try { wc.debugger.detach(); } catch(e) {}
-      this._cdpNetworkTabs.delete(tabId);
+    const entry = this._cdpTabs.get(tabId);
+    if (entry) {
+      try { entry.wc.debugger.detach(); } catch(e) {}
+      this._cdpTabs.delete(tabId);
     }
-    for (const [requestId, entry] of this._networkRequestMap) {
-      if (entry.tabId === tabId) this._networkRequestMap.delete(requestId);
+    for (const [requestId, r] of this._networkRequestMap) {
+      if (r.tabId === tabId) this._networkRequestMap.delete(requestId);
     }
   }
 
@@ -364,6 +370,7 @@ class PageManager {
     events.forEach(e => existing.add(e));
     this.subscriptions.set(sessionId, existing);
     if (events.includes('network') || events.includes('network_response')) this._startNetworkMonitor(sessionId);
+    if (events.includes('js_error') || events.includes('unhandledrejection')) this._startRuntimeMonitor(sessionId);
   }
 
   _networkRequestMap = new Map(); // requestId -> {url, tabId, finished}
@@ -397,36 +404,74 @@ class PageManager {
     if (existing.size === 0) {
       this.subscriptions.delete(sessionId);
       this._stopNetworkMonitor(sessionId);
+      this._stopRuntimeMonitor(sessionId);
     }
   }
 
-  // Per-tab CDP debugger shared by all network subscribers. A webContents can
-  // only be debugger-attached once, so attach + Network.enable + the message
-  // listener happen exactly once per tab; subscribers are reference-counted so
-  // the shared debugger is detached only when the last subscriber leaves.
-  _cdpNetworkTabs = new Map();      // tabId -> webContents
-  _networkSubscribers = new Set();  // sessionIds currently using network events
+  // Per-tab shared CDP debugger. A webContents can only be debugger-attached
+  // once, so attach + a single message listener happen exactly once per tab; the
+  // Network and Runtime domains are enabled lazily per demand, and subscribers
+  // are reference-counted so the shared debugger is detached only when the last
+  // network AND runtime subscriber both leave.
+  _cdpTabs = new Map();            // tabId -> { wc, domains:Set<'Network'|'Runtime'> }
+  _networkSubscribers = new Set(); // sessionIds currently using network events
+  _runtimeSubscribers = new Set(); // sessionIds currently using js_error events
+
+  // Attach the shared per-tab debugger if needed and enable a CDP domain.
+  _ensureCdp(tabId, view, domain) {
+    try {
+      const wc = view.webContents;
+      if (!this._cdpTabs.has(tabId)) {
+        wc.debugger.attach('1.3');
+        const entry = { wc, domains: new Set() };
+        this._cdpTabs.set(tabId, entry);
+        // Single shared listener per tab -> no duplicate broadcasts even when
+        // many sessions subscribe to network/runtime events on the same tab.
+        wc.debugger.on('message', (_event, method, params) => this._onCdpMessage(tabId, method, params));
+      }
+      const entry = this._cdpTabs.get(tabId);
+      if (!entry.domains.has(domain)) {
+        wc.debugger.sendCommand(domain + '.enable');
+        entry.domains.add(domain);
+      }
+    } catch (e) { /* mid-navigation / already-attached elsewhere; skip this tab */ }
+  }
+
+  _teardownCdpIfIdle() {
+    if (this._networkSubscribers.size > 0 || this._runtimeSubscribers.size > 0) return;
+    for (const entry of this._cdpTabs.values()) {
+      try { entry.wc.debugger.detach(); } catch(e) {}
+    }
+    this._cdpTabs.clear();
+  }
 
   async _startNetworkMonitor(sessionId) {
     if (this._networkSubscribers.has(sessionId)) return;
     this._networkSubscribers.add(sessionId);
-    // Already attached by an earlier subscriber; keep reference-count > 0.
-    if (this._cdpNetworkTabs.size > 0) return;
-    for (const [tabId, view] of this.tabs) {
-      try {
-        const wc = view.webContents;
-        wc.debugger.attach('1.3');
-        this._cdpNetworkTabs.set(tabId, wc);
-        wc.debugger.sendCommand('Network.enable');
-        // Single shared listener per tab -> no duplicate broadcasts even when
-        // several sessions subscribe to the same network events.
-        wc.debugger.on('message', (_event, method, params) => this._onNetworkMessage(tabId, method, params));
-      } catch(e) { /* mid-navigation / already-attached; skip this tab */ }
-    }
+    for (const [tabId, view] of this.tabs) this._ensureCdp(tabId, view, 'Network');
   }
 
-  _onNetworkMessage(tabId, method, params) {
-    if (method === 'Network.responseReceived') {
+  async _startRuntimeMonitor(sessionId) {
+    if (this._runtimeSubscribers.has(sessionId)) return;
+    this._runtimeSubscribers.add(sessionId);
+    for (const [tabId, view] of this.tabs) this._ensureCdp(tabId, view, 'Runtime');
+  }
+
+  _onCdpMessage(tabId, method, params) {
+    if (method === 'Runtime.exceptionThrown') {
+      // CDP captures page main-world exceptions that preload window.onerror
+      // (an isolated world) can never see under contextIsolation.
+      const d = params.exceptionDetails || {};
+      const ex = d.exception || {};
+      this._broadcast('js_error', {
+        text: d.text || '',
+        message: (ex.description || ex.value) || d.text || '',
+        url: d.url || '',
+        lineNumber: d.lineNumber,
+        columnNumber: d.columnNumber,
+        tabId,
+      });
+    } else if (method === 'Network.responseReceived') {
       const r = params.response;
       this._networkRequestMap.set(params.requestId, { url: r.url, tabId });
       this._broadcast('network_response', { url: r.url, status: r.status, statusText: r.statusText, mimeType: r.mimeType, tabId });
@@ -437,28 +482,30 @@ class PageManager {
       const requestId = params.requestId || '';
       const entry = this._networkRequestMap.get(requestId);
       const url = entry ? entry.url : requestId;
-      this._broadcast('network_response', { url: url, status: 0, statusText: 'Failed', errorText: params.errorText || '', tabId });
+      this._broadcast('network_response', { url, status: 0, statusText: 'Failed', errorText: params.errorText || '', tabId });
     }
   }
 
   async _stopNetworkMonitor(sessionId) {
     if (!this._networkSubscribers.has(sessionId)) return;
     this._networkSubscribers.delete(sessionId);
-    // Other subscribers still need the shared debugger; keep it attached.
-    if (this._networkSubscribers.size > 0) return;
-    for (const wc of this._cdpNetworkTabs.values()) {
-      try { wc.debugger.detach(); } catch(e) {}
-    }
-    this._cdpNetworkTabs.clear();
+    this._teardownCdpIfIdle();
+  }
+
+  async _stopRuntimeMonitor(sessionId) {
+    if (!this._runtimeSubscribers.has(sessionId)) return;
+    this._runtimeSubscribers.delete(sessionId);
+    this._teardownCdpIfIdle();
   }
 
   close() {
-    // Detach the shared per-tab network debuggers once, then drop all state.
-    for (const wc of this._cdpNetworkTabs.values()) {
-      try { wc.debugger.detach(); } catch(e) {}
+    // Detach every shared per-tab CDP debugger once, then drop all state.
+    for (const entry of this._cdpTabs.values()) {
+      try { entry.wc.debugger.detach(); } catch(e) {}
     }
-    this._cdpNetworkTabs.clear();
+    this._cdpTabs.clear();
     this._networkSubscribers.clear();
+    this._runtimeSubscribers.clear();
     // Reject any in-flight requests so callers don't hang on close.
     for (const [id, pending] of this._pendingRequests) {
       try { pending.reject(new Error('PageManager closing')); } catch (e) {}

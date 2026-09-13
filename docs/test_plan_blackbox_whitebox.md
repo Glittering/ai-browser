@@ -115,10 +115,10 @@ Request/Response/Error/Event 构造、非法 JSON/版本校验、方法白名单
 
 ### 3.4 页面观测 `src/preload/watcher.cjs` —（`U`）
 已覆盖：插入/移除 dom/state_changed、disabled 变化、无关变化不广播、stop 后不发。
-**GAP**：5s 低频 captcha/message 扫描触发条件、500ms 防抖合并正确性（时间边界）、同 tab 多事件次序。**实测发现**：`js_error` 经 preload `window.onerror` 捕获在真实桌面下**失效**——`contextIsolation:true` 将 preload 世界与页面主世界隔离，页面抛错不会被 preload 的 `onerror` 捕获（smoke OB 实测 `captured=0`；jsdom 单测同 world 故通）。修法需走 CDP `Runtime.exceptionThrown` 事件，属功能修复而非测试任务（见 §5）。
+**GAP**：5s 低频 captcha/message 扫描触发条件、500ms 防抖合并正确性（时间边界）、同 tab 多事件次序。**js_error 现状（已修复）**：preload `window.onerror` 在 `contextIsolation` 下收不到页面**主 world** 错误（早期 smoke OB 实测 `captured=0`）；已改为**主进程 CDP `Runtime.exceptionThrown`** 广播 `js_error`——统一到 per-tab 共享 CDP 会话（`_cdpTabs`），Network/Runtime 双 domain 共用一次 attach、独立引用计数、订阅后新建 tab 自动继承。smoke OB-3 锁：页面主世界 `throw` 的异常连同 message 被捕获。
 
-### 3.5 网络监控 CDP `src/main/page_manager.js`（_cdpNetworkTabs/_networkSubscribers）—（**GAP**）
-本次重构（每 tab 单例 + 订阅引用计数）**无可自动化测试**。需覆盖：首订阅 attach+`Network.enable`、末退订 tear down、多客户端各收各一份、关 tab 清理、getNetworkBody 跨会话定位不串台（回归锁 `890e715`/`5d8ab00`）——建议落 smoke。
+### 3.5 网络监控 + js_error CDP `src/main/page_manager.js`（`_cdpTabs`/`_networkSubscribers`/`_runtimeSubscribers`）—（`S`）
+统一到 **per-tab 共享 CDP 会话**：`_cdpTabs: Map<tabId,{wc,domains}>`，Network/Runtime 双 domain 共用一次 `attach('1.3')`、独立引用计数、末位（两者皆空）才 tear down、订阅后新建 tab 自动继承（newTab 触发 `_ensureCdp`）。网络回归锁已落 smoke（NF-1 各收一份不重复 / NF-2 双客户端各一份 / NF-3 单客户端退订不误 detach / NF-4 getNetworkBody 跨客户端正确 / NF-5 关 tab 清理）；js_error 经 `Runtime.exceptionThrown` 广播（OB-3 已锁），preload `onerror` 失效问题见 §3.4。
 
 ### 3.6 生命周期 `src/main/page_manager.js` —（**GAP**，部分 smoke）
 tab CRUD、request-id 并发匹配、`_pendingRequests` 清理、closeTab `_cleanupTabResources`（debugger detach + 缓存清理）、set_active 上下文切换。建议补：超时拒绝、未归请求清理、越界/重复 id。
@@ -157,12 +157,12 @@ tab CRUD、request-id 并发匹配、`_pendingRequests` 清理、closeTab `_clea
 |---|---|---|---|
 | 协议栈 | 高 | 高 | 无 |
 | 语义提取 | 高(U) / 中(S) | 中 | visibility 继承 & offscreen 语义元素、iframe 递归 |
-| **动作执行** | 中 | **低** | **富编辑器(Draft/ProseMirror/CodeMirror)/submit/toggle 无自动化** |
-| 页面观测 | 中 | 中 | 防抖边界、低频扫描、JS error 捕获无自动化 |
-| CDP 网络监控 | 低 | **极低** | **重构后无可视测试，串台回归只靠手动** |
+| **动作执行** | 中 | 中 | 富编辑器 RE-1..3、submit/toggle AC-1..4 已落 smoke；hover/scroll_to/keydown 合成仍无 |
+| 页面观测 | 中 | 中 | 防抖边界、低频扫描触发条件；**js_error 已修复并锁（CDP `Runtime.exceptionThrown`，smoke OB-3）** |
+| CDP 网络监控 | 中 | 中 | NF-1..5 回归锁已落 smoke（多客户端/退订/body/关 tab） |
 | 生命周期 | 中(S) | 低 | request-id/Pending 清理、超时无白盒 |
 | WS 服务 | 低 | **极低** | 路由/未知方法/护栏无自动化 |
-| evaluate 安全护栏 | 中 | 低 | 注入拦截无契约测试 |
+| evaluate 安全护栏 | 中 | 中 | SEC-1..3 已落 smoke（process/超长拒绝，正常不破）。MCP 层与裸 WS 双通道 |
 | 多客户端/并发 | 低 | 低 | 订阅隔离仅理论，无真实多客户端 |
 | 登录/会话/验证码 | 低 | — | 靠真人手动，未固化 |
 

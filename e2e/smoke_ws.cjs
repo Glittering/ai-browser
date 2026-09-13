@@ -265,10 +265,10 @@ async function main() {
   await sleep(2500); // scanCaptcha/scanMessages runs at ~1s + 5s interval
   check("OB-1 captcha_appeared detected (DOM scan)", obsEvents.cap.length > 0, "cap=" + obsEvents.cap.length);
   check("OB-2 message_appeared detected (DOM scan)", obsEvents.msg.length > 0, "msg=" + obsEvents.msg.length);
-  // js_error depends on preload window.onerror which contextIsolation may isolate
-  // away from the page's main world — report the observation without failing.
-  console.log("  NOTE | js_error captured=" + obsEvents.err.length + (obsEvents.err.length ? "" : " (contextIsolation likely isolates page errors from preload onerror)"));
-  obs.close();
+  // js_error now flows via CDP Runtime.exceptionThrown (main process) — the
+  // page's main-world Error must be captured with its message.
+  const errMsg = (obsEvents.err[0] && (obsEvents.err[0].message || obsEvents.err[0].text)) || "";
+  check("OB-3 js_error captured via CDP (not preload onerror)", obsEvents.err.length > 0 && errMsg.indexOf("SMSOOM") >= 0, "err=" + obsEvents.err.length + " msg=" + JSON.stringify(errMsg).slice(0, 80));
 
   console.log("\n[submit + toggle action branches (P1)]");
   const cTab = (await b.call("ui.new_tab", { url: HOST + "/ctrls" })).result?.tab;
