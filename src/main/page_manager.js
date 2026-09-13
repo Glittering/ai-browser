@@ -309,16 +309,14 @@ class PageManager {
   }
 
   // Tear down a closed tab's network-monitoring bookkeeping:
-  //  - drop that tab from every session's monitor map and detach its debugger
+  //  - detach that tab's shared per-tab debugger (other tabs/subscribers are
+  //    unaffected — each tab owns its own webContents debugger)
   //  - drop cached request entries made on that tab
   _cleanupTabResources(tabId) {
-    for (const [sessionId, monitors] of this._networkMonitors) {
-      const wc = monitors.get(tabId);
-      if (wc) {
-        try { wc.debugger.detach(); } catch(e) {}
-        monitors.delete(tabId);
-      }
-      if (monitors.size === 0) this._networkMonitors.delete(sessionId);
+    const wc = this._cdpNetworkTabs.get(tabId);
+    if (wc) {
+      try { wc.debugger.detach(); } catch(e) {}
+      this._cdpNetworkTabs.delete(tabId);
     }
     for (const [requestId, entry] of this._networkRequestMap) {
       if (entry.tabId === tabId) this._networkRequestMap.delete(requestId);
@@ -402,50 +400,65 @@ class PageManager {
     }
   }
 
-  _networkMonitors = new Map();
+  // Per-tab CDP debugger shared by all network subscribers. A webContents can
+  // only be debugger-attached once, so attach + Network.enable + the message
+  // listener happen exactly once per tab; subscribers are reference-counted so
+  // the shared debugger is detached only when the last subscriber leaves.
+  _cdpNetworkTabs = new Map();      // tabId -> webContents
+  _networkSubscribers = new Set();  // sessionIds currently using network events
+
   async _startNetworkMonitor(sessionId) {
-    if (this._networkMonitors.has(sessionId)) return;
-    const monitors = new Map();
-    this._networkMonitors.set(sessionId, monitors);
+    if (this._networkSubscribers.has(sessionId)) return;
+    this._networkSubscribers.add(sessionId);
+    // Already attached by an earlier subscriber; keep reference-count > 0.
+    if (this._cdpNetworkTabs.size > 0) return;
     for (const [tabId, view] of this.tabs) {
       try {
         const wc = view.webContents;
         wc.debugger.attach('1.3');
-        monitors.set(tabId, wc);
+        this._cdpNetworkTabs.set(tabId, wc);
         wc.debugger.sendCommand('Network.enable');
-        wc.debugger.on('message', (_event, method, params) => {
-          if (method === 'Network.responseReceived') {
-            const r = params.response;
-            const requestId = params.requestId;
-            this._networkRequestMap.set(requestId, { url: r.url, tabId });
-            this._broadcast('network_response', { url: r.url, status: r.status, statusText: r.statusText, mimeType: r.mimeType, tabId });
-          }
-          if (method === 'Network.loadingFinished') {
-            const requestId = params.requestId;
-            const entry = this._networkRequestMap.get(requestId);
-            if (entry) entry.finished = true;
-          }
-          if (method === 'Network.loadingFailed') {
-            const requestId = params.requestId || '';
-            const entry = this._networkRequestMap.get(requestId);
-            const url = entry ? entry.url : requestId;
-            this._broadcast('network_response', { url: url, status: 0, statusText: 'Failed', errorText: params.errorText || '', tabId });
-          }
-        });
-      } catch(e) {}
+        // Single shared listener per tab -> no duplicate broadcasts even when
+        // several sessions subscribe to the same network events.
+        wc.debugger.on('message', (_event, method, params) => this._onNetworkMessage(tabId, method, params));
+      } catch(e) { /* mid-navigation / already-attached; skip this tab */ }
     }
   }
+
+  _onNetworkMessage(tabId, method, params) {
+    if (method === 'Network.responseReceived') {
+      const r = params.response;
+      this._networkRequestMap.set(params.requestId, { url: r.url, tabId });
+      this._broadcast('network_response', { url: r.url, status: r.status, statusText: r.statusText, mimeType: r.mimeType, tabId });
+    } else if (method === 'Network.loadingFinished') {
+      const entry = this._networkRequestMap.get(params.requestId);
+      if (entry) entry.finished = true;
+    } else if (method === 'Network.loadingFailed') {
+      const requestId = params.requestId || '';
+      const entry = this._networkRequestMap.get(requestId);
+      const url = entry ? entry.url : requestId;
+      this._broadcast('network_response', { url: url, status: 0, statusText: 'Failed', errorText: params.errorText || '', tabId });
+    }
+  }
+
   async _stopNetworkMonitor(sessionId) {
-    const monitors = this._networkMonitors.get(sessionId);
-    if (!monitors) return;
-    for (const [, wc] of monitors) { try { wc.debugger.detach(); } catch(e) {} }
-    this._networkMonitors.delete(sessionId);
+    if (!this._networkSubscribers.has(sessionId)) return;
+    this._networkSubscribers.delete(sessionId);
+    // Other subscribers still need the shared debugger; keep it attached.
+    if (this._networkSubscribers.size > 0) return;
+    for (const wc of this._cdpNetworkTabs.values()) {
+      try { wc.debugger.detach(); } catch(e) {}
+    }
+    this._cdpNetworkTabs.clear();
   }
 
   close() {
-    for (const sessionId of this._networkMonitors.keys()) {
-      this._stopNetworkMonitor(sessionId);
+    // Detach the shared per-tab network debuggers once, then drop all state.
+    for (const wc of this._cdpNetworkTabs.values()) {
+      try { wc.debugger.detach(); } catch(e) {}
     }
+    this._cdpNetworkTabs.clear();
+    this._networkSubscribers.clear();
     // Reject any in-flight requests so callers don't hang on close.
     for (const [id, pending] of this._pendingRequests) {
       try { pending.reject(new Error('PageManager closing')); } catch (e) {}
