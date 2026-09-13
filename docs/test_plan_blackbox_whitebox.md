@@ -29,6 +29,7 @@
 ```
 
 - **关键原则**：jsdom 单测只验证"函数在自造 DOM 里"的纯逻辑；**必须在真实 WebContents 验证的契约放 smoke**（历史上两次回归——preload ESM 崩溃、CSP 禁 eval——正是 jsdom 漏掉而真实层抓到的）。**落地规则**：凡涉及 Chromium 行为（CSP、网络、编辑器合成事件、真实可见性）的用例，不允许只写 jsdom 就宣称"已测"。
+- **`act` 前置契约**：语义树的 `data-ai-id` 由 `get_tree`（extractTree）实时写入 DOM；`act` 的 target 须先经一次 `get_tree` 才在 DOM 上命中。真实流程即"先拉树→按树中 id 执行"。smoke AC 区块已锁（首次直接对未拉树元素 act 会 `Target not found`）。`evaluate` 同理但读 `id` 方式不同。
 
 ---
 

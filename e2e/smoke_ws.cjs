@@ -41,6 +41,14 @@ const OBSERVE_PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>Ob
   <div class="toast" id="msg">验证码已发送</div>
   <script>setTimeout(function(){ throw new Error('SMSOOM'); }, 400);</script>
 </body></html>`;
+const CTRLS_PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>Ctrls</title></head><body>
+  <form id="testForm" onsubmit="event.preventDefault();window.__sub=(window.__sub||0)+1;">
+    <button id="f-in" type="submit">提交</button>
+  </form>
+  <details id="det"><summary>标题</summary><p>详情内容</p></details>
+  <input type="checkbox" id="chk">
+  <button role="switch" id="sw" onclick="window.__sw=(window.__sw||0)+1">开关</button>
+</body></html>`;
 
 function startServer() {
   return new Promise((resolve) => {
@@ -58,6 +66,7 @@ function startServer() {
       else if (p === "/b") res.end(TITLE_PAGE("TabBSmoke"));
       else if (p === "/rich") res.end(RICH_PAGE);
       else if (p === "/observe") res.end(OBSERVE_PAGE);
+      else if (p === "/ctrls") res.end(CTRLS_PAGE);
       else res.end(BUTTON_PAGE);
     });
     server.listen(0, "127.0.0.1", () => resolve(server));
@@ -260,6 +269,22 @@ async function main() {
   // away from the page's main world — report the observation without failing.
   console.log("  NOTE | js_error captured=" + obsEvents.err.length + (obsEvents.err.length ? "" : " (contextIsolation likely isolates page errors from preload onerror)"));
   obs.close();
+
+  console.log("\n[submit + toggle action branches (P1)]");
+  const cTab = (await b.call("ui.new_tab", { url: HOST + "/ctrls" })).result?.tab;
+  await sleep(1500);
+  const rv = (r) => (r && r.result && r.result.value);
+  // get_tree writes data-ai-id into the live DOM; act targets resolve against it.
+  await b.call("ui.get_tree", { tab: cTab });
+  await b.call("ui.act", { action: "submit", target: "f-in", tab: cTab });
+  await sleep(400);
+  check("AC-1 submit dispatched on form (not default nav)", rv(await b.call("ui.evaluate", { js: "window.__sub", tab: cTab })) === 1);
+  await b.call("ui.act", { action: "toggle", target: "chk", tab: cTab });
+  check("AC-2 toggle checkbox flips checked", rv(await b.call("ui.evaluate", { js: "document.getElementById('chk').checked", tab: cTab })) === true);
+  await b.call("ui.act", { action: "toggle", target: "sw", tab: cTab });
+  check("AC-3 toggle role=switch fires click", rv(await b.call("ui.evaluate", { js: "window.__sw", tab: cTab })) === 1);
+  await b.call("ui.act", { action: "toggle", target: "det", tab: cTab });
+  check("AC-4 toggle <details> toggles open", rv(await b.call("ui.evaluate", { js: "document.getElementById('det').open", tab: cTab })) === true);
 
   console.log("\n==== smoke PASS=" + PASS + " FAIL=" + FAIL + " ====");
   b.close();
