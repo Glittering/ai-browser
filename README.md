@@ -79,7 +79,11 @@ process lifecycle** (auto-launch on first call, auto-shutdown when done).
 npm run mcp   # starts stdio MCP server; auto-spawns Electron if not running
 ```
 
-### MCP tools (14)
+### MCP tools (13)
+
+> Kept intentionally small so the always-injected tool list stays cheap in
+> per-message tokens. Low-frequency/flow capabilities live in `skills/` and
+> are loaded on demand — see the two bundled skills at the end of this section.
 
 | Tool | Description |
 |---|---|
@@ -87,7 +91,6 @@ npm run mcp   # starts stdio MCP server; auto-spawns Electron if not running
 | `browse_get_tree {focused_only?, tab?}` | Get the semantic tree of the page |
 | `browse_act {action, target, text?, value?, tab?}` | Click / type / clear / focus / hover / scroll_to |
 | `browse_evaluate {js, tab?}` | Run JS in page context (length + Node-identifier guard) |
-| `browse_read_article {tab?}` | Extract main article (title + paragraphs) from common selectors |
 | `browse_scroll {direction, amount?, target?, tab?}` | Scroll page or element |
 | `browse_wait {condition, target?, text?, timeout_ms?, tab?}` | Wait until condition met |
 | `browse_list_tabs {}` | List all open tabs |
@@ -97,6 +100,15 @@ npm run mcp   # starts stdio MCP server; auto-spawns Electron if not running
 | `browse_network_body {url_pattern, tab?}` | Fetch HTTP response body |
 | `browse_subscribe {events}` | Subscribe to page events |
 | `browse_quit {}` | Shut down the Electron process |
+
+### Skills (on-demand)
+
+Load only when the matching intent arises, keeping the default tool set lean:
+
+- `skills/read-webpage/` — extract a page's main article (title + paragraphs)
+  via `browse_evaluate`. Replaces the former `browse_read_article` tool.
+- `skills/web-network-monitor/` — subscribe to page events and fetch API
+  response bodies for request troubleshooting / forensics.
 
 ### Agent-driven lifecycle
 
