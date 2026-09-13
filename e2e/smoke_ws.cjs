@@ -31,6 +31,16 @@ const BUTTON_PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>Smo
 </body></html>`;
 const TITLE_PAGE = (title) => `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title></head>
 <body><h1 id="h">${title}</h1></body></html>`;
+const RICH_PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>Rich</title></head><body>
+  <div id="pm" class="ProseMirror" contenteditable="true"></div>
+  <div id="ce" contenteditable="true"><p>ce原文</p></div>
+  <textarea id="ta">ta原文</textarea>
+</body></html>`;
+const OBSERVE_PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>Observe</title></head><body>
+  <div class="slider-captcha" id="cap"><span class="captcha">拖动滑块验证</span></div>
+  <div class="toast" id="msg">验证码已发送</div>
+  <script>setTimeout(function(){ throw new Error('SMSOOM'); }, 400);</script>
+</body></html>`;
 
 function startServer() {
   return new Promise((resolve) => {
@@ -46,6 +56,8 @@ function startServer() {
       if (p === "/net") { res.setHeader("Content-Type", "text/plain; charset=utf-8"); return res.end("NET-PAYLOAD-42"); }
       if (p === "/a") res.end(TITLE_PAGE("TabASmoke"));
       else if (p === "/b") res.end(TITLE_PAGE("TabBSmoke"));
+      else if (p === "/rich") res.end(RICH_PAGE);
+      else if (p === "/observe") res.end(OBSERVE_PAGE);
       else res.end(BUTTON_PAGE);
     });
     server.listen(0, "127.0.0.1", () => resolve(server));
@@ -212,6 +224,42 @@ async function main() {
   const eOk = await b.call("ui.evaluate", { js: "2+2" });
   check("SEC-3 guard rails do not break normal evaluate", !eOk?.error && eOk?.result?.value === 4, String(eOk && eOk.result && eOk.result.value));
   A.close(); B.close();
+
+  console.log("\n[rich editors — setContent paths (P1)]");
+  const richTab = (await b.call("ui.new_tab", { url: HOST + "/rich" })).result?.tab;
+  await sleep(1500);
+  const richTree = await b.call("ui.get_tree", { tab: richTab });
+  const richStr = JSON.stringify(((richTree && richTree.result) || "").tree || "");
+  const reHas = (id) => richStr.includes('"' + id + '"');
+  check("RE-0 ProseMirror/CE/textarea got data-ai-id", reHas("pm") || reHas("ce") || reHas("ta"), `pm=${reHas("pm")} ce=${reHas("ce")} ta=${reHas("ta")}`);
+  const setRich = (target, text) => b.call("ui.act", { action: "setContent", target, params: { text }, tab: richTab });
+  const getRich = (expr) => b.call("ui.evaluate", { js: expr, tab: richTab }).then((r) => (r && r.result && r.result.value));
+  await setRich("pm", "P1标题一\nP1标题二");
+  await setRich("ce", "CE替换");
+  await setRich("ta", "P1 textarea 文本");
+  const pmTxt = String(await getRich("document.getElementById('pm').innerText") || "");
+  const ceTxt = String(await getRich("document.getElementById('ce').innerText") || "");
+  const taVal = String(await getRich("document.getElementById('ta').value") || "");
+  check("RE-1 setContent -> ProseMirror div text", pmTxt.includes("P1标题一"), pmTxt);
+  check("RE-2 setContent -> contenteditable replaced", ceTxt.includes("CE替换") && !ceTxt.includes("ce原文"), ceTxt);
+  check("RE-3 setContent -> textarea fallback", taVal.includes("P1 textarea 文本"), taVal);
+
+  console.log("\n[observe — captcha/message/js_error (P1)]");
+  const obs = new Browser();
+  await obs.ready();
+  const obsEvents = { cap: [], msg: [], err: [] };
+  obs.on("captcha_appeared", (d) => obsEvents.cap.push(d));
+  obs.on("message_appeared", (d) => obsEvents.msg.push(d));
+  obs.on("js_error", (d) => obsEvents.err.push(d));
+  await obs.call("ui.subscribe", { events: ["captcha_appeared", "message_appeared", "js_error"] });
+  const obsTab = (await b.call("ui.new_tab", { url: HOST + "/observe" })).result?.tab;
+  await sleep(2500); // scanCaptcha/scanMessages runs at ~1s + 5s interval
+  check("OB-1 captcha_appeared detected (DOM scan)", obsEvents.cap.length > 0, "cap=" + obsEvents.cap.length);
+  check("OB-2 message_appeared detected (DOM scan)", obsEvents.msg.length > 0, "msg=" + obsEvents.msg.length);
+  // js_error depends on preload window.onerror which contextIsolation may isolate
+  // away from the page's main world — report the observation without failing.
+  console.log("  NOTE | js_error captured=" + obsEvents.err.length + (obsEvents.err.length ? "" : " (contextIsolation likely isolates page errors from preload onerror)"));
+  obs.close();
 
   console.log("\n==== smoke PASS=" + PASS + " FAIL=" + FAIL + " ====");
   b.close();

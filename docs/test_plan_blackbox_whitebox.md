@@ -114,7 +114,7 @@ Request/Response/Error/Event 构造、非法 JSON/版本校验、方法白名单
 
 ### 3.4 页面观测 `src/preload/watcher.cjs` —（`U`）
 已覆盖：插入/移除 dom/state_changed、disabled 变化、无关变化不广播、stop 后不发。
-**GAP**：5s 低频 captcha/message 扫描触发条件、js_error/unhandledrejection 捕获、500ms 防抖合并正确性（时间边界）、同 tab 多事件次序。
+**GAP**：5s 低频 captcha/message 扫描触发条件、500ms 防抖合并正确性（时间边界）、同 tab 多事件次序。**实测发现**：`js_error` 经 preload `window.onerror` 捕获在真实桌面下**失效**——`contextIsolation:true` 将 preload 世界与页面主世界隔离，页面抛错不会被 preload 的 `onerror` 捕获（smoke OB 实测 `captured=0`；jsdom 单测同 world 故通）。修法需走 CDP `Runtime.exceptionThrown` 事件，属功能修复而非测试任务（见 §5）。
 
 ### 3.5 网络监控 CDP `src/main/page_manager.js`（_cdpNetworkTabs/_networkSubscribers）—（**GAP**）
 本次重构（每 tab 单例 + 订阅引用计数）**无可自动化测试**。需覆盖：首订阅 attach+`Network.enable`、末退订 tear down、多客户端各收各一份、关 tab 清理、getNetworkBody 跨会话定位不串台（回归锁 `890e715`/`5d8ab00`）——建议落 smoke。
