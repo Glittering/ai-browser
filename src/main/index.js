@@ -1,17 +1,18 @@
 // main/index.js — Electron entry v5 (multi-tab, real UI)
 // One process, one WS server, multiple tabs with real tab bar.
-import { app, BrowserWindow, BrowserView, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, BrowserView, ipcMain } from 'electron';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startWSServer } from './ws_server.js';
 import { PageManager } from './page_manager.js';
+import { config } from '../shared/config.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // CRITICAL: set userData BEFORE app.whenReady — session/cookie storage
 // is initialized during ready, so setting it after loses persistence.
-app.setPath('userData', path.join(app.getPath('home'), '.ai-browser'));
+app.setPath('userData', config.userDataDir);
 
 // Disable GPU compositing — this app is a headless-style browser for API
 // access, not a visual browser. Avoids a whole class of GPU driver crashes
@@ -26,8 +27,8 @@ app.disableHardwareAcceleration();
 // renderer code has no Node access regardless of OS-level sandbox.
 app.commandLine.appendSwitch('no-sandbox');
 
-const PORT = 9223;
-const TAB_BAR_HEIGHT = 36;
+const PORT = config.wsPort;
+const TAB_BAR_HEIGHT = config.tabBarHeight;
 
 let mainWindow = null;
 let wsServer = null;

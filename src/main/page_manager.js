@@ -2,6 +2,7 @@
 // One Electron process, one WS server, multiple tabs.
 // Agent routes via tab ID. Tab 0 is default.
 import { ipcMain, BrowserView } from 'electron';
+import { config } from '../shared/config.js';
 
 class PageManager {
   constructor(browserWindow) {
@@ -249,9 +250,7 @@ class PageManager {
     if (this._networkSubscribers.size > 0) this._ensureCdp(tabId, view, 'Network');
 
     // Mask automation fingerprint: remove Electron from UA
-    view.webContents.setUserAgent(
-      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
-    );
+    view.webContents.setUserAgent(config.userAgent);
 
     // Intercept window.open / new-window → create new tab instead
     view.webContents.setWindowOpenHandler(({ url: urlToOpen }) => {

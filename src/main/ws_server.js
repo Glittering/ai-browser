@@ -1,6 +1,7 @@
 // main/ws_server.js — WebSocket JSON-RPC server v2 (multi-tab)
 import { WebSocketServer } from 'ws';
 import { evaluateGuardError } from '../shared/guards.js';
+import { config } from '../shared/config.js';
 
 let wss = null;
 
@@ -12,7 +13,7 @@ function findInTree(node, field, value) {
   return null;
 }
 
-export function startWSServer(pageManager, port = 9223, onQuit = null) {
+export function startWSServer(pageManager, port = config.wsPort, onQuit = null) {
   wss = new WebSocketServer({ port });
 
   wss.on('connection', (ws, _req) => {

@@ -12,10 +12,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { MCP_TOOLS } from './mcp_tools.js';
 import { evaluateGuardError } from '../shared/guards.js';
+import { config, wsUrl } from '../shared/config.js';
 
-const WS_URL = 'ws://localhost:9223';
+const WS_URL = wsUrl();
 const WS_TIMEOUT = 15000;
-const ELECTRON_PORT = 9223;
+const ELECTRON_PORT = config.wsPort;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
