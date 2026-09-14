@@ -43,8 +43,26 @@ async function analyzeSite(b, site) {
     note: '',
   };
   try {
-    const nav = await b.navigate(site.url);
-    if (nav && nav.error) throw new Error('navigate: ' + (nav.error.message || JSON.stringify(nav.error)));
+    // 真实站导航易受网络抖动 / 反爬重定向(如京东 risk_handler)影响；
+    // 短窗内重试数次，成功即 break，避免把瞬时错误误判为 FAIL。
+    let navErr = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const nav = await b.navigate(site.url);
+      if (!nav || !nav.error) { navErr = null; break; }
+      navErr = nav.error.message || JSON.stringify(nav.error);
+      if (attempt < 3) await sleep(1500);
+    }
+    if (navErr) {
+      // antiBot 站点：导航被反爬墙持续拦截(如京东 risk_handler)属于"探到反爬墙"，
+      // 按 loginWall 同样的容忍策略计 PASS，不硬判 FAIL。
+      if (site.antiBot === true) {
+        out.ok = true;
+        out.kind = 'antibot';
+        out.note = '反爬拦截(容忍): ' + String(navErr).slice(0, 60);
+        return out;
+      }
+      throw new Error('navigate: ' + navErr + ' (after 3 attempts)');
+    }
     await sleep(3500); // 给真实站动态加载留时间
 
     const raw = await b.getTree();

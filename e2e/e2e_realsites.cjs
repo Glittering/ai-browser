@@ -16,6 +16,9 @@ const ROOT = path.resolve(__dirname, '..');
 const WS_PORT = 9223;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// 模块级记录本次自拉的 child（供超时/异常出口清理）；未自拉则为 null
+let childRef = null;
+
 function section(t) { console.log("\n" + "=".repeat(60) + "\n" + t + "\n" + "=".repeat(60)); }
 
 // 端口探活：self-contained（对齐 smoke），未监听则 spawn Electron 并等待
@@ -43,9 +46,24 @@ async function ensureElectron() {
   return child;
 }
 
+// 清理本次自拉的 Electron（仅当 ensureElectron 返回了 child，即端口原本无人监听）。
+// 避免脚本退出后留下孤儿 Electron 占用 9223，阻塞后续 npm run smoke。
+function cleanupSpawned(child) {
+  if (!child) return;
+  pidof(WS_PORT).forEach((p) => { try { process.kill(p, 'SIGTERM'); } catch {} });
+}
+function pidof(port) {
+  try {
+    const { execSync } = require('node:child_process');
+    const out = execSync(`lsof -tiTCP:${port} -sTCP:LISTEN`, { encoding: 'utf8' }).trim();
+    return out ? out.split('\n').map((s) => Number(s)).filter((n) => Number.isInteger(n)) : [];
+  } catch { return []; }
+}
+
 async function main() {
   const child = await ensureElectron();
-  if (!(await checkPort(WS_PORT))) { console.error('无法连接 9223 — 退出'); process.exit(2); }
+  childRef = child;
+  if (!(await checkPort(WS_PORT))) { console.error('无法连接 9223 — 退出'); cleanupSpawned(child); process.exit(2); }
   const args = process.argv.slice(2);
   const runsArg = args.find((a) => a.startsWith('--runs='));
   const runs = runsArg ? Number(runsArg.split('=')[1]) : 1;
@@ -71,8 +89,15 @@ async function main() {
   }
 
   console.log("\n== E2E 完成 ==");
+  cleanupSpawned(child);
   process.exit(FAIL ? 1 : 0);
 }
 
-main().catch((e) => { console.error('e2e error:', e.message); process.exit(2); });
-setTimeout(() => { console.error('E2E TIMEOUT'); process.exit(1); }, 180000);
+main().catch((e) => { console.error('e2e error:', e.message); cleanupSpawned(childRef); process.exit(2); });
+
+// 超时兜底同样清理本次自拉的 Electron
+setTimeout(() => {
+  console.error('E2E TIMEOUT');
+  cleanupSpawned(childRef);
+  process.exit(1);
+}, 180000);

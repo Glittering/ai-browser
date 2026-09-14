@@ -13,8 +13,8 @@ const SITES = require(sitesPath).default || require(sitesPath);
 const list = Array.isArray(SITES) ? SITES : SITES.filter((s) => s && typeof s === 'object');
 
 describe('realsites sites matrix integrity', () => {
-  it('R-META-1: has at least 9 sites (Phase 1 lower bound)', () => {
-    expect(list.length).toBeGreaterThanOrEqual(9);
+  it('R-META-1: has at least 14 sites (Phase 2 lower bound)', () => {
+    expect(list.length).toBeGreaterThanOrEqual(14);
   });
 
   it('R-META-2: every site has a non-empty name and http(s) url', () => {
@@ -40,9 +40,10 @@ describe('realsites sites matrix integrity', () => {
     }
   });
 
-  it('R-META-5: loginWall, when present, is a boolean', () => {
+  it('R-META-5: loginWall / antiBot, when present, are booleans', () => {
     for (const s of list) {
       if ('loginWall' in s) expect(typeof s.loginWall).toBe('boolean');
+      if ('antiBot' in s) expect(typeof s.antiBot).toBe('boolean');
     }
   });
 
