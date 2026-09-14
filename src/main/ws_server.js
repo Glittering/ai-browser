@@ -3,8 +3,10 @@ import { WebSocketServer } from 'ws';
 import { evaluateGuardError } from '../shared/guards.js';
 import { config } from '../shared/config.js';
 
-let wss = null;
-
+// Each startWSServer() owns a private WebSocketServer. Keeping it local (not a
+// module global) means multiple servers can coexist — required by tests that
+// spin up independent servers on ephemeral ports without one close() tearing
+// down another's.
 // Helper: search tree by field value
 function findInTree(node, field, value) {
   if (!node) return null;
@@ -14,7 +16,7 @@ function findInTree(node, field, value) {
 }
 
 export function startWSServer(pageManager, port = config.wsPort, onQuit = null) {
-  wss = new WebSocketServer({ port });
+  const wss = new WebSocketServer({ port });
 
   wss.on('connection', (ws, _req) => {
     const sessionId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -227,12 +229,10 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
     // Actual bound port (for tests that pass port 0 to grab an ephemeral one).
     port: wss.address().port,
     close: () => {
-      if (!wss) return;
       for (const client of wss.clients) {
         try { client.terminate(); } catch (e) {}
       }
       wss.close();
-      wss = null;
     }
   };
 }

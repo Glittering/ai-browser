@@ -16,7 +16,7 @@
 ```json
 {
   "name": "ai-browser",
-  "version": "1.1.0",
+  "version": "1.1.5",
   "main": "src/main/index.js",
   "dependencies": {
     "electron": "^33.0.0",
