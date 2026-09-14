@@ -1,4 +1,4 @@
-# AI Browser — 技术规格 v1.0
+# AI Browser — 技术规格 v1.1
 
 ## 技术栈
 
@@ -8,7 +8,7 @@
 | 运行时 | Node.js 22+ | Electron自带 |
 | WebSocket | ws (npm) | 轻量，JSON-RPC传输 |
 | 测试框架 | Vitest + Playwright | 单元(Electron mock) + 集成(真实BrowserWindow) |
-| 打包 | electron-builder | 未来分发用（1.0不打包） |
+| 打包 | electron-builder | 未来分发用（1.x 不打包） |
 | 语言 | JavaScript (ESM) | Electron原生语言，无编译层 |
 
 ## 依赖
@@ -16,7 +16,7 @@
 ```json
 {
   "name": "ai-browser",
-  "version": "0.1.0",
+  "version": "1.1.0",
   "main": "src/main/index.js",
   "dependencies": {
     "electron": "^33.0.0",

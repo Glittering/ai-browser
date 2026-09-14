@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { MCP_TOOLS } from './mcp_tools.js';
 import { evaluateGuardError } from '../shared/guards.js';
 import { config, wsUrl } from '../shared/config.js';
+import { VERSION } from '../shared/version.js';
 
 const WS_URL = wsUrl();
 const WS_TIMEOUT = 15000;
@@ -96,7 +97,7 @@ function wsCall(method, params = {}) {
 }
 
 const server = new Server(
-  { name: 'ai-browser-mcp', version: '0.1.0' },
+  { name: 'ai-browser-mcp', version: VERSION },
   { capabilities: { tools: {} } }
 );
 
