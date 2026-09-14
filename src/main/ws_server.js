@@ -224,6 +224,8 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
 
   console.log('AI Browser WS server listening on ws://localhost:' + port);
   return {
+    // Actual bound port (for tests that pass port 0 to grab an ephemeral one).
+    port: wss.address().port,
     close: () => {
       if (!wss) return;
       for (const client of wss.clients) {
