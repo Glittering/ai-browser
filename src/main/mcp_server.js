@@ -11,6 +11,7 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { MCP_TOOLS } from './mcp_tools.js';
+import { evaluateGuardError } from '../shared/guards.js';
 
 const WS_URL = 'ws://localhost:9223';
 const WS_TIMEOUT = 15000;
@@ -140,13 +141,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     case 'browse_evaluate': {
       const js = String(args.js || '');
-      // Defense-in-depth: contextIsolation already blocks Node access, but
-      // reject obvious Node exfil patterns and cap length.
-      if (js.length > 5000) {
-        return { content: [{ type: 'text', text: 'Error: script exceeds 5000 char limit' }] };
-      }
-      if (/\bprocess\.\b|\brequire\s*\(|\bchild_process\b|\bglobalThis\.process\b/.test(js)) {
-        return { content: [{ type: 'text', text: 'Error: script contains disallowed Node-specific identifier' }] };
+      // Defense-in-depth via the shared single-source guard: contextIsolation
+      // already blocks Node access, but reject obvious Node exfil patterns + cap
+      // length before forwarding. Same contract as the raw WS ui.evaluate path.
+      const guardErr = evaluateGuardError(js);
+      if (guardErr) {
+        return { content: [{ type: 'text', text: `Error: ${guardErr}` }] };
       }
       const result = await wsCall('ui.evaluate', { js, tab: args.tab });
       return { content: [{ type: 'text', text: JSON.stringify(result) }] };

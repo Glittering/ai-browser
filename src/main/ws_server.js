@@ -1,6 +1,6 @@
 // main/ws_server.js — WebSocket JSON-RPC server v2 (multi-tab)
 import { WebSocketServer } from 'ws';
-import { parseMessage, ERROR_CODES } from '../shared/protocol.js';
+import { evaluateGuardError } from '../shared/guards.js';
 
 let wss = null;
 
@@ -72,15 +72,12 @@ export function startWSServer(pageManager, port = 9223, onQuit = null) {
           }
           case 'ui.evaluate': {
             const js = String(params.js ?? '');
-            // Guard rails on the raw WS path too. The MCP layer already rejects
-            // these, but a direct ws client bypasses MCP, so enforce the same
-            // contract here: cap length and reject obvious Node-exfil patterns.
-            if (js.length > 5000) {
-              send({ jsonrpc: '2.0', id, error: { code: -32602, message: 'script exceeds 5000 char limit' } });
-              break;
-            }
-            if (/\bprocess\.\b|\brequire\s*\(|\bchild_process\b|\bglobalThis\.process\b/.test(js)) {
-              send({ jsonrpc: '2.0', id, error: { code: -32602, message: 'script contains disallowed Node-specific identifier' } });
+            // Guard rails (shared single source) — enforce length + reject
+            // obvious Node-exfil patterns. The MCP layer applies the same guard;
+            // a direct ws client bypasses MCP, so enforce the same contract here.
+            const guardErr = evaluateGuardError(js);
+            if (guardErr) {
+              send({ jsonrpc: '2.0', id, error: { code: -32602, message: guardErr } });
               break;
             }
             const value = await pageManager.evaluate(js, tabId);

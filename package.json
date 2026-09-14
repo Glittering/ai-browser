@@ -1,6 +1,6 @@
 {
   "name": "ai-browser",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "AI-native browser — renders pixels for humans, structured API for agents. No screenshots, no OCR.",
   "main": "src/main/index.js",
   "type": "module",
