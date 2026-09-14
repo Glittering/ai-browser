@@ -13,8 +13,8 @@ const SITES = require(sitesPath).default || require(sitesPath);
 const list = Array.isArray(SITES) ? SITES : SITES.filter((s) => s && typeof s === 'object');
 
 describe('realsites sites matrix integrity', () => {
-  it('R-META-1: has at least 14 sites (Phase 2 lower bound)', () => {
-    expect(list.length).toBeGreaterThanOrEqual(14);
+  it('R-META-1: has at least 17 sites (Phase 3 lower bound)', () => {
+    expect(list.length).toBeGreaterThanOrEqual(17);
   });
 
   it('R-META-2: every site has a non-empty name and http(s) url', () => {

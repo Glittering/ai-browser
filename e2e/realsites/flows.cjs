@@ -75,26 +75,25 @@ module.exports = {
     });
   },
 
-  // 任务⑤多标签生命周期
-  multiTab: async (b) => {
-    await safe('t5', async () => {
-      const tabsOf = (o) => (o.tabs || o.list || (Array.isArray(o) ? o : [])).filter((t) => t && t.id !== undefined);
-      await b.call('ui.new_tab', { url: 'https://www.baidu.com' });
-      await b.call('ui.new_tab', { url: 'https://www.bing.com' });
-      await b.call('ui.new_tab', { url: 'https://www.toutiao.com' });
-      await sleep(3000);
-      const tabs = tabsOf(R(await b.call('ui.list_tabs', {})));
-      console.log('  创建后标签(' + tabs.length + '):');
-      tabs.forEach((t) => console.log(`   id=${t.id} ${t.active ? '[活动]' : '[后台]'}  ${(t.title || '').slice(0, 24)}`));
-      const victim = tabs.find((t) => !t.active) || tabs[0];
-      if (victim) {
-        await b.call('ui.set_active_tab', { tab: victim.id });
-        await sleep(1200);
-        const p = await jsonEval(b, "(function(){return JSON.stringify({title:document.title,url:location.href});})()");
-        console.log('  切换 id=' + victim.id + ' → 活动页:', p && p.title, '|', p && p.url);
-        await b.call('ui.close_tab', { tab: victim.id });
-        console.log('  关闭 id=' + victim.id + ' 后标签数:', tabsOf(R(await b.call('ui.list_tabs', {}))).length);
-      }
+  // 任务⑥GitHub 深化：搜索仓库并校验结果项可解析
+  githubSearch: async (b) => {
+    await safe('t6', async () => {
+      await b.navigate('https://github.com/search?q=electron+ws&type=repositories&s=stars&o=desc');
+      await sleep(4500);
+      const res = await jsonEval(b,
+        "(function(){var links=[];var seen={};" +
+        "var a=document.querySelectorAll('a[href^=\"/\"]');" +
+        "for(var i=0;i<a.length&&links.length<5;i++){var h=a[i].getAttribute('href')||'';" +
+        "var t=(a[i].textContent||'').trim();" +
+        "if(/^\\/[\\w.-]+\\/[\\w.-]+$/.test(h)&&!seen[h]&&t.length>1){seen[h]=1;links.push({h:h,t:t.slice(0,50)});}}" +
+        "var codeSearch=!!document.querySelector('a[href$=\"&type=code\"]');" +
+        "return JSON.stringify({links:links,hasResults:document.body.innerText.indexOf('repository results')>=0||document.body.innerText.indexOf('个结果')>=0});})()"
+      );
+      console.log('  GitHub 搜索仓库链接:', (res && res.links || []).length);
+      (res && res.links || []).slice(0, 5).forEach((l) => console.log(`   ${l.h}  ${l.t}`));
+      console.log('  是否有结果标识:', res && res.hasResults);
+      const verdict = (res && res.links && res.links.length > 0) ? 'GitHub 搜索可解析结果' : '未解析到仓库链接(可能需登录或改版)';
+      console.log('  结论:', verdict);
     });
   },
 };

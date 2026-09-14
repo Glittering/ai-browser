@@ -3,7 +3,7 @@
 // 触发面分桶见 docs/coverage-20-sites-plan.md。loginWall 站点用"探测到登录墙即通过"
 // 的容忍策略（沿用知乎既有做法），不强制登录、不做深度断言。
 
-const BUCKETS = ['search', 'finance', 'media', 'dev', 'ecommerce', 'spa', 'editor'];
+const BUCKETS = ['search', 'finance', 'media', 'dev', 'ecommerce', 'spa', 'editor', 'marketplace'];
 
 module.exports = [
   // --- A 搜索/入口 ---
@@ -28,6 +28,11 @@ module.exports = [
   // --- E 电商/反爬对抗（Phase 1 仅首页三件套；深桶留 Phase 3）---
   // 京东反爬强(risk_handler 拦截导航)，接入 antiBot 容忍：探到反爬墙即 PASS
   { name: '京东', url: 'https://www.jd.com', bucket: 'ecommerce', minNodes: 8, antiBot: true },
+
+  // --- E 电商/反爬深桶 (Phase 3；探测即容忍，不人工登录/验证码) ---
+  { name: '淘宝', url: 'https://www.taobao.com', bucket: 'marketplace', minNodes: 8, antiBot: true },
+  { name: '闲鱼', url: 'https://www.goofish.com', bucket: 'marketplace', minNodes: 8, antiBot: true },
+  { name: '亚马逊', url: 'https://www.amazon.com', bucket: 'marketplace', minNodes: 8, antiBot: true },
 
   // --- D 富编辑器 (Phase 2；进入编辑器需登录态，未登录走登录墙容忍) ---
   { name: '语雀', url: 'https://www.yuque.com', bucket: 'editor', minNodes: 8, loginWall: true },

@@ -78,7 +78,7 @@ async function main() {
   const b = new Browser();
   try {
     await b.ready();
-    const names = ['baiduFollowFirstResult', 'zhihuCreatorProbe', 'multiTab'];
+    const names = ['baiduFollowFirstResult', 'zhihuCreatorProbe', 'multiTab', 'githubSearch'];
     const want = onlyFlow ? names.filter((n) => n === onlyFlow) : names;
     for (const n of want) {
       section('专项 · ' + n);
