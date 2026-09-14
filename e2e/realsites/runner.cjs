@@ -32,6 +32,26 @@ const LOGIN_HINT_JS = `
 })()
 `;
 
+// 页面真实元信息：优先取 document.title（真实页标题），并记录正文文本长度。
+// 修复 F1：此前 out.title 取语义树首节点 label，被内联 JS 文本(如百度 if(window.bds..) 冒充。
+// 修复 F5：bodyLen 供内容可读性校验。
+const PAGE_INFO_JS = `
+(function(){
+  var t=(document.title||'').trim();
+  var bl=(document.body?document.body.innerText:'').trim().length;
+  return JSON.stringify({title:t, bodyLen:bl, url:location.href});
+})()
+`;
+
+// title 是否"可读"：非空且不是内联脚本/混淆 JS 文本
+function titleReadable(t) {
+  if (!t || typeof t !== 'string') return false;
+  const s = String(t).trim();
+  if (!s) return false;
+  if (/function\s*\(|\(function|window\.|document\.|self\.__|__next_s|^if\s*\(|^var |^const |^\(function\(d\)/.test(s)) return false;
+  return /[\u4e00-\u9fa5A-Za-z0-9]/.test(s.slice(0, 40));
+}
+
 async function analyzeSite(b, site) {
   const out = {
     name: site.name,
@@ -70,8 +90,14 @@ async function analyzeSite(b, site) {
     const tree = result && (result.tree || result.root || result);
     const context = result && result.context;
     out.nodes = countNodes(tree);
-    out.title = (tree && (tree.title || (tree.label))) || (context && context.page_title) || '';
-    out.url = site.url;
+
+    // F1: title 优先级 → 真实 document.title（evaluate） > context.page_title > 树内 title
+    let pageInfo = {};
+    try { pageInfo = JSON.parse((await b.evaluate(PAGE_INFO_JS)).result?.value) || {}; } catch {}
+    out.title = (pageInfo.title || context?.page_title || (tree && tree.title) || '').trim();
+    out.titleReadable = titleReadable(pageInfo.title || context?.page_title);
+    out.bodyLen = pageInfo.bodyLen || 0;
+    out.url = pageInfo.url || site.url;
 
     // 仅显式标记 loginWall:true 的站才走"登录墙容忍"（探测到登录即 PASS，不做深度断言）。
     // 其他站 fall through 到下方 node 数校验，避免普通公共站点被误放行。
@@ -92,6 +118,12 @@ async function analyzeSite(b, site) {
     if (out.nodes >= site.minNodes) {
       out.ok = true;
       out.kind = 'node';
+      // F5: 正文可读性软校验（仅标注，不硬判 FAIL，防 SPA/加载时序 flaky）
+      if (site.minText && out.bodyLen > 0 && out.bodyLen < site.minText) {
+        out.note = '正文偏短 bodyLen=' + out.bodyLen + ' < minText=' + site.minText;
+      } else if (!out.titleReadable) {
+        out.note = 'title不可读(' + (out.title || '').slice(0, 24) + ')';
+      }
     } else {
       out.kind = 'node_missing';
       out.note = 'nodes=' + out.nodes + ' < minNodes=' + site.minNodes;
@@ -130,7 +162,7 @@ async function runContract(sites = SITES, opts = {}) {
   return { PASS, FAIL };
 }
 
-module.exports = { runContract, analyzeSite, countNodes, SITES };
+module.exports = { runContract, analyzeSite, countNodes, titleReadable, SITES };
 
 // 支持直接运行：node e2e/realsites/runner.cjs [--runs 2] [--only 名称]
 if (require.main === module) {

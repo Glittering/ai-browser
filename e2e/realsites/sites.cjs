@@ -12,8 +12,8 @@ module.exports = [
   { name: '360搜索', url: 'https://www.so.com/s?q=AI%20browser', bucket: 'search', minNodes: 5 },
 
   // --- B 财经/复杂重页面 ---
-  { name: '东方财富', url: 'https://www.eastmoney.com', bucket: 'finance', minNodes: 16 },
-  { name: '同花顺', url: 'https://www.10jqka.com.cn', bucket: 'finance', minNodes: 16 },
+  { name: '东方财富', url: 'https://www.eastmoney.com', bucket: 'finance', minNodes: 24, minText: 300 },
+  { name: '同花顺', url: 'https://www.10jqka.com.cn', bucket: 'finance', minNodes: 24, minText: 300 },
   { name: '雪球', url: 'https://xueqiu.com', bucket: 'finance', minNodes: 6, loginWall: true },
 
   // --- C 媒体 / SPA 懒加载 (Phase 2) ---

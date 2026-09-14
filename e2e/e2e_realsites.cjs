@@ -1,9 +1,9 @@
 // e2e/e2e_realsites.cjs — 真实驱动 AI Browser 的站点测试入口（表驱动）
 // 1) 先跑矩阵三件套（e2e/realsites/runner.cjs）
-// 2) 再按需跑专项流程（e2e/realsites/flows.cjs：百度进站 / 知乎创作 / 多标签）
+// 2) 再按需跑专项流程（e2e/realsites/flows.cjs：百度进站 / 知乎创作 / 多标签 / GitHub搜索）
 // 用法：
 //   node e2e/e2e_realsites.cjs            # 矩阵 + 全部专项
-//   node e2e/e2e_realsites.cjs --flow zhihu|baidu|tabs   # 仅矩阵 + 指定专项
+//   node e2e/e2e_realsites.cjs --flow zhihu|baidu|tabs|github   # 仅矩阵 + 指定专项
 //   node e2e/e2e_realsites.cjs --runs 2   # 双跑（质量门）
 const path = require('node:path');
 const net = require('node:net');
@@ -37,20 +37,30 @@ async function waitForPort(port, ms) {
   while (Date.now() - t0 < ms) { if (await checkPort(port)) return true; await sleep(500); }
   return false;
 }
+
+// F4: 直启 electron 二进制（复用 smoke 方式），child.pid 即 electron 主进程，
+// 便于按进程组精确清理，去除对 lsof CLI 的主依赖。
 async function ensureElectron() {
   if (await checkPort(WS_PORT)) return null;
-  console.log('port 9223 未监听 — spawn Electron (npm start)');
-  const child = spawn('npm', ['start'], { cwd: ROOT, detached: true, stdio: 'ignore' });
+  console.log('port 9223 未监听 — spawn Electron');
+  const electronPath = require('electron');
+  const child = spawn(electronPath, ['.'], { cwd: ROOT, detached: true, stdio: 'ignore' });
   child.unref();
   if (!(await waitForPort(WS_PORT, 30000))) { console.error('Electron 30s 内未起来'); return null; }
   return child;
 }
 
 // 清理本次自拉的 Electron（仅当 ensureElectron 返回了 child，即端口原本无人监听）。
-// 避免脚本退出后留下孤儿 Electron 占用 9223，阻塞后续 npm run smoke。
+// 优先按进程组 -pid 收割（detached 自成一个 group，含 renderer/GPU 助手）；
+// 失败时降级用 lsof 找监听者收割（可选回退）。
 function cleanupSpawned(child) {
   if (!child) return;
-  pidof(WS_PORT).forEach((p) => { try { process.kill(p, 'SIGTERM'); } catch {} });
+  try { process.kill(-child.pid, 'SIGTERM'); }
+  catch { try { process.kill(child.pid, 'SIGTERM'); } catch {} }
+  // 兜底：仍监听则按 lsof 检索清理（跨环境可选路径）
+  setTimeout(() => {
+    pidof(WS_PORT).forEach((p) => { try { process.kill(p, 'SIGTERM'); } catch {} });
+  }, 300);
 }
 function pidof(port) {
   try {
@@ -74,7 +84,8 @@ async function main() {
   section(`矩阵三件套（${SITES.length} 站 · runs=${runs}）`);
   const { PASS, FAIL } = await runContract(SITES, { runs });
 
-  // ==== 2) 专项流程（默认全部；可用 --flow 过滤）====
+  // ==== 2) 专项流程（默认全部；可用 --flow 过滤）。F2: 专项失败计入 flowFail → 影响退出码。
+  let flowFail = 0;
   const b = new Browser();
   try {
     await b.ready();
@@ -82,15 +93,16 @@ async function main() {
     const want = onlyFlow ? names.filter((n) => n === onlyFlow) : names;
     for (const n of want) {
       section('专项 · ' + n);
-      await flows[n](b);
+      const ok = await flows[n](b);
+      if (ok === false) flowFail++;
     }
   } finally {
     try { b.close(); } catch {}
   }
 
-  console.log("\n== E2E 完成 ==");
+  console.log(`\n== E2E 完成 == matrix FAIL=${FAIL} flow FAIL=${flowFail} ==`);
   cleanupSpawned(child);
-  process.exit(FAIL ? 1 : 0);
+  process.exit((FAIL || flowFail) ? 1 : 0);
 }
 
 main().catch((e) => { console.error('e2e error:', e.message); cleanupSpawned(childRef); process.exit(2); });
