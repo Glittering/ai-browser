@@ -150,6 +150,41 @@ function extractTree() {
     }
   }
 
+  // 富文本块级读取：对任何 contenteditable / 富文本输出段落边界，而非把全文
+  // 揉成一段（否则换行被吞、段落结构丢失）。纯结构化，不识别任何编辑器框架：
+  // 先定位真正的可编辑元素（contenteditable=true，若自身不是则向下找），
+  // 再取其顶层块级子元素；无块时按换行拆分。
+  function extractEditorBlocks(editor) {
+    try {
+      if (!editor) return null;
+      var isEditable = editor.contentEditable === 'true' ||
+        (editor.getAttribute && editor.getAttribute('contenteditable') === 'true');
+      var editable = isEditable
+        ? editor
+        : (editor.querySelector ? editor.querySelector('[contenteditable=true]') : null) || editor;
+      var one = function(b, i) {
+        var t = (b.innerText || (b.textContent ? b.textContent : '') || b.value || '').trim();
+        if (!t) return null;
+        return { i: i, role: 'paragraph', text: t.slice(0, 500) };
+      };
+      // 通用：取可编辑元素顶层块级子元素（Draft 的 [data-block] 即 DIV，天然覆盖）
+      var kids = Array.prototype.slice.call(editable.children || [])
+        .filter(function(c) { return /^(P|H1|H2|H3|H4|H5|H6|LI|PRE|BLOCKQUOTE|DIV)$/.test(c.tagName); });
+      var items = kids.map(function(c, i) {
+        var t = (c.innerText || (c.textContent ? c.textContent : '') || '').trim();
+        if (!t) return null;
+        return { i: i, role: c.tagName.toLowerCase(), text: t.slice(0, 500) };
+      }).filter(Boolean);
+      if (items.length === 0) {
+        // 无显式块时按换行拆分（textarea 语义）
+        var itx = editable.innerText || (editable.textContent ? editable.textContent : '');
+        var tx = itx.split('\n').map(function(s) { return s.trim(); }).filter(Boolean);
+        return tx.map(function(s, i) { return { i: i, role: 'paragraph', text: s.slice(0, 500) }; });
+      }
+      return items;
+    } catch(e) { return null; }
+  }
+
   function extractAttributes(el) {
     var attrs = {};
     try {
@@ -191,7 +226,10 @@ function extractTree() {
     var bounds = extractBounds(el);
     var attributes = extractAttributes(el);
     var nativeId = el.id || "";
+    // editor_type 仅作"解读"元数据提示（agent 可读懂这是什么编辑器），
+    // 操作路径已不依赖它——CDP 受信输入对任何框架通用。
     var editorType = detectEditorType(el);
+    var editorBlocks = editorType ? extractEditorBlocks(el) : null;
 
     // Assign ref ID — use native id, fallback to generated
     var aiId = nativeId || "e:" + el.tagName.toLowerCase() + "-" + (counter++);
@@ -222,6 +260,7 @@ function extractTree() {
     }
     if (Object.keys(attributes).length) node.attributes = attributes;
     if (editorType) node.editor_type = editorType;
+    if (editorBlocks) node.editor_blocks = editorBlocks;
 
     // Children — including iframe content if same-origin
     var elChildren = el.children;

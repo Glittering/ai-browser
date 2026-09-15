@@ -142,6 +142,30 @@ describe('extractTree()', () => {
     const allElements = flattenTree(tree);
     expect(allElements.length).toBeLessThan(500);
   });
+
+  it('SE-021: Draft.js editor emits block-level editor_blocks (P4)', () => {
+    document.documentElement.innerHTML =
+      '<div class="DraftEditor-root"><div class="public-DraftEditor-content" contenteditable="true">' +
+      '<div data-block="true">para one</div>' +
+      '<div data-block="true">para two</div>' +
+      '</div></div>';
+    const tree = extractTree();
+    const editor = flattenTree(tree).find(n => n.editor_type === 'draft'); // DraftEditor-root container
+    const content = flattenTree(tree).find(n => n.editor_type === 'draft' && n.editor_blocks);
+    const blocks = (content ? content.editor_blocks : null) || (editor ? editor.editor_blocks : null);
+    expect(blocks).toBeDefined();
+    expect(blocks.map(b => b.text)).toEqual(['para one', 'para two']);
+  });
+
+  it('SE-022: plain contenteditable splits paragraphs on newline', () => {
+    document.documentElement.innerHTML =
+      '<div id="ce1" contenteditable="true"><p>first block</p><p>second block</p></div>';
+    const tree = extractTree();
+    const ce = flattenTree(tree).find(n => n.editor_type === 'contenteditable');
+    const blocks = ce ? ce.editor_blocks : null;
+    expect(blocks).toBeDefined();
+    expect(blocks.map(b => b.role)).toEqual(['p', 'p']);
+  });
 });
 
 // Helper: recursive find by id

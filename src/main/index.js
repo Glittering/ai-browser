@@ -27,6 +27,17 @@ app.disableHardwareAcceleration();
 // renderer code has no Node access regardless of OS-level sandbox.
 app.commandLine.appendSwitch('no-sandbox');
 
+// Keep renderers fully active even when the window is occluded (e.g. an IDE
+// fullscreen window sits on top of the browser). By default Chromium
+// backgroundses occluded windows: the page goes visibilityState=hidden and
+// the renderer drops CDP-injected mouse/keyboard events — clicks report
+// success (elementFromPoint check passes) yet never reach the page, and
+// typing inserts nothing. These switches stop that backgrounding so the
+// agent's input pipeline works regardless of window stacking.
+app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
+app.commandLine.appendSwitch('disable-renderer-backgrounding');
+app.commandLine.appendSwitch('disable-background-timer-throttling');
+
 const PORT = config.wsPort;
 const TAB_BAR_HEIGHT = config.tabBarHeight;
 

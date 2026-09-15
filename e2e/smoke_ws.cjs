@@ -49,6 +49,14 @@ const CTRLS_PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>Ctrl
   <input type="checkbox" id="chk">
   <button role="switch" id="sw" onclick="window.__sw=(window.__sw||0)+1">开关</button>
 </body></html>`;
+const OFFSCREEN_PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>Offscreen</title></head><body>
+  <div id="top" style="height:200px"><input id="inTop" placeholder="top"></div>
+  <div id="far" style="margin-top:3000px"><input id="inFar" placeholder="far"></div>
+  <script>
+    window.__farClicks = 0;
+    document.getElementById('inFar').addEventListener('click', function(){ window.__farClicks++; });
+  </script>
+</body></html>`;
 
 function startServer() {
   return new Promise((resolve) => {
@@ -67,6 +75,7 @@ function startServer() {
       else if (p === "/rich") res.end(RICH_PAGE);
       else if (p === "/observe") res.end(OBSERVE_PAGE);
       else if (p === "/ctrls") res.end(CTRLS_PAGE);
+      else if (p === "/offscreen") res.end(OFFSCREEN_PAGE);
       else res.end(BUTTON_PAGE);
     });
     server.listen(0, "127.0.0.1", () => resolve(server));
@@ -153,6 +162,25 @@ async function main() {
   const c = await b.call("ui.evaluate", { js: "window.__c" });
   const cVal = c && c.result && c.result.value;
   check("activated click incremented __c to 1", cVal === 1, "c=" + cVal);
+
+  console.log("\n[cdp click scrolls off-screen element into view (regression lock)]");
+  // Regression: before the fix, _cdpPointerTarget dispatched mouse events at the
+  // element's raw rect center, which for off-screen elements sits outside the
+  // viewport — events hit body/空白处, the input never focused, yet act reported
+  // success. The fix scrolls the target into view first and verifies the hit.
+  const offTab = (await b.call("ui.new_tab", { url: `http://127.0.0.1:${server.address().port}/offscreen` })).result?.tab;
+  await sleep(1500);
+  await b.call("ui.get_tree", { tab: offTab });
+  const farAct = await b.call("ui.act", { action: "click", target: "inFar", tab: offTab });
+  await sleep(400);
+  const farFocused = await b.call("ui.evaluate", { js: "document.activeElement && document.activeElement.id", tab: offTab });
+  const farScrolled = await b.call("ui.evaluate", { js: "scrollY", tab: offTab });
+  const farClicks = await b.call("ui.evaluate", { js: "window.__farClicks", tab: offTab });
+  check("OF-1 off-screen click landed on input (focused)", farFocused?.result?.value === "inFar", "active=" + JSON.stringify(farFocused?.result?.value));
+  check("OF-2 page scrolled target into viewport", Number(farScrolled?.result?.value) > 0, "scrollY=" + farScrolled?.result?.value);
+  check("OF-3 click handler fired on target", farClicks?.result?.value === 1, "clicks=" + farClicks?.result?.value);
+  check("OF-4 act reported cdp-click success", !!(farAct && farAct.result && farAct.result.clicked_via === "cdp-click"), JSON.stringify(farAct && (farAct.result || farAct.error)));
+
 
   console.log("\n[multi-tab lifecycle (local, deterministic)]");
   const listCount = async () => {
