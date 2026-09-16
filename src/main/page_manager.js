@@ -152,6 +152,13 @@ class PageManager {
         const r = await this._inputViaCdp(view, target, params.text || '', tid);
         if (r) return r;
       } catch (e) { /* fall through to preload */ }
+    } else if (action === 'upload') {
+      try {
+        const r = await this._uploadViaCdp(view, target, params.file || '', tid);
+        if (r) return r;
+      } catch (e) { /* fall through to preload */ }
+      // 无 CDP 时 preload 无法真正赋值文件（受安全限制），返回失败让 agent 感知。
+      return { success: false, error: 'Upload requires CDP (input file set) — no file input found' };
     }
 
     return this._executeViaPreload(action, target, params, tid);
@@ -309,6 +316,35 @@ class PageManager {
       if (!hit) return null;
     }
     return action === 'hover' ? 'cdp-hover' : 'cdp-click';
+  }
+
+  // 文件上传（封面/附件等，跨框架通用）：HTMLInputElement[type=file] 只能由
+  // DevTools 的 DOM.setFileInputFiles 写入真实文件路径（网页脚本无法伪造
+  // FileList，preload 同样受限），对任何站点/上传组件一视同仁。找到目标 input
+  // 的 objectId 后直接注入文件路径，等价于用户在系统文件选择器里选中。
+  async _uploadViaCdp(view, aiId, filePath, tabId) {
+    if (!this._canCdp(view)) return null;
+    if (!filePath) throw new Error('upload requires a file path');
+    const dbg = view.webContents.debugger;
+    // 用 Runtime.evaluate 拿 objectId，不依赖 DOM nodeId 映射。不额外 click：
+    // DOM.setFileInputFiles 会直接在目标 input 上写入文件并触发 change（等价于
+    // 用户在系统选择器选中）；若再对它 click 会重新唤起系统文件框并清空 files，
+    // 导致刚写入的状态被覆盖。由调用方负责先让上传组件就绪。
+    const idRes = await dbg.sendCommand('Runtime.evaluate', {
+      expression: `(function(){var el=document.querySelector('[data-ai-id="${aiId}"]');return el&&el.__proto__&&el.matches?el.matches('input[type=file],input')?el:null:null;})()`,
+      returnByValue: false,
+    });
+    const objId = idRes && idRes.result && idRes.result.objectId;
+    if (!objId) return null;
+    await dbg.sendCommand('DOM.setFileInputFiles', { files: [filePath], objectId: objId });
+    // 兜底校验：确认 files 已写入
+    const ver = await dbg.sendCommand('Runtime.evaluate', {
+      expression: `(function(){var f=document.querySelector('[data-ai-id="${aiId}"]').files;return f&&f.length>0?{name:f[0].name,size:f[0].size}:null;})()`,
+      returnByValue: true,
+    });
+    const v = ver && ver.result && ver.result.value;
+    if (!v) return { success: false, error: 'Upload not written to input' };
+    return { success: true, uploaded: v.name, size: v.size };
   }
 
   // 通用文本输入（type/setContent 共用）：先让窗口/视图拿到焦点，再在页面里

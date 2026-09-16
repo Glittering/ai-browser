@@ -29,14 +29,15 @@ export const MCP_TOOLS = [
   },
   {
     name: 'browse_act',
-    description: 'Perform an action on an element by its data-ai-id: click, type, clear, select, focus, hover, scroll_to.',
+    description: 'Perform an action on an element by its data-ai-id: click, type, clear, select, focus, hover, scroll_to, upload.',
     inputSchema: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['click', 'type', 'clear', 'focus', 'hover', 'scroll_to'], description: 'Action.' },
+        action: { type: 'string', enum: ['click', 'type', 'clear', 'focus', 'hover', 'scroll_to', 'upload'], description: 'Action.' },
         target: { type: 'string', description: 'Element data-ai-id from the semantic tree.' },
         text: { type: 'string', description: 'Text to type (type only).' },
         value: { type: 'string', description: 'Value for select.' },
+        file: { type: 'string', description: 'Absolute path to upload (upload only, target must be a file input).' },
         tab: { type: 'integer', description: 'Tab id (default: active tab).' }
       },
       required: ['action', 'target']

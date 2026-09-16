@@ -371,7 +371,21 @@ function extractTree() {
 // ============================================================
 
 function extractPageContext() {
-  // MODALS — unified search across ALL patterns
+  // MODALS — unified search across ALL patterns.
+  // Visibility rule: do NOT use `el.offsetParent === null` to skip hidden nodes —
+  // position:fixed overlays (masks/dialogs/popups) always have offsetParent===null
+  // even when fully visible, so that check silently drops every modal. Use a
+  // layout-rect + computed-style test that tolerates fixed positioning instead.
+  function isShown(el) {
+    try {
+      if (el.getClientRects().length === 0) return false;
+      var cs = window.getComputedStyle(el);
+      if (cs.display === "none" || cs.visibility === "hidden") return false;
+      var r = el.getBoundingClientRect();
+      if (r.width === 0 && r.height === 0) return false;
+    } catch (e) { return false; }
+    return true;
+  }
   var modalSelectors = [
     "[class*=modal]", "[class*=dialog]", "[class*=popup]", "[class*=drawer]", "[class*=overlay]", "[class*=mask]",
     "[role=dialog]", "[role=alertdialog]"
@@ -381,8 +395,9 @@ function extractPageContext() {
     var els = document.querySelectorAll(modalSelectors[si]);
     for (var ei = 0; ei < els.length; ei++) {
       var m = els[ei];
-      if (m.offsetParent === null) continue;
-      var btns = m.querySelectorAll("button,input[type=submit]");
+      if (!isShown(m)) continue;
+      // Buttons may be real <button> or ARIA/JS-styled fakes (div/span[role=button]).
+      var btns = m.querySelectorAll("button,[role=button],input[type=submit],input[type=button]");
       var inps = m.querySelectorAll("input:not([type=hidden]),textarea,select");
       if (btns.length === 0 && inps.length === 0) continue;
 
@@ -407,7 +422,7 @@ function extractPageContext() {
         var descId = inp.getAttribute("aria-describedby");
         if (descId) {
           var descEl = document.getElementById(descId);
-          if (descEl && descEl.offsetParent !== null) {
+          if (descEl && isShown(descEl)) {
             var dt = (descEl.textContent || "").trim();
             if (dt && dt.length < 100) fieldError = dt;
           }
@@ -521,7 +536,7 @@ function extractPageContext() {
   var formList = [];
   for (var fi = 0; fi < forms.length; fi++) {
     var f = forms[fi];
-    if (f.offsetParent === null) continue;
+    if (!isShown(f)) continue;
     var inps = f.querySelectorAll("input:not([type=hidden]),textarea,select");
     var fields = [];
     for (var ii = 0; ii < inps.length; ii++) {
