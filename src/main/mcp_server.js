@@ -11,17 +11,20 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { MCP_TOOLS } from './mcp_tools.js';
+import { evaluateGuardError } from '../shared/guards.js';
+import { config, wsUrl } from '../shared/config.js';
+import { VERSION } from '../shared/version.js';
+import { createWsClient } from './mcp_ws.js';
 
-const WS_URL = 'ws://localhost:9223';
+const WS_URL = wsUrl();
 const WS_TIMEOUT = 15000;
-const ELECTRON_PORT = 9223;
+const ELECTRON_PORT = config.wsPort;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-import { createRequire } from 'module';
-const require = createRequire(import.meta.url);
-const WebSocket = require('ws');
+// Persistent WS client — one reused connection with incrementing ids.
+const wsClient = createWsClient({ url: WS_URL, timeout: WS_TIMEOUT });
 
 // Probe whether the Electron WS server is already listening on the port.
 function checkPort(port) {
@@ -66,35 +69,8 @@ async function ensureElectronRunning() {
   return true;
 }
 
-function wsCall(method, params = {}) {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(WS_URL);
-    let resolved = false;
-
-    ws.on('open', () => {
-      ws.send(JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }));
-    });
-
-    ws.on('message', (data) => {
-      if (resolved) return;
-      resolved = true;
-      try {
-        const msg = JSON.parse(data.toString());
-        if (msg.error) reject(new Error(msg.error.message || 'RPC error'));
-        else resolve(msg.result);
-      } catch (e) {
-        reject(e);
-      }
-      ws.close();
-    });
-
-    ws.on('error', (e) => { if (!resolved) { resolved = true; reject(e); } });
-    setTimeout(() => { if (!resolved) { resolved = true; reject(new Error('WS timeout')); } }, WS_TIMEOUT);
-  });
-}
-
 const server = new Server(
-  { name: 'ai-browser-mcp', version: '0.1.0' },
+  { name: 'ai-browser-mcp', version: VERSION },
   { capabilities: { tools: {} } }
 );
 
@@ -111,12 +87,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   switch (name) {
     case 'browse_navigate': {
-      const result = await wsCall('ui.navigate', { url: args.url, tab: args.tab });
+      const result = await wsClient.call('ui.navigate', { url: args.url, tab: args.tab });
       return { content: [{ type: 'text', text: JSON.stringify(result) }] };
     }
 
     case 'browse_get_tree': {
-      const result = await wsCall('ui.get_tree', { focusedOnly: args.focused_only || false, tab: args.tab });
+      const result = await wsClient.call('ui.get_tree', { focusedOnly: args.focused_only || false, tab: args.tab });
       // Don't truncate mid-JSON — a sliced JSON string is unparseable and
       // worse than no data. Return the full tree; MCP transport handles
       // large messages fine.
@@ -129,7 +105,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     case 'browse_act': {
-      const result = await wsCall('ui.act', {
+      const result = await wsClient.call('ui.act', {
         action: args.action,
         target: args.target,
         params: { text: args.text, value: args.value },
@@ -140,20 +116,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     case 'browse_evaluate': {
       const js = String(args.js || '');
-      // Defense-in-depth: contextIsolation already blocks Node access, but
-      // reject obvious Node exfil patterns and cap length.
-      if (js.length > 5000) {
-        return { content: [{ type: 'text', text: 'Error: script exceeds 5000 char limit' }] };
+      // Defense-in-depth via the shared single-source guard: contextIsolation
+      // already blocks Node access, but reject obvious Node exfil patterns + cap
+      // length before forwarding. Same contract as the raw WS ui.evaluate path.
+      const guardErr = evaluateGuardError(js);
+      if (guardErr) {
+        return { content: [{ type: 'text', text: `Error: ${guardErr}` }] };
       }
-      if (/\bprocess\.\b|\brequire\s*\(|\bchild_process\b|\bglobalThis\.process\b/.test(js)) {
-        return { content: [{ type: 'text', text: 'Error: script contains disallowed Node-specific identifier' }] };
-      }
-      const result = await wsCall('ui.evaluate', { js, tab: args.tab });
+      const result = await wsClient.call('ui.evaluate', { js, tab: args.tab });
       return { content: [{ type: 'text', text: JSON.stringify(result) }] };
     }
 
     case 'browse_scroll': {
-      const result = await wsCall('ui.scroll', {
+      const result = await wsClient.call('ui.scroll', {
         direction: args.direction || 'down',
         amount: args.amount,
         target: args.target,
@@ -163,7 +138,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     case 'browse_wait': {
-      const result = await wsCall('ui.wait', {
+      const result = await wsClient.call('ui.wait', {
         condition: args.condition,
         target: args.target,
         text: args.text,
@@ -174,38 +149,38 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     case 'browse_list_tabs': {
-      const result = await wsCall('ui.list_tabs', {});
+      const result = await wsClient.call('ui.list_tabs', {});
       return { content: [{ type: 'text', text: JSON.stringify(result) }] };
     }
 
     case 'browse_new_tab': {
-      const result = await wsCall('ui.new_tab', { url: args.url || null });
+      const result = await wsClient.call('ui.new_tab', { url: args.url || null });
       return { content: [{ type: 'text', text: JSON.stringify(result) }] };
     }
 
     case 'browse_close_tab': {
-      const result = await wsCall('ui.close_tab', { tab: args.tab });
+      const result = await wsClient.call('ui.close_tab', { tab: args.tab });
       return { content: [{ type: 'text', text: JSON.stringify(result) }] };
     }
 
     case 'browse_set_active_tab': {
-      const result = await wsCall('ui.set_active_tab', { tab: args.tab });
+      const result = await wsClient.call('ui.set_active_tab', { tab: args.tab });
       return { content: [{ type: 'text', text: JSON.stringify(result) }] };
     }
 
     case 'browse_network_body': {
-      const result = await wsCall('ui.network_body', { url_pattern: args.url_pattern, tab: args.tab });
+      const result = await wsClient.call('ui.network_body', { url_pattern: args.url_pattern, tab: args.tab });
       return { content: [{ type: 'text', text: JSON.stringify(result) }] };
     }
 
     case 'browse_subscribe': {
-      const result = await wsCall('ui.subscribe', { events: args.events || [] });
+      const result = await wsClient.call('ui.subscribe', { events: args.events || [] });
       return { content: [{ type: 'text', text: JSON.stringify(result) }] };
     }
 
     case 'browse_quit': {
       // Fire and forget — the WS server closes before we'd get the response.
-      try { await wsCall('ui.quit', {}); } catch (e) {}
+      try { await wsClient.call('ui.quit', {}); } catch (e) {}
       return { content: [{ type: 'text', text: 'AI Browser shutting down' }] };
     }
 
