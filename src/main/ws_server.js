@@ -57,7 +57,11 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
       try {
         switch (method) {
           case 'ui.get_tree': {
-            const result = await pageManager.getTree(params.focusedOnly, tabId);
+            // P0 probe: params.ax routes to the AX read layer (getFullAXTree);
+            // default path (preload extractor) is unchanged.
+            const result = params.ax
+              ? await pageManager.getTreeViaAx(tabId)
+              : await pageManager.getTree(params.focusedOnly, tabId);
             send({ jsonrpc: '2.0', id, result });
             break;
           }
@@ -125,6 +129,13 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
           }
           case 'ui.get_focused': {
             const result = await pageManager.getFocused(tabId);
+            send({ jsonrpc: '2.0', id, result });
+            break;
+          }
+          case 'ui.peek': {
+            // A (plan §9.5): safely reveal a folded/hoverable affordance and
+            // return the AX diff. Non-committing (hover only).
+            const result = await pageManager.peek(tabId, params.target, params);
             send({ jsonrpc: '2.0', id, result });
             break;
           }

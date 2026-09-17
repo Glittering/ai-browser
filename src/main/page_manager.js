@@ -3,6 +3,7 @@
 // Agent routes via tab ID. Tab 0 is default.
 import { ipcMain, BrowserView } from 'electron';
 import { config } from '../shared/config.js';
+import axExtractor from './axExtractor.js';
 
 class PageManager {
   constructor(browserWindow) {
@@ -134,6 +135,85 @@ class PageManager {
     });
   }
 
+  // AX probe read layer (P0). Additive — the default getTree path is untouched.
+  // Reuses the per-tab shared debugger: enables the Accessibility + DOM domains
+  // into the same reference-counted _cdpTabs entry as Network/Runtime, so teardown
+  // and multi-client reference counting are unchanged.
+  async getTreeViaAx(tabId) {
+    const tid = tabId !== undefined ? tabId : this.activeTab;
+    const view = this._getView(tid);
+    if (!view) return { tree: null, context: null };
+    try {
+      this._ensureCdp(tid, view, 'Accessibility');
+      this._ensureCdp(tid, view, 'DOM');
+    } catch (e) {
+      return { tree: null, context: null, error: 'cdp-unavailable' };
+    }
+    return axExtractor.extractFromDebugger(view.webContents.debugger);
+  }
+
+  // C (plan §9.5): materialize data-ai-id for interactive elements at the act/peek
+  // boundary only. Reading (getTreeViaAx/axRead) never touches the DOM. Idempotent:
+  // existing handles (default extractor's `e:...`) are preserved, never overwritten.
+  async _ensureAxHandles(view, tabId) {
+    if (!view || !view.webContents || !view.webContents.debugger) return;
+    try {
+      this._ensureCdp(tabId, view, 'Accessibility');
+      this._ensureCdp(tabId, view, 'DOM');
+      await axExtractor.ensureHandles(view.webContents.debugger);
+    } catch (e) { /* no CDP: fall through to the preload path */ }
+  }
+
+  // A (plan §9.5): `ui.peek` — safely explore the "next step". Hover-reveal is
+  // non-committing (mouseMoved without press), so it never double-clicks or
+  // mis-triggers; we return the AX diff (newly revealed / hidden interactive
+  // nodes) so the agent can discover folded entries (e.g. B站 写文章) without
+  // guessing URLs. Revert moves the pointer away to close the submenu.
+  async peek(tabId, target, opts = {}) {
+    const tid = tabId !== undefined ? tabId : this.activeTab;
+    const view = this._getView(tid);
+    if (!view) return { revealed: [], hidden: [], mode: 'hover', error: 'Tab not found' };
+    if (!target) return { revealed: [], hidden: [], mode: 'hover', error: 'No target' };
+    const out = { revealed: [], hidden: [], mode: 'hover' };
+    try {
+      this._ensureCdp(tid, view, 'Accessibility');
+      this._ensureCdp(tid, view, 'DOM');
+    } catch (e) { return { ...out, error: 'cdp-unavailable' }; }
+    const dbg = view.webContents.debugger;
+    try {
+      const beforeRaw = await axExtractor.axRaw(dbg);
+      if (!beforeRaw.length) return out;
+      await axExtractor.ensureHandles(dbg); // give the target a stable append id
+      const center = await this.evaluate(
+        `(function(){var el=document.querySelector('[data-ai-id="${target}"]');if(!el)return null;` +
+        `el.scrollIntoView({block:'center',inline:'center',behavior:'instant'});` +
+        `var r=el.getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)};})()`,
+        tid);
+      if (!center) return out;
+      try {
+        if (this.window.show) this.window.show();
+        if (this.window.moveTop) this.window.moveTop();
+        if (this.window.focus) this.window.focus();
+        view.webContents.focus();
+      } catch (e) {}
+      const send = (method, params) => dbg.sendCommand(method, params);
+      await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: center.x, y: center.y });
+      const hoverMs = Math.max(0, Number(opts.hoverMs) || 450);
+      await new Promise((r) => setTimeout(r, hoverMs));
+      const afterRaw = await axExtractor.axRaw(dbg);
+      const diff = axExtractor.diffAx(beforeRaw, afterRaw);
+      out.revealed = diff.revealed;
+      out.hidden = diff.hidden;
+      const revertMs = Math.max(0, Number(opts.revertMs) || 1500);
+      if (revertMs > 0) {
+        setTimeout(() => { try { send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 4, y: 4 }); } catch (e) {} }, revertMs);
+      }
+    } catch (e) {
+      out.error = String((e && e.message) || e).slice(0, 200);
+    }
+    return out;
+  }
+
   async executeAction(action, target, params = {}, tabId) {
     const tid = tabId !== undefined ? tabId : this.activeTab;
     const view = this._getView(tid);
@@ -144,16 +224,19 @@ class PageManager {
     // 无 debugger 时回退 preload 合成事件。
     if (action === 'click' || action === 'hover') {
       try {
+        await this._ensureAxHandles(view, tid);
         const via = await this._cdpPointerTarget(view, action, target, tid);
         if (via) return { success: true, clicked_via: via, target };
       } catch (e) { /* fall through to preload */ }
     } else if (action === 'type' || action === 'setContent') {
       try {
+        await this._ensureAxHandles(view, tid);
         const r = await this._inputViaCdp(view, target, params.text || '', tid);
         if (r) return r;
       } catch (e) { /* fall through to preload */ }
     } else if (action === 'upload') {
       try {
+        await this._ensureAxHandles(view, tid);
         const r = await this._uploadViaCdp(view, target, params.file || '', tid);
         if (r) return r;
       } catch (e) { /* fall through to preload */ }
@@ -379,18 +462,27 @@ class PageManager {
       tabId
     );
     if (!prep || !prep.ok) return null;
+    const norm = (s) => String(s || '').replace(/\s+/g, '');
+    // 幂等短路：若可编辑区当前内容已恰好等于目标文本，直接返回而不做清空+重打。
+    // 每次全量重写都会把草稿标脏，重新触发编辑器自身的"草稿备份"/版本气泡——对
+    // 相同文本的重复调用（重试/校正）不应让它反复闪烁。
+    const curText = await this.evaluate(
+      `(function(){var e=document.activeElement;return (e&&(e.innerText||e.value||''))||'';})()`,
+      tabId
+    );
+    if (norm(curText) === norm(text)) {
+      return { success: true, method: 'cdp-input-unchanged', changes: 0, chars: 0 };
+    }
     const dbg = view.webContents.debugger;
     const send = (method, params) => dbg.sendCommand(method, params);
-    // 受信 Cmd+A 全选（macOS Command=modifiers 4；编辑器自身处理）→ 等选区提交。
-    // 若选区仍为空（部分网站移除全选快捷键——知乎 keyBindingFn 对 Cmd+A 返回
-    // null，浏览器原生全选也不触发），回退程序化全选：contenteditable 用 Range
-    // 选中全部文本、input/textarea 用 setSelectionRange。框架（Draft 等）通过
-    // selectionchange 把 DOM 选区同步进内部 EditorState，随后受信 Delete 走
-    // 框架自身删除链路。全程只操作"当前可编辑区"，无框架嗅探。
-    await this._cdpKey(send, { key: 'a', code: 'KeyA', vk: 65, mod: 4 });
-    await new Promise((r) => setTimeout(r, 120)); // Draft 异步提交全选状态
+    // 全选 + 整段删除。刻意不发送受信 Cmd+A：在本应用里注入受信 Cmd+A 会触发
+    // macOS 的应用 About 面板（原生 NSAlert，"版本"弹窗），每次输入都弹。故全选
+    // 一律走页内程序化选择（contenteditable 用 Range / input·textarea 用
+    // setSelectionRange，already provided by _selectAllFallback），框架经
+    // selectionchange 同步进内部 EditorState；随后仍是无修饰键的受信 Delete，
+    // 走框架自身删除链路。行为与校验逻辑不变，只是去掉 Cmd+A 这个副作用键。
     await this._selectAllFallback(aiId, tabId);
-    await new Promise((r) => setTimeout(r, 80)); // 等选区同步进框架状态
+    await new Promise((r) => setTimeout(r, 120)); // 等选区同步进框架状态
     await this._cdpKey(send, { key: 'Delete', code: 'Delete', vk: 46, mod: 0 });
     await new Promise((r) => setTimeout(r, 80)); // 等删除后的空状态提交
     const paras = String(text == null ? '' : text).split('\n');
@@ -404,7 +496,6 @@ class PageManager {
       `(function(){var e=document.activeElement;return {text:(e.innerText||e.value||'')};})()`,
       tabId
     );
-    const norm = (s) => String(s || '').replace(/\s+/g, '');
     const want = norm(text);
     const got = norm(after && after.text);
     const ok = want
