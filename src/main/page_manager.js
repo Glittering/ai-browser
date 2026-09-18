@@ -700,13 +700,17 @@ class PageManager {
     try {
       const r = await frame.executeJavaScript(`(function(){
         var ref=document.querySelector('[data-ai-id="${aiId}"]');if(!ref)return {ok:false,reason:'no-ref'};
-        var e=ref;if(ref.querySelector){var inner=ref.querySelector('[contenteditable="true"],textarea');if(inner)e=inner;}
-        if(!e||(e.contentEditable!=='true'&&e.tagName!=='TEXTAREA'))return {ok:false,reason:'not-editable'};
+        var e=ref;if(ref.querySelector){var inner=ref.querySelector('[contenteditable="true"],textarea,input[type="text"],input[type="search"],input[type="title"],input:not([type])');if(inner)e=inner;}
+        var isInput=(e.tagName==='INPUT'||e.tagName==='TEXTAREA');
+        var isCE=e.contentEditable==='true';
+        if(!(isInput||isCE))return {ok:false,reason:'not-editable'};
         e.focus();
         var ae=document.activeElement&&(document.activeElement===e?'same':'other:'+(document.activeElement.tagName||''));
-        var sa=document.execCommand('selectAll');
+        var sa=false;
+        if(isCE){ sa=document.execCommand('selectAll'); }
+        else if(isInput){ var len=(e.value||'').length; if(len){ try{e.setSelectionRange(0,len);}catch(_){ if(e.select)e.select(); } } }
         var del=document.execCommand('delete');
-        var txt=e.tagName==='TEXTAREA'?(e.value||''):(e.innerText||e.textContent||'');
+        var txt=isInput?(e.value||''):(e.innerText||e.textContent||'');
         return {ok:txt.trim()==='',sa:!!sa,del:!!del,left:(txt||'').trim().length,ae:ae};
       })()`);
       if (!(r && r.ok)) console.error('[clearInFrame] FAIL', JSON.stringify(r));
