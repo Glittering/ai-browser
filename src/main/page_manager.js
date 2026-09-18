@@ -149,7 +149,95 @@ class PageManager {
     } catch (e) {
       return { tree: null, context: null, error: 'cdp-unavailable' };
     }
-    return axExtractor.extractFromDebugger(view.webContents.debugger);
+    const main = await axExtractor.extractFromDebugger(view.webContents.debugger);
+    // P0 down-drill: splice OOPIF sub-frame editors into the main AX tree so
+    // editors rendered in cross-process iframes (B站 write-article: york/read-draft)
+    // become visible to `ui.get_tree {ax:true}`. Each sub-frame is read by
+    // executeJavaScript in its own context (top-frame AX + querySelector can't
+    // reach OOPIF content), then merged purely by mergeFrameTrees.
+    const frames = await this._readOopifFrames(view, tid);
+    if (frames.length && main && main.tree) {
+      main.tree = axExtractor.mergeFrameTrees(main.tree, frames);
+    }
+    return main;
+  }
+
+  // Read editable/interactive fields out of each out-of-process sub-frame via
+  // Frame.executeJavaScript (runs in that frame's own context). Returns
+  // [{ key, label, tree }] — pure mergeFrameTrees input. Stamps idempotent
+  // data-ai-id = `axf-{frameSeq}-{idx}` inside each frame so the act layer can
+  // (a) find the owning frame by testing which frame has `[data-ai-id=...]`, and
+  // (b) run its JS in that frame's own context (top querySelector can't reach OOPIF).
+  async _readOopifFrames(view, tabId) {
+    try {
+      const root = view.webContents.mainFrame;
+      if (!root || !root.framesInSubtree) return [];
+      const out = [];
+      let frameSeq = 0;
+      for (const frame of root.framesInSubtree) {
+        if (frame === root) continue; // main frame handled by AX path
+        frameSeq += 1;
+        const key = 'frame-' + frameSeq;
+        const prefix = 'axf-' + frameSeq + '-';
+        try {
+          const dto = await frame.executeJavaScript(`(function(prefix){
+            if(!document||!document.body) return null;
+            var sel='[contenteditable],[role="textbox"],[role="combobox"],textarea,input[type="text"],input[type="title"],input[type="search"],button,[role="button"]';
+            var els=Array.prototype.slice.call(document.querySelectorAll(sel));
+            var out=[]; var idx=0;
+            for(var k=0;k<els.length;k++){
+              var e=els[k];
+              if(e.isContentEditable){ // skip editable boxes nested inside a contenteditable root
+                var inside=false;for(var p=e.parentElement;p;p=p.parentElement){if(p.isContentEditable&&p!==e){inside=true;break;}}
+              }
+              var r=e.getBoundingClientRect();
+              if(r.width<4||r.height<4)continue; // hidden
+              if(e.tagName==='BUTTON'||(e.getAttribute&&e.getAttribute('role')==='button')){} // buttons not relevant for read-editor; keep anyway
+              var ai=prefix+idx;
+              e.setAttribute('data-ai-id',ai);
+              var isEditable=e.isContentEditable||e.tagName==='TEXTAREA'||((e.tagName==='INPUT'));
+              var role;
+              if(e.isContentEditable)role='textbox';
+              else if(e.tagName==='TEXTAREA')role='textbox';
+              else if(e.tagName==='INPUT')role='textbox';
+              else if(e.tagName==='BUTTON'||e.getAttribute&&e.getAttribute('role')==='button')role='button';
+              else if(e.tagName==='SELECT'||e.getAttribute&&e.getAttribute('role')==='combobox')role='select';
+              else role='textbox';
+              var label=e.getAttribute('aria-label')||e.getAttribute('placeholder')||e.getAttribute('title')||'';
+              if(!label&&e.getAttribute&&e.getAttribute('data-placeholder'))label=e.getAttribute('data-placeholder');
+              if(!label&&(e.tagName==='BUTTON'||(e.getAttribute&&e.getAttribute('role')==='button'))){label=(e.innerText||e.textContent||'').trim();}
+              var editor_type=null;
+              if(e.isContentEditable)editor_type='richtext';
+              else if(e.tagName==='TEXTAREA')editor_type='textarea';
+              else if(e.tagName==='INPUT')editor_type='textbox';
+              out.push({id:ai,role:role,label:label,editor_type:editor_type,bounds:{x:Math.round(r.x),y:Math.round(r.y),width:Math.round(r.width),height:Math.round(r.height)}});
+              idx++;
+            }
+            return out.length?out:null;
+          })(${JSON.stringify(prefix)})`);
+          if (!dto || !dto.length) continue;
+          const tree = {
+            id: key,
+            role: 'generic',
+            label: frame.name || ('frame-' + frameSeq),
+            states: [],
+            actions: [],
+            bounds: { x: 0, y: 0, width: 0, height: 0 },
+            children: dto.map((n) => ({
+              id: n.id,
+              role: n.role,
+              label: n.label || '',
+              states: n.editor_type ? ['editable=' + n.editor_type, 'focusable'] : ['focusable'],
+              ...(n.editor_type ? { editor_type: n.editor_type } : {}), // first-class, mirrors main AX path
+              actions: n.role === 'button' ? ['click', 'focus'] : ['click', 'focus', 'type', 'setContent', 'clear'],
+              bounds: n.bounds,
+            })),
+          };
+          out.push({ key, label: frame.name || ('frame-' + frameSeq), tree });
+        } catch (e) { /* skip unreachable frame */ }
+      }
+      return out;
+    } catch (e) { return []; }
   }
 
   // C (plan §9.5): materialize data-ai-id for interactive elements at the act/peek
@@ -275,6 +363,18 @@ class PageManager {
     const view = this._getView(tid);
     if (!view) throw new Error('Tab not found');
 
+    // OOPIF routing: if the JS targets a sub-frame `data-ai-id` (`axf-...`), run
+    // it inside that frame's own context via Frame.executeJavaScript — the
+    // top-frame CDP Runtime.evaluate cannot see OOPIF (cross-process iframe)
+    // DOM, so probes/`ui.evaluate` would otherwise read `null` back.
+    const m = /data-ai-id="(axf-\d+-\d+)"/.exec(js);
+    if (m) {
+      const frame = await this._owningFrame(view, m[1]);
+      if (frame) {
+        try { return await frame.executeJavaScript(js.startsWith('(') ? js : `(function(){return ${js};})()`); }
+        catch (e) { /* fall through to top-frame path */ }
+      }
+    }
     // Preferred path: CDP Runtime.evaluate. It runs on the DevTools protocol
     // channel and is NOT subject to the page's CSP code-generation (eval)
     // restrictions, so it works on strict sites (Bing, Gmail, ...) where the
@@ -358,25 +458,73 @@ class PageManager {
     await inputCmd('Input.dispatchKeyEvent', { ...base, type: 'keyUp' });
   }
 
+  // Locate the frame that owns a sub-frame handle (`axf-{frameSeq}-{idx}`).
+  // Returns the WebFrameMain, or null when the handle lives in the main frame
+  // (or is unlocatable) — callers fall back to the top-frame path.
+  async _owningFrame(view, aiId) {
+    const root = view.webContents.mainFrame;
+    const frames = root && root.framesInSubtree ? root.framesInSubtree : [];
+    for (const frame of frames) {
+      if (frame === root) continue;
+      try {
+        const has = await frame.executeJavaScript(
+          `!!document.querySelector('[data-ai-id="${aiId}"]')`
+        );
+        if (has) return frame;
+      } catch (e) { /* skip */ }
+    }
+    return null;
+  }
+
+  // OOPIF coordinate translation: sub-frame getBoundingClientRect is relative to
+  // the iframe's own layout viewport; add the hosting <iframe> element's top-left
+  // (top document) to get browser-viewport coordinates for Input.dispatchMouseEvent.
+  async _frameOffset(view, frame, tabId) {
+    try {
+      const path = await frame.executeJavaScript('(location.pathname||"")');
+      const base = await this.evaluate(
+        `(function(path){
+           var best=null;
+           Array.prototype.forEach.call(document.querySelectorAll('iframe'),function(f){
+             var r=f.getBoundingClientRect();
+             if(r.width<4||r.height<4)return;
+             var s=f.src||'';
+             var match = (f.name&&f.name.length) ? (path.indexOf((f.name||''))===0) : (s.indexOf(path)>0);
+             if(match){ best={x:r.left,y:r.top}; }
+           });
+           return best;
+         })(${JSON.stringify(path)})`,
+        tabId);
+      return base;
+    } catch (e) { return null; }
+  }
+
   // 受信鼠标事件：先把元素滚入视口（屏外元素直接 dispatchMouseEvent 时坐标落在
   // 视口外，事件命中 body/空白处——探针证实点击不聚焦却误报成功），再按滚动后的
   // 中心点发 mousemove → mousePressed/mouseReleased（click）或仅 move（hover）。
+  // OOPIF 目标：定位在所属 frame 内执行，坐标 + frame 偏移换算到顶层视口。
   async _cdpPointerTarget(view, action, aiId, tabId) {
     if (!this._canCdp(view)) return null;
-    // 定位 → 滚入视口居中 → 返回滚动后的中心点。同一 evaluate 内同步完成；
-    // behavior:'instant' 跳过平滑滚动，避免 scroll-behavior:smooth 页面的异步
-    // 滚动造成坐标漂移。fixed 元素 scrollIntoView 是无害的 no-op。
-    const center = await this.evaluate(
-      `(function(){var el=document.querySelector('[data-ai-id="${aiId}"]');if(!el)return null;` +
-      `el.scrollIntoView({block:'center',inline:'center',behavior:'instant'});` +
-      `var r=el.getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)};})()`,
-      tabId
-    );
+    const owning = /^axf-/.test(aiId) ? await this._owningFrame(view, aiId) : null;
+    const inFrame = !!owning;
+    // 定位 → 滚入视口居中 → 返回滚动后的中心点（frame 内局部坐标）。
+    const center = inFrame
+      ? await owning.executeJavaScript(
+          `(function(){var el=document.querySelector('[data-ai-id="${aiId}"]');if(!el)return null;` +
+          `el.scrollIntoView({block:'center',inline:'center',behavior:'instant'});` +
+          `var r=el.getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)};})()`)
+      : await this.evaluate(
+          `(function(){var el=document.querySelector('[data-ai-id="${aiId}"]');if(!el)return null;` +
+          `el.scrollIntoView({block:'center',inline:'center',behavior:'instant'});` +
+          `var r=el.getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)};})()`,
+          tabId);
     if (!center) return null;
-    // 窗口可见性：被完全遮挡（如 IDE 全屏覆盖）时 Chromium 把页面置为
-    // visibilityState=hidden，渲染器会丢弃注入的鼠标事件——事件序列为空、
-    // 点击不聚焦却报成功（知乎标题探针证实）。像人一样：先置顶显示窗口
-    // 再操作。show() 对已显示窗口是 no-op，moveTop() 确保不被遮挡。
+    // frame 局部 → 顶层视口坐标
+    let vp = center;
+    if (inFrame) {
+      const off = await this._frameOffset(view, owning, tabId);
+      if (off) vp = { x: center.x + Math.round(off.x), y: center.y + Math.round(off.y) };
+    }
     try {
       if (this.window.show) this.window.show();
       if (this.window.moveTop) this.window.moveTop();
@@ -385,17 +533,20 @@ class PageManager {
     } catch(e) {}
     const dbg = view.webContents.debugger;
     const send = (method, params) => dbg.sendCommand(method, params);
-    await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: center.x, y: center.y });
+    await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: vp.x, y: vp.y });
     if (action === 'click') {
-      await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: center.x, y: center.y, button: 'left', buttons: 1, clickCount: 1 });
-      await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: center.x, y: center.y, button: 'left', buttons: 0, clickCount: 1 });
+      await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: vp.x, y: vp.y, button: 'left', buttons: 1, clickCount: 1 });
+      await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: vp.x, y: vp.y, button: 'left', buttons: 0, clickCount: 1 });
       // 命中校验：坐标必须真的落在目标上（否则点击不聚焦却报成功，误导 agent）。
       // 校验失败返回 null，回退 preload（el.focus()+click，focus 会自带滚入视口）。
-      const hit = await this.evaluate(
-        `(function(){var el=document.querySelector('[data-ai-id="${aiId}"]');if(!el)return false;` +
-        `var h=document.elementFromPoint(${center.x},${center.y});return !!(h&&(h===el||el.contains(h)));})()`,
-        tabId
-      );
+      const hit = inFrame
+        ? await owning.executeJavaScript(
+            `(function(){var el=document.querySelector('[data-ai-id="${aiId}"]');if(!el)return false;` +
+            `var h=document.elementFromPoint(${center.x},${center.y});return !!(h&&(h===el||el.contains(h)));})()`)
+        : await this.evaluate(
+            `(function(){var el=document.querySelector('[data-ai-id="${aiId}"]');if(!el)return false;` +
+            `var h=document.elementFromPoint(${center.x},${center.y});return !!(h&&(h===el||el.contains(h)));})()`,
+            tabId);
       if (!hit) return null;
     }
     return action === 'hover' ? 'cdp-hover' : 'cdp-click';
@@ -443,6 +594,13 @@ class PageManager {
   // 不识别编辑器框架；失败返回错误，由 agent 重读重试。
   async _inputViaCdp(view, aiId, text, tabId) {
     if (!this._canCdp(view)) return null;
+    const owning = /^axf-/.test(aiId) ? await this._owningFrame(view, aiId) : null;
+    const inFrame = !!owning;
+    // Run a JS snippet either in the owning frame (OOPIF) or the top frame.
+    const run = async (jsBody) => {
+      const fn = `(function(){${jsBody}})()`;
+      return inFrame ? owning.executeJavaScript(fn) : this.evaluate(fn, tabId);
+    };
     // 先激活窗口/视图，再在页面内聚焦（顺序保证渲染进程处于激活态）。
     // 被遮挡时窗口 visibilityState=hidden，键盘事件同样会被渲染器丢弃。
     try {
@@ -452,23 +610,21 @@ class PageManager {
       view.webContents.focus();
     } catch(e) {}
     // 定位可编辑区并原生聚焦（不做 DOM 全选——交给 Cmd+A 受信按键）
-    const prep = await this.evaluate(
-      `(function(){var el=document.querySelector('[data-ai-id="${aiId}"]');if(!el)return {ok:false,err:'no-ref'};` +
+    const prep = await run(
+      `var el=document.querySelector('[data-ai-id="${aiId}"]');if(!el)return {ok:false,err:'no-ref'};` +
       `var ed=el;if(ed.querySelector){var inner=ed.querySelector('[contenteditable=true],input,textarea');if(inner)ed=inner;}` +
       `var editable=(ed.contentEditable==='true')||(ed.tagName==='TEXTAREA')||(ed.tagName==='INPUT');` +
       `if(!editable)return {ok:false,err:'not-editable'};` +
       `ed.focus();` +
-      `return {ok:true};})()`,
-      tabId
+      `return {ok:true};`
     );
     if (!prep || !prep.ok) return null;
     const norm = (s) => String(s || '').replace(/\s+/g, '');
     // 幂等短路：若可编辑区当前内容已恰好等于目标文本，直接返回而不做清空+重打。
     // 每次全量重写都会把草稿标脏，重新触发编辑器自身的"草稿备份"/版本气泡——对
     // 相同文本的重复调用（重试/校正）不应让它反复闪烁。
-    const curText = await this.evaluate(
-      `(function(){var e=document.activeElement;return (e&&(e.innerText||e.value||''))||'';})()`,
-      tabId
+    const curText = await run(
+      `var e=document.activeElement;return (e&&(e.innerText||e.value||''))||'';`
     );
     if (norm(curText) === norm(text)) {
       return { success: true, method: 'cdp-input-unchanged', changes: 0, chars: 0 };
@@ -477,14 +633,24 @@ class PageManager {
     const send = (method, params) => dbg.sendCommand(method, params);
     // 全选 + 整段删除。刻意不发送受信 Cmd+A：在本应用里注入受信 Cmd+A 会触发
     // macOS 的应用 About 面板（原生 NSAlert，"版本"弹窗），每次输入都弹。故全选
-    // 一律走页内程序化选择（contenteditable 用 Range / input·textarea 用
-    // setSelectionRange，already provided by _selectAllFallback），框架经
-    // selectionchange 同步进内部 EditorState；随后仍是无修饰键的受信 Delete，
-    // 走框架自身删除链路。行为与校验逻辑不变，只是去掉 Cmd+A 这个副作用键。
-    await this._selectAllFallback(aiId, tabId);
-    await new Promise((r) => setTimeout(r, 120)); // 等选区同步进框架状态
-    await this._cdpKey(send, { key: 'Delete', code: 'Delete', vk: 46, mod: 0 });
-    await new Promise((r) => setTimeout(r, 80)); // 等删除后的空状态提交
+    // 一律走页内程序化选择。顶层文本流(contenteditable/input/textarea)用 Range/
+    // setSelectionRange(_selectAllFallback) + 受信 Delete;OOPIF 子帧编辑器不做受信
+    // 删除(受信 Delete 前是 DOM-Range 选区,部分富文本编辑器不把这些选区同步进自身
+    // EditorState,Delete 落空→clear 无效),改为在所属帧内 execCommand selectAll+delete,
+    // 走编辑器原生选区/删除链路,B站 read-editor 验证可被清到空。顶层路径行为不变。
+    const cleared = inFrame
+      ? await this._clearInFrame(owning, aiId)
+      : await (async () => {
+          await this._selectAllFallback(view, aiId, tabId, null);
+          await new Promise((r) => setTimeout(r, 120)); // 等选区同步进框架状态
+          await this._cdpKey(send, { key: 'Delete', code: 'Delete', vk: 46, mod: 0 });
+          await new Promise((r) => setTimeout(r, 80)); // 等删除后的空状态提交
+          return true;
+        })();
+    if (!cleared && text) {
+      // 清空失败但目标非空：先不空转，仍尝试继续键入（若编辑器未清空，键入会拼接而非替换）。
+      await this._cdpKey(send, { key: 'Delete', code: 'Delete', vk: 46, mod: 0 });
+    }
     const paras = String(text == null ? '' : text).split('\n');
     for (let i = 0; i < paras.length; i++) {
       if (paras[i]) await this._typeChars(send, paras[i]);
@@ -492,9 +658,8 @@ class PageManager {
     }
     // 通用校验：非空文本要求内容包含目标文本；空文本要求已清空（只允许空块残留）。
     // 任一框架均可，无占位符/块数特判。
-    const after = await this.evaluate(
-      `(function(){var e=document.activeElement;return {text:(e.innerText||e.value||'')};})()`,
-      tabId
+    const after = await run(
+      `var e=document.activeElement;return {text:(e.innerText||e.value||'')};`
     );
     const want = norm(text);
     const got = norm(after && after.text);
@@ -506,25 +671,57 @@ class PageManager {
       : { success: false, error: 'Input not verified — please re-read the tree and retry', method: 'cdp-input-failed' };
   }
 
+  // OOPIF 内整段清空：在所属子帧上下文里聚焦 contenteditable，用 execCommand
+  // selectAll + delete 走编辑器原生选区/删除链路（受信 Delete 前置 DOM-Range 选区对
+  // 部分富文本编辑器无效）。返回是否已清到空。
+  async _clearInFrame(frame, aiId) {
+    try {
+      const r = await frame.executeJavaScript(`(function(){
+        var ref=document.querySelector('[data-ai-id="${aiId}"]');if(!ref)return {ok:false,reason:'no-ref'};
+        var e=ref;if(ref.querySelector){var inner=ref.querySelector('[contenteditable="true"],textarea');if(inner)e=inner;}
+        if(!e||(e.contentEditable!=='true'&&e.tagName!=='TEXTAREA'))return {ok:false,reason:'not-editable'};
+        e.focus();
+        var sa=document.execCommand('selectAll');
+        var del=e.tagName==='TEXTAREA'?document.execCommand('delete'):document.execCommand('delete');
+        var txt=e.tagName==='TEXTAREA'?(e.value||''):(e.innerText||e.textContent||'');
+        return {ok:txt.trim()==='',sa:!!sa,del:!!del,left:(txt||'').trim().length};
+      })()`);
+      return !!(r && r.ok);
+    } catch (e) { return false; }
+  }
+
   // 全选回退：Cmd+A 后选区仍为空时，用浏览器原生选区 API 选中可编辑区全部文本。
   // 返回 true 表示已有非空选区（Cmd+A 已生效或回退成功）；框架通过
   // selectionchange 同步内部状态，随后的受信 Delete 即可整段删除。
-  async _selectAllFallback(aiId, tabId) {
-    const r = await this.evaluate(
-      `(function(){var el=document.querySelector('[data-ai-id="${aiId}"]');if(!el)return false;` +
-      `var ed=el;if(ed.querySelector){var inner=ed.querySelector('[contenteditable=true],input,textarea');if(inner)ed=inner;}` +
-      `var s=window.getSelection();` +
-      `if(s&&!s.isCollapsed&&s.toString().length>0)return true;` +
-      `if(ed.tagName==='TEXTAREA'||ed.tagName==='INPUT'){var v=ed.value||'';if(v){ed.focus();ed.setSelectionRange(0,v.length);}return v.length>0;}` +
-      `var walker=document.createTreeWalker(ed,NodeFilter.SHOW_TEXT);` +
-      `var first=null,last=null,t;` +
-      `while(t=walker.nextNode()){if(t.nodeValue&&t.nodeValue.length){if(!first)first=t;last=t;}}` +
-      `if(!first)return false;` +
-      `var rng=document.createRange();rng.setStart(first,0);rng.setEnd(last,last.nodeValue.length);` +
-      `s.removeAllRanges();s.addRange(rng);` +
-      `return rng.toString().length>0;})()`,
-      tabId
-    );
+  async _selectAllFallback(view, aiId, tabId, frame) {
+    const r = frame
+      ? await frame.executeJavaScript(
+          `(function(){var el=document.querySelector('[data-ai-id="${aiId}"]');if(!el)return false;` +
+          `var ed=el;if(ed.querySelector){var inner=ed.querySelector('[contenteditable=true],input,textarea');if(inner)ed=inner;}` +
+          `var s=window.getSelection();` +
+          `if(s&&!s.isCollapsed&&s.toString().length>0)return true;` +
+          `if(ed.tagName==='TEXTAREA'||ed.tagName==='INPUT'){var v=ed.value||'';if(v){ed.focus();ed.setSelectionRange(0,v.length);}return v.length>0;}` +
+          `var walker=document.createTreeWalker(ed,NodeFilter.SHOW_TEXT);` +
+          `var first=null,last=null,t;` +
+          `while(t=walker.nextNode()){if(t.nodeValue&&t.nodeValue.length){if(!first)first=t;last=t;}}` +
+          `if(!first)return false;` +
+          `var rng=document.createRange();rng.setStart(first,0);rng.setEnd(last,last.nodeValue.length);` +
+          `s.removeAllRanges();s.addRange(rng);` +
+          `return rng.toString().length>0;})()`)
+      : await this.evaluate(
+          `(function(){var el=document.querySelector('[data-ai-id="${aiId}"]');if(!el)return false;` +
+          `var ed=el;if(ed.querySelector){var inner=ed.querySelector('[contenteditable=true],input,textarea');if(inner)ed=inner;}` +
+          `var s=window.getSelection();` +
+          `if(s&&!s.isCollapsed&&s.toString().length>0)return true;` +
+          `if(ed.tagName==='TEXTAREA'||ed.tagName==='INPUT'){var v=ed.value||'';if(v){ed.focus();ed.setSelectionRange(0,v.length);}return v.length>0;}` +
+          `var walker=document.createTreeWalker(ed,NodeFilter.SHOW_TEXT);` +
+          `var first=null,last=null,t;` +
+          `while(t=walker.nextNode()){if(t.nodeValue&&t.nodeValue.length){if(!first)first=t;last=t;}}` +
+          `if(!first)return false;` +
+          `var rng=document.createRange();rng.setStart(first,0);rng.setEnd(last,last.nodeValue.length);` +
+          `s.removeAllRanges();s.addRange(rng);` +
+          `return rng.toString().length>0;})()`,
+          tabId);
     return !!r;
   }
 

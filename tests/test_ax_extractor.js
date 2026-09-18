@@ -4,7 +4,7 @@
 // textbox+multiline, div[role=button] fake buttons, position:fixed modal dialog)
 // and asserts the AX -> protocol TreeNode mapping + data-ai-id fusion.
 import { describe, it, expect } from 'vitest';
-import { normalizeAxTree, modalsFromAx, diffAx } from '../src/main/axExtractor.js';
+import { normalizeAxTree, mergeFrameTrees, modalsFromAx, diffAx } from '../src/main/axExtractor.js';
 
 // helpers to build a raw AXNode succinctly (matches CDP wire shape)
 const bool = (value) => ({ type: 'boolean', value });
@@ -127,5 +127,43 @@ describe('diffAx() — non-committing reveal diff (plan §9.5 / A)', () => {
     ];
     const { revealed } = diffAx(before, after);
     expect(revealed).toHaveLength(0); // statictext isn't interactive
+  });
+});
+
+describe('mergeFrameTrees() — OOPIF down-drill (P0)', () => {
+  // Main frame: one paragraph textbox. Child frame: richtext editor already
+  // normalized with a caller-prefixed idFor (ax-{fid}-{backendDOMNodeId}).
+  const mainRaw = [node(1, 'textbox', '标题', { props: [{ name: 'editable', value: str('plaintext') }, { name: 'focusable', value: bool(true) }] })];
+  const mainTree = normalizeAxTree(mainRaw);
+
+  it('AX-012: no sub-frames → main tree returned untouched', () => {
+    const merged = mergeFrameTrees(mainTree, []);
+    expect(merged).toBe(mainTree);
+    expect(byId(merged, 'ax-1').role).toBe('textbox');
+  });
+
+  it('AX-013: lifts sub-frame editable nodes under an Iframe gate', () => {
+    const subRaw = [
+      node(20, 'generic', '', { props: [{ name: 'editable', value: str('richtext') }, { name: 'focusable', value: bool(true) }] }),
+      node(21, 'paragraph', '正文', { props: [] }),
+    ];
+    const subTree = normalizeAxTree(subRaw, { idFor: (n) => 'ax-fx-' + (n.backendDOMNodeId || n.nodeId) });
+    const merged = mergeFrameTrees(mainTree, [{ key: 'frame-1', label: 'york/read-draft', tree: subTree }]);
+
+    expect(byId(merged, 'ax-1')).toBeTruthy();                    // main title preserved
+    const gate = merged.children.find((c) => c.role === 'Iframe');
+    expect(gate).toBeTruthy();
+    expect(gate.id).toBe('frame-1');
+    expect(byId(gate, 'ax-fx-10020').editor_type).toBe('richtext'); // prefixed id not colliding
+    expect(byId(merged, 'ax-10020')).toBeNull();                    // no unprefixed collision
+  });
+
+  it('AX-014: single-leaf main tree promoted to container so gates can attach', () => {
+    const leafMain = normalizeAxTree([node(1, 'combobox', '搜索', { props: [{ name: 'editable', value: str('plaintext') }] })]);
+    const subTree = normalizeAxTree([node(30, 'button', '发布', { props: [{ name: 'focusable', value: bool(true) }] })], { idFor: (n) => 'ax-s-' + (n.backendDOMNodeId || n.nodeId) });
+    const merged = mergeFrameTrees(leafMain, [{ key: 'sub0', label: 'iframe', tree: subTree }]);
+    expect(merged.role).toBe('generic');                          // promoted container
+    expect(merged.children.length).toBeGreaterThanOrEqual(2);
+    expect(byId(merged, 'ax-s-10030').role).toBe('button');
   });
 });

@@ -134,6 +134,58 @@ export function normalizeAxTree(rawNodes, opts = {}) {
   return tree;
 }
 
+// C: PURE MERGE. Splices out-of-process sub-frame trees into the main AX tree.
+// Input `mainTree` is the top-frame normalized tree; each `frame` is
+// { key, label, tree } where `tree` is that child frame's normalized tree
+// (ids already prefixed by the caller's idFor so they cannot collide with the
+// main frame's `ax-{backendDOMNodeId}`). Sub-frame editable/interactive nodes
+// are lifted under a single role=Iframe gate so the caller's tree walker sees
+// them without needing to know about frame topology. Pure — no predicate on
+// mainTree.shape; a single-root main tree is wrapped into a container.
+export function mergeFrameTrees(mainTree, frames = []) {
+  if (!mainTree) return mainTree;
+  const usable = (frames || []).filter((f) => f && f.tree);
+  if (!usable.length) return mainTree;
+
+  // Lift interactive/editable subtrees out of each frame tree (frame roots are
+  // usually generic wrappers; keep their actionable leaves, drop pure layout).
+  const lift = (tv) => {
+    const out = [];
+    (function w(t, depth) {
+      if (!t) return;
+      // Lift any actionable/editable node (skip generic layout wrappers),
+      // regardless of depth — so a single-leaf interactive root is kept.
+      const actionable = t.role !== 'generic' && (t.actions || []).length > 0;
+      if (actionable) { out.push(t); return; }
+      for (const c of t.children || []) w(c, depth + 1);
+    })(tv, 0);
+    return out;
+  };
+  const gates = usable.map((f) => ({
+    id: f.key,
+    role: 'Iframe',
+    label: f.label || '子框架',
+    states: ['visible'],
+    actions: [],
+    bounds: { x: 0, y: 0, width: 0, height: 0 },
+    children: lift(f.tree),
+  }));
+
+  if (mainTree.children && mainTree.children.length) {
+    return { ...mainTree, children: [...mainTree.children, ...gates] };
+  }
+  // mainTree is a leaf root → promote to a container so gates can attach.
+  return {
+    id: 'root',
+    role: 'generic',
+    label: '',
+    states: ['visible'],
+    actions: [],
+    bounds: { x: 0, y: 0, width: 0, height: 0 },
+    children: [mainTree, ...gates],
+  };
+}
+
 // AX role=dialog|alertdialog that is visible, plus its descendant buttons — the
 // AX-native replacement for the class-keyword modal table (extractor's modalSelectors).
 export function modalsFromAx(rawNodes) {
@@ -271,4 +323,4 @@ export function diffAx(beforeRaw, afterRaw) {
   return { revealed, hidden };
 }
 
-export default { normalizeAxTree, modalsFromAx, extractFromDebugger, axRead, axRaw, ensureHandles, diffAx, interactiveIdSet, VERSION_TAG };
+export default { normalizeAxTree, mergeFrameTrees, modalsFromAx, extractFromDebugger, axRead, axRaw, ensureHandles, diffAx, interactiveIdSet, VERSION_TAG };
