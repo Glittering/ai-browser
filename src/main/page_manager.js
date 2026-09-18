@@ -316,10 +316,14 @@ class PageManager {
         const via = await this._cdpPointerTarget(view, action, target, tid);
         if (via) return { success: true, clicked_via: via, target };
       } catch (e) { /* fall through to preload */ }
-    } else if (action === 'type' || action === 'setContent') {
+    } else if (action === 'type' || action === 'setContent' || action === 'clear') {
       try {
         await this._ensureAxHandles(view, tid);
-        const r = await this._inputViaCdp(view, target, params.text || '', tid);
+        // clear 也走 CDP 受信输入链路（空文本即清空+校验）。顶层预加载 clear 用
+        // innerHTML="" 只对顶层元素生效；OOPIF 子帧元素 querySelector 命中不到，
+        // clear 会静默落空。路由到这里后 OOPIF 走 _clearInFrame(execCommand
+        // selectAll+delete)，顶层走 _selectAllFallback+受信 Delete，均带校验。
+        const r = await this._inputViaCdp(view, target, action === 'clear' ? '' : (params.text || ''), tid);
         if (r) return r;
       } catch (e) { /* fall through to preload */ }
     } else if (action === 'upload') {
@@ -507,6 +511,24 @@ class PageManager {
     if (!this._canCdp(view)) return null;
     const owning = /^axf-/.test(aiId) ? await this._owningFrame(view, aiId) : null;
     const inFrame = !!owning;
+    // OOPIF click 走所属帧原生 click：CDP 坐标鼠标(帧局部中心+iframe 偏移)对跨进程
+    // 子帧的命中/路由不稳（实测报告成功却未触发），原生 .click() 贴合编辑器 React
+    // click 语义，已验证可装载正文编辑器。hover 仍走 CDP mousemove(视口坐标)。
+    if (inFrame && action === 'click') {
+      try {
+        if (this.window.show) this.window.show();
+        if (this.window.moveTop) this.window.moveTop();
+        if (this.window.focus) this.window.focus();
+        view.webContents.focus();
+      } catch (e) {}
+      try {
+        const ok = await owning.executeJavaScript(
+          `(function(){var el=document.querySelector('[data-ai-id="${aiId}"]');if(!el)return false;` +
+          `el.scrollIntoView({block:'center',inline:'center',behavior:'instant'});` +
+          `el.focus();el.click();return true;})()`);
+        return ok ? 'oopif-click' : null;
+      } catch (e) { return null; }
+    }
     // 定位 → 滚入视口居中 → 返回滚动后的中心点（frame 内局部坐标）。
     const center = inFrame
       ? await owning.executeJavaScript(
@@ -681,13 +703,15 @@ class PageManager {
         var e=ref;if(ref.querySelector){var inner=ref.querySelector('[contenteditable="true"],textarea');if(inner)e=inner;}
         if(!e||(e.contentEditable!=='true'&&e.tagName!=='TEXTAREA'))return {ok:false,reason:'not-editable'};
         e.focus();
+        var ae=document.activeElement&&(document.activeElement===e?'same':'other:'+(document.activeElement.tagName||''));
         var sa=document.execCommand('selectAll');
-        var del=e.tagName==='TEXTAREA'?document.execCommand('delete'):document.execCommand('delete');
+        var del=document.execCommand('delete');
         var txt=e.tagName==='TEXTAREA'?(e.value||''):(e.innerText||e.textContent||'');
-        return {ok:txt.trim()==='',sa:!!sa,del:!!del,left:(txt||'').trim().length};
+        return {ok:txt.trim()==='',sa:!!sa,del:!!del,left:(txt||'').trim().length,ae:ae};
       })()`);
+      if (!(r && r.ok)) console.error('[clearInFrame] FAIL', JSON.stringify(r));
       return !!(r && r.ok);
-    } catch (e) { return false; }
+    } catch (e) { console.error('[clearInFrame] THROW', e.message); return false; }
   }
 
   // 全选回退：Cmd+A 后选区仍为空时，用浏览器原生选区 API 选中可编辑区全部文本。
