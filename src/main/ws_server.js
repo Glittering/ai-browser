@@ -60,7 +60,11 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
             // P0 probe: params.ax routes to the AX read layer (getFullAXTree);
             // default path (preload extractor) is unchanged.
             const result = params.ax
-              ? await pageManager.getTreeViaAx(tabId)
+              ? await pageManager.getTreeViaAx(tabId, {
+                  subset: params.subset,
+                  mode: params.mode,
+                  focusedOnly: params.focusedOnly,
+                })
               : await pageManager.getTree(params.focusedOnly, tabId);
             send({ jsonrpc: '2.0', id, result });
             break;

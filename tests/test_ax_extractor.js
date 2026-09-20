@@ -4,7 +4,7 @@
 // textbox+multiline, div[role=button] fake buttons, position:fixed modal dialog)
 // and asserts the AX -> protocol TreeNode mapping + data-ai-id fusion.
 import { describe, it, expect } from 'vitest';
-import { normalizeAxTree, mergeFrameTrees, modalsFromAx, diffAx } from '../src/main/axExtractor.js';
+import { normalizeAxTree, mergeFrameTrees, modalsFromAx, diffAx, filterInteractive, liteSnapshot, diffLite } from '../src/main/axExtractor.js';
 
 // helpers to build a raw AXNode succinctly (matches CDP wire shape)
 const bool = (value) => ({ type: 'boolean', value });
@@ -165,5 +165,74 @@ describe('mergeFrameTrees() — OOPIF down-drill (P0)', () => {
     expect(merged.role).toBe('generic');                          // promoted container
     expect(merged.children.length).toBeGreaterThanOrEqual(2);
     expect(byId(merged, 'ax-s-10030').role).toBe('button');
+  });
+});
+
+describe('filterInteractive() — prune layout-only branches (fix #4)', () => {
+  it('FX-001: strips a pure layout-only branch', () => {
+    const tree = normalizeAxTree([
+      node(1, 'generic', '', { props: [], childIds: [2, 3] }),
+      node(2, 'generic', '', { props: [], childIds: [4] }), // layout wrapper
+      node(4, 'generic', '', { props: [], childIds: [5] }),
+      node(5, 'generic', '', { props: [] }),               // dead leaf inside layout
+      node(3, 'button', '确 定', { props: [{ name: 'focusable', value: bool(true) }] }),
+    ]);
+    const pruned = filterInteractive(tree);
+    expect(pruned).toBeTruthy();                            // root kept as wrapper
+    expect(byId(pruned, 'ax-3')).toBeTruthy();               // interactive button kept
+    expect(byId(pruned, 'ax-1')).toBeTruthy();               // root
+    // layout hierarchy collapsed — the dead leaves are gone
+    expect(byId(pruned, 'ax-4')).toBeNull();
+    expect(byId(pruned, 'ax-5')).toBeNull();
+  });
+
+  it('FX-002: keeps a card with multiple links together (no over-pruning)', () => {
+    const card = node(1, 'generic', '', { props: [], childIds: [2, 3, 4] });
+    const tree = normalizeAxTree([
+      card,
+      node(2, 'link', '作者', { props: [{ name: 'focusable', value: bool(true) }], childIds: [] }),
+      node(3, 'link', '正文', { props: [{ name: 'focusable', value: bool(true) }] }),
+      node(4, 'link', '购物', { props: [{ name: 'focusable', value: bool(true) }] }),
+    ]);
+    const pruned = filterInteractive(tree);
+    expect(byId(pruned, 'ax-2').role).toBe('link');
+    expect(byId(pruned, 'ax-3').role).toBe('link');
+    expect(byId(pruned, 'ax-4').role).toBe('link');
+  });
+
+  it('FX-003: returns null when everything is layout-only', () => {
+    const tree = normalizeAxTree([node(1, 'generic', '', { props: [], childIds: [2] }), node(2, 'generic', '', { props: [] })]);
+    expect(filterInteractive(tree)).toBeNull();
+  });
+});
+
+describe('liteSnapshot() / diffLite() — incremental read (fix #4)', () => {
+  it('LS-001: snapshots only interactive nodes keyed by backendDOMNodeId', () => {
+    const raw = [
+      node(1, 'generic', '', { props: [], backendDOMNodeId: 9001 }),
+      node(2, 'link', '作者', { props: [{ name: 'focusable', value: bool(true) }], backendDOMNodeId: 9002 }),
+      node(3, 'button', '确 定', { props: [{ name: 'focusable', value: bool(true) }], backendDOMNodeId: 9003 }),
+    ];
+    const lite = liteSnapshot(raw);
+    expect(lite.has(9001)).toBe(false); // layout-only excluded
+    expect(lite.has(9002)).toBe(true);
+    expect(lite.has(9003)).toBe(true);
+    expect(lite.get(9002).label).toBe('作者');
+  });
+
+  it('LS-002: diffLite reports newly revealed vs hidden by backendDOMNodeId', () => {
+    const prev = new Map([
+      [9002, { id: 'ax-9002', role: 'link', label: '作者' }],
+      [9003, { id: 'ax-9003', role: 'button', label: '确 定' }],
+    ]);
+    const next = new Map([
+      [9002, { id: 'ax-9002', role: 'link', label: '作者' }],
+      [9004, { id: 'ax-9004', role: 'link', label: '新卡片' }],
+    ]);
+    const d = diffLite(prev, next);
+    expect(d.hidden).toHaveLength(1);
+    expect(d.hidden[0].label).toBe('确 定');
+    expect(d.revealed).toHaveLength(1);
+    expect(d.revealed[0].label).toBe('新卡片');
   });
 });

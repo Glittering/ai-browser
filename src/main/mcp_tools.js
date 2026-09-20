@@ -18,11 +18,14 @@ export const MCP_TOOLS = [
   },
   {
     name: 'browse_get_tree',
-    description: 'Return the page semantic UI tree (roles, labels, actions, bounds).',
+    description: 'Return the page semantic UI tree (roles, labels, actions, bounds, urls).',
     inputSchema: {
       type: 'object',
       properties: {
         focused_only: { type: 'boolean', description: 'Return only the focused element subtree.', default: false },
+        ax: { type: 'boolean', description: 'Use the AX read layer (links carry url).', default: false },
+        subset: { type: 'string', enum: ['interactive', 'full'], description: 'Prune layout-only branches (token saver).' },
+        mode: { type: 'string', enum: ['diff', 'full'], description: 'Return only new/hidden interactive nodes since last read.' },
         tab: { type: 'integer', description: 'Tab id (default: active tab).' }
       }
     }
@@ -37,6 +40,8 @@ export const MCP_TOOLS = [
         target: { type: 'string', description: 'Element data-ai-id from the semantic tree.' },
         text: { type: 'string', description: 'Text to type (type only).' },
         value: { type: 'string', description: 'Value for select.' },
+        url: { type: 'string', description: 'For click: click the link whose href matches this URL instead of guessing the target label.' },
+        keep_tab: { type: 'boolean', description: 'For click: keep the current tab active instead of auto-following a newly opened tab.' },
         file: { type: 'string', description: 'Absolute path to upload (upload only, target must be a file input).' },
         tab: { type: 'integer', description: 'Tab id (default: active tab).' }
       },

@@ -323,4 +323,88 @@ export function diffAx(beforeRaw, afterRaw) {
   return { revealed, hidden };
 }
 
-export default { normalizeAxTree, mergeFrameTrees, modalsFromAx, extractFromDebugger, axRead, axRaw, ensureHandles, diffAx, interactiveIdSet, VERSION_TAG };
+// C: read-only href resolution for actionable nodes. The AX read layer only knows
+// "this is clickable", not "where it goes" (AX has no href). We lazily decorate
+// link/button nodes with their absolute target `url` via DOM.resolveNode +
+// Runtime.callFunctionOn (a read, no DOM mutation). Generic across sites — gives
+// agents "where does clicking this take me" instead of guessing from the label.
+const HREF_FN = `function(){var e=this,h=null;if(e.href&&typeof e.href==='string')h=e.href;if(!h&&e.closest){var a=e.closest('a[href]');if(a)h=a.href;}if(!h&&typeof e.getAttribute==='function'){var r=e.getAttribute('href');if(r)try{h=new URL(r, location.href).href;}catch(_){}}return h||null;}`;
+const MAX_HREFS = 500;
+export async function attachHrefs(dbg, tree) {
+  if (!tree || !dbg) return tree;
+  const targets = [];
+  (function w(t) {
+    if (!t) return;
+    if ((t.role === 'link' || t.role === 'button') && t.backendDOMNodeId != null && !t.url) {
+      if (targets.length < MAX_HREFS) targets.push(t);
+    }
+    for (const c of t.children || []) w(c);
+  })(tree);
+  if (!targets.length) return tree;
+  const resolved = await Promise.all(targets.map(async (n) => {
+    try {
+      const rd = await dbg.sendCommand('DOM.resolveNode', { backendNodeId: n.backendDOMNodeId });
+      const objId = rd && rd.object && rd.object.objectId;
+      if (!objId) return null;
+      const c = await dbg.sendCommand('Runtime.callFunctionOn', { objectId: objId, functionDeclaration: HREF_FN, returnByValue: true });
+      const v = c && c.result && c.result.value;
+      return typeof v === 'string' && v ? v : null;
+    } catch (e) { return null; } // cross-origin/OOPIF node — leave url unset
+  }));
+  for (let i = 0; i < targets.length; i++) if (resolved[i]) targets[i].url = resolved[i];
+  return tree;
+}
+
+// Prune to the interactive/editable subtree. Keeps the root container as a
+// wrapper plus every node that is actionable/editable (or has actionable
+// descendants); drops layout-only branches. Pure and generic (role/actions
+// based, no site heuristics) — the read-lowering mode for long feeds.
+function isInteractive(tree) { return !!tree.editor_type || (tree.actions && tree.actions.length > 0) || !!tree.url; }
+export function filterInteractive(tree) {
+  if (!tree) return tree;
+  const keep = (t) => {
+    if (!t) return null;
+    const kids = (t.children || []).map(keep).filter(Boolean);
+    if (kids.length || isInteractive(t)) {
+      if (!kids.length) return t;
+      return { ...t, children: kids };
+    }
+    return null;
+  };
+  const out = { ...tree, children: (tree.children || []).map(keep).filter(Boolean) };
+  if (!out.children.length && !isInteractive(out)) return null;
+  return out;
+}
+
+// Small memory-safe snapshot of interactive nodes (backendDOMNodeId -> lite),
+// for incremental get_tree {ax:true, mode:'diff'} across reads without caching
+// the full raw AX payload per tab. Pure.
+export function liteSnapshot(rawNodes) {
+  const valid = (rawNodes || []).filter((n) => n && !n.ignored);
+  const byNodeId = new Map(valid.map((n) => [n.nodeId, n]));
+  const out = new Map();
+  for (const n of valid) {
+    if (n.backendDOMNodeId == null) continue;
+    if (!isInteractiveNode(n, byNodeId)) continue;
+    out.set(n.backendDOMNodeId, {
+      id: axId(n),
+      role: (n.role && n.role.value) || 'generic',
+      label: (n.name && n.name.value) || '',
+    });
+  }
+  return out;
+}
+
+// Diff two lite snaccapshots by backendDOMNodeId -> { revealed, hidden }. Pure.
+export function diffLite(prevLite, newLite) {
+  const revealed = [], hidden = [];
+  for (const [bid, n] of (newLite || new Map()).entries()) {
+    if (!prevLite || !prevLite.has(bid)) revealed.push(n);
+  }
+  for (const [bid, n] of (prevLite || new Map()).entries()) {
+    if (!newLite || !newLite.has(bid)) hidden.push(n);
+  }
+  return { revealed, hidden };
+}
+
+export default { normalizeAxTree, mergeFrameTrees, modalsFromAx, extractFromDebugger, axRead, axRaw, ensureHandles, diffAx, interactiveIdSet, attachHrefs, filterInteractive, liteSnapshot, diffLite, VERSION_TAG };

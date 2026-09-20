@@ -92,7 +92,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     case 'browse_get_tree': {
-      const result = await wsClient.call('ui.get_tree', { focusedOnly: args.focused_only || false, tab: args.tab });
+      const result = await wsClient.call('ui.get_tree', {
+        focusedOnly: args.focused_only || false,
+        ax: args.ax === true ? true : undefined,
+        subset: args.subset || undefined,
+        mode: args.mode || undefined,
+        tab: args.tab
+      });
       // Don't truncate mid-JSON — a sliced JSON string is unparseable and
       // worse than no data. Return the full tree; MCP transport handles
       // large messages fine.
@@ -108,7 +114,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const result = await wsClient.call('ui.act', {
         action: args.action,
         target: args.target,
-        params: { text: args.text, value: args.value },
+        params: {
+          text: args.text,
+          value: args.value,
+          url: args.url,
+          keep_tab: args.keep_tab,
+          file: args.file,
+        },
         tab: args.tab
       });
       return { content: [{ type: 'text', text: JSON.stringify(result) }] };

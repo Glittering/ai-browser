@@ -1,6 +1,6 @@
 // main/index.js — Electron entry v5 (multi-tab, real UI)
 // One process, one WS server, multiple tabs with real tab bar.
-import { app, BrowserWindow, BrowserView, ipcMain } from 'electron';
+import { app, BrowserWindow, BrowserView, ipcMain, net } from 'electron';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startWSServer } from './ws_server.js';
@@ -41,11 +41,20 @@ app.commandLine.appendSwitch('disable-background-timer-throttling');
 const PORT = config.wsPort;
 const TAB_BAR_HEIGHT = config.tabBarHeight;
 
+// Network watchdog tuning (#5). Fixed host keeps the framework simple (no config
+// matrix); any reachable stable host works because we only need the NetworkService
+// to round-trip, not specifically example.com.
+const WATCHDOG_URL = 'https://example.com/';
+const WATCHDOG_INTERVAL = 30000; // probe cadence
+const WATCHDOG_TIMEOUT = 5000;   // per-probe deadline
+const WATCHDOG_FAIL_LIMIT = 3;   // relaunch after this many consecutive failures
+
 let mainWindow = null;
 let wsServer = null;
 let tabBarView = null;
 let pageManager = null;
 let tabRefreshInterval = null;
+let networkWatchdog = null;
 let isQuitting = false;
 
 // === Single instance lock — second launch just focuses the existing window ===
@@ -140,6 +149,52 @@ function createWindow() {
 
   // Refresh tab bar periodically
   tabRefreshInterval = setInterval(refreshTabBar, 2000);
+
+  // === #5: NetworkService self-heal watchdog ===
+  // The Electron NetworkService can wedge as a whole (port stays listening but
+  // every ui.navigate fails ERR_FAILED while curl works fine). A clean relaunch
+  // restores it. Probe via the MAIN process net.request (shares the same
+  // NetworkService as all renderers) every ~30s; after ≥3 consecutive failures,
+  // broadcast the event then relaunch — the MCP WS client auto-reconnects.
+  StartNetworkWatchdog();
+}
+
+// Probe the NetworkService from the main process. Reuses Electron's own stack,
+// so a wedged service here means wedged for every tab. Resolves true on any HTTP
+// response (even 4xx — network is alive), false on error/timeout.
+function probeNetwork() {
+  return new Promise((resolve) => {
+    const req = net.request({ url: WATCHDOG_URL, method: 'HEAD' });
+    let done = false;
+    const finish = (ok) => { if (!done) { done = true; resolve(ok); } };
+    req.on('response', () => finish(true));
+    req.on('error', () => finish(false));
+    req.setTimeout(WATCHDOG_TIMEOUT, () => {
+      try { req.abort(); } catch (e) {}
+      finish(false);
+    });
+    req.end();
+  });
+}
+
+function StartNetworkWatchdog() {
+  if (networkWatchdog) clearInterval(networkWatchdog);
+  let failStreak = 0;
+  const spin = async () => {
+    if (isQuitting) return;
+    const ok = await probeNetwork();
+    if (ok) { failStreak = 0; return; }
+    failStreak += 1;
+    if (failStreak >= WATCHDOG_FAIL_LIMIT) {
+      console.error('[index] NetworkService wedged — relaunching AI Browser');
+      failStreak = 0; // prevent double-relaunch in flight
+      if (pageManager) { try { pageManager._broadcast('network_wedged', { reason: 'network service unreachable' }); } catch (e) {} }
+      app.relaunch();
+      app.exit(0);
+    }
+  };
+  spin();
+  networkWatchdog = setInterval(spin, WATCHDOG_INTERVAL);
 }
 
 function refreshTabBar() {
@@ -158,6 +213,10 @@ function cleanupAndQuit() {
   if (tabRefreshInterval) {
     clearInterval(tabRefreshInterval);
     tabRefreshInterval = null;
+  }
+  if (networkWatchdog) {
+    clearInterval(networkWatchdog);
+    networkWatchdog = null;
   }
   // Close PageManager first — it rejects pending IPC requests and tears down
   // BrowserViews cleanly. Otherwise pending requests hang the WS server close.

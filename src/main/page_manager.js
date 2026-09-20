@@ -15,6 +15,8 @@ class PageManager {
     this._pendingRequests = new Map();
     this._requestId = 0;
     this._wsClients = new Map();
+    this._openedTabs = new Map();   // sourceTabId -> { id, url } (new tab opened by window.open)
+    this._axDiffCache = new Map();  // tabId -> lite interactive snapshot (get_tree {mode:'diff'})
     this._setupIPC();
   }
 
@@ -113,6 +115,7 @@ class PageManager {
     const tid = tabId !== undefined ? tabId : this.activeTab;
     const view = this._getView(tid);
     if (!view) return false;
+    this._axDiffCache.delete(tid); // fresh page → drop stale incremental snapshot
     await view.webContents.loadURL(url);
     return true;
   }
@@ -139,7 +142,7 @@ class PageManager {
   // Reuses the per-tab shared debugger: enables the Accessibility + DOM domains
   // into the same reference-counted _cdpTabs entry as Network/Runtime, so teardown
   // and multi-client reference counting are unchanged.
-  async getTreeViaAx(tabId) {
+  async getTreeViaAx(tabId, opts = {}) {
     const tid = tabId !== undefined ? tabId : this.activeTab;
     const view = this._getView(tid);
     if (!view) return { tree: null, context: null };
@@ -150,6 +153,11 @@ class PageManager {
       return { tree: null, context: null, error: 'cdp-unavailable' };
     }
     const main = await axExtractor.extractFromDebugger(view.webContents.debugger);
+    // #1: decorate link/button nodes with their absolute target URL (read-only).
+    // Generic — agent sees "where clicking takes me" instead of guessing labels.
+    if (main && main.tree && view.webContents.debugger) {
+      main.tree = await axExtractor.attachHrefs(view.webContents.debugger, main.tree);
+    }
     // P0 down-drill: splice OOPIF sub-frame editors into the main AX tree so
     // editors rendered in cross-process iframes (B站 write-article: york/read-draft)
     // become visible to `ui.get_tree {ax:true}`. Each sub-frame is read by
@@ -159,7 +167,36 @@ class PageManager {
     if (frames.length && main && main.tree) {
       main.tree = axExtractor.mergeFrameTrees(main.tree, frames);
     }
+    // #4: incremental diff — return only newly appeared / hidden interactive
+    // nodes since the last ax read on this tab (feeds: small payload per scroll).
+    if (opts.mode === 'diff') {
+      const lite = this._liteFromTree(main.tree);
+      const prev = this._axDiffCache.get(tid) || null;
+      if (prev && prev.size) {
+        this._axDiffCache.set(tid, lite);
+        return { tree: null, context: null, diff: axExtractor.diffLite(prev, lite) };
+      }
+      this._axDiffCache.set(tid, lite);
+    }
+    // #4: interactive subset — prune layout-only branches to cut token cost.
+    if (opts.subset === 'interactive' && main.tree) {
+      main.tree = axExtractor.filterInteractive(main.tree);
+    }
     return main;
+  }
+
+  // Lite interactive snapshot derived from an already-built tree (no second CDP
+  // read). Keyed by backendDOMNodeId for cheap diff across reads.
+  _liteFromTree(tree) {
+    const out = new Map();
+    (function w(t) {
+      if (!t) return;
+      if (t.backendDOMNodeId != null && ((t.actions || []).length > 0 || t.editor_type)) {
+        out.set(t.backendDOMNodeId, { id: t.id, role: t.role, label: t.label || '' });
+      }
+      for (const c of t.children || []) w(c);
+    })(tree);
+    return out;
   }
 
   // Read editable/interactive fields out of each out-of-process sub-frame via
@@ -182,7 +219,7 @@ class PageManager {
         try {
           const dto = await frame.executeJavaScript(`(function(prefix){
             if(!document||!document.body) return null;
-            var sel='[contenteditable],[role="textbox"],[role="combobox"],textarea,input[type="text"],input[type="title"],input[type="search"],button,[role="button"]';
+            var sel='[contenteditable],[role="textbox"],[role="combobox"],textarea,input[type="text"],input[type="title"],input[type="search"],button,[role="button"],a[href]';
             var els=Array.prototype.slice.call(document.querySelectorAll(sel));
             var out=[]; var idx=0;
             for(var k=0;k<els.length;k++){
@@ -202,15 +239,18 @@ class PageManager {
               else if(e.tagName==='INPUT')role='textbox';
               else if(e.tagName==='BUTTON'||e.getAttribute&&e.getAttribute('role')==='button')role='button';
               else if(e.tagName==='SELECT'||e.getAttribute&&e.getAttribute('role')==='combobox')role='select';
+              else if(e.tagName==='A')role='link';
               else role='textbox';
               var label=e.getAttribute('aria-label')||e.getAttribute('placeholder')||e.getAttribute('title')||'';
               if(!label&&e.getAttribute&&e.getAttribute('data-placeholder'))label=e.getAttribute('data-placeholder');
               if(!label&&(e.tagName==='BUTTON'||(e.getAttribute&&e.getAttribute('role')==='button'))){label=(e.innerText||e.textContent||'').trim();}
+              if(!label&&e.tagName==='A'){label=(e.innerText||e.textContent||'').trim();}
+              var url=(e.tagName==='A'&&e.href)||(e.closest&&e.closest('a[href]')?e.closest('a[href]').href:'');
               var editor_type=null;
               if(e.isContentEditable)editor_type='richtext';
               else if(e.tagName==='TEXTAREA')editor_type='textarea';
               else if(e.tagName==='INPUT')editor_type='textbox';
-              out.push({id:ai,role:role,label:label,editor_type:editor_type,bounds:{x:Math.round(r.x),y:Math.round(r.y),width:Math.round(r.width),height:Math.round(r.height)}});
+              out.push({id:ai,role:role,label:label,editor_type:editor_type,url:url,bounds:{x:Math.round(r.x),y:Math.round(r.y),width:Math.round(r.width),height:Math.round(r.height)}});
               idx++;
             }
             return out.length?out:null;
@@ -227,6 +267,7 @@ class PageManager {
               id: n.id,
               role: n.role,
               label: n.label || '',
+              ...(n.url ? { url: n.url } : {}),
               states: n.editor_type ? ['editable=' + n.editor_type, 'focusable'] : ['focusable'],
               ...(n.editor_type ? { editor_type: n.editor_type } : {}), // first-class, mirrors main AX path
               actions: n.role === 'button' ? ['click', 'focus'] : ['click', 'focus', 'type', 'setContent', 'clear'],
@@ -311,10 +352,25 @@ class PageManager {
     // CDP 受信输入优先（像人操作：受信点击/键盘/文本，对任何框架通用），
     // 无 debugger 时回退 preload 合成事件。
     if (action === 'click' || action === 'hover') {
+      // #2: 按目标 URL 点击（复合卡片的通用解法）——agent 想看"点了会去哪个 URL"
+      // 就指定 params.url，不靠猜 label 命中卡片里的多个 <a>。先走 URL→链接定位；
+      // 未给 url 才退回元素指针点击（原路径，不回归）。
+      if (params.url && action === 'click') {
+        try {
+          await this._ensureAxHandles(view, tid);
+          const res = await this._resolveClickByUrl(view, target, params.url, tid);
+          if (!res || !res.success) return { ...(res || {}), success: false, opened_tab: null };
+          // #3: 若此点击触发了 window.open → 新 tab，记录并默认接管焦点。
+          res.opened_tab = this._consumeOpenedTab(tid, params.keep_tab === true);
+          return res;
+        } catch (e) {
+          return { success: false, error: String((e && e.message) || e).slice(0, 200), opened_tab: null };
+        }
+      }
       try {
         await this._ensureAxHandles(view, tid);
         const via = await this._cdpPointerTarget(view, action, target, tid);
-        if (via) return { success: true, clicked_via: via, target };
+        if (via) return { success: true, clicked_via: via, target, opened_tab: this._consumeOpenedTab(tid, params.keep_tab === true) };
       } catch (e) { /* fall through to preload */ }
     } else if (action === 'type' || action === 'setContent' || action === 'clear') {
       try {
@@ -336,7 +392,54 @@ class PageManager {
       return { success: false, error: 'Upload requires CDP (input file set) — no file input found' };
     }
 
-    return this._executeViaPreload(action, target, params, tid);
+    const preloadRes = await this._executeViaPreload(action, target, params, tid);
+    // preload 合成点击也可能触发 window.open → 新 tab，同样回报 opened_tab。
+    if (action === 'click' && preloadRes && preloadRes.success) {
+      preloadRes.opened_tab = this._consumeOpenedTab(tid, params.keep_tab === true);
+    }
+    return preloadRes;
+  }
+
+  // #3 helper: read & clear the "new tab opened by this source tab" entry.
+  // Returns { id, url } or null. Unless keep===true, auto-activates the new tab.
+  _consumeOpenedTab(tid, keep) {
+    const entry = this._openedTabs.get(tid);
+    this._openedTabs.delete(tid);
+    if (!entry) return null;
+    if (keep !== true) this.setActive(entry.id);
+    return { id: entry.id, url: entry.url };
+  }
+
+  // #2: 按目标 URL 定位并点击链接 —— 通用替代"猜卡片里的 <a>"。顶层在
+  // Runtime.evaluate 里找 a[href] 精确匹配 url（或 host/path 子串），命中即
+  // scrollIntoView+focus+click（link 原生 click 可靠）；OOPIF(target 为 axf-…)
+  // 在所属帧内用同一逻辑。无 url 传参/找不到返回 clean error。
+  async _resolveClickByUrl(view, target, url, tabId) {
+    if (!view || !url) return { success: false, error: 'no url provided' };
+    const owning = /^axf-/.test(target) ? await this._owningFrame(view, target) : null;
+    const expr = `(function(url){
+        var best=null,bestScore=-1;
+        var als=document.querySelectorAll('a[href]');
+        for(var i=0;i<als.length;i++){
+          var a=als[i], h=a.href||'';
+          if(!h)continue;
+          // 精确匹配优先，其次 host+path 子串（容忍站点改写查询串/协议）。
+          var s = (h===url) ? 3 : (h.indexOf(url)>0 ? 2 : (url.indexOf(h)>0 ? 1 : 0));
+          // 子串还要继续看 path 是否一致，避免 /video 与 /video/xxx 互误伤
+          if(s===2&&(h.split('#')[0].split('?')[0]!==url.split('#')[0].split('?')[0]))s=1;
+          if(s>bestScore){bestScore=s;best=a;}
+        }
+        if(!best||bestScore<=0)return {ok:false};
+        best.scrollIntoView({block:'center',behavior:'instant'});
+        best.focus();best.click();
+        return {ok:true,matched:best.href||url};
+      })(${JSON.stringify(url)})`;
+    // OOPIF / 顶层统一：resolve 结果空串归一为 null；跨帧走 executeJavaScript。
+    const result = owning
+      ? await owning.executeJavaScript(expr)
+      : await this._evaluateViaCdp(view, expr);
+    if (!result || !result.ok) return { success: false, error: 'no link matches url: ' + url };
+    return { success: true, clicked_via: 'urllink', matched: result.matched || url };
   }
 
   async _executeViaPreload(action, target, params, tabId) {
@@ -802,7 +905,10 @@ class PageManager {
 
     // Intercept window.open / new-window → create new tab instead
     view.webContents.setWindowOpenHandler(({ url: urlToOpen }) => {
-      self.newTab(urlToOpen);
+      const childId = self.newTab(urlToOpen);
+      // Track which source tab opened a new tab so `executeAction` can report the
+      // resulting tab and auto-follow it. Generic (any target=_blank / window.open).
+      self._openedTabs.set(tabId, { id: childId, url: urlToOpen });
       return { action: 'deny' };
     });
 
