@@ -26,6 +26,8 @@ export function createWsClient({
   reconnectTimeout = 120000, // total budget to keep retrying after a drop
   retryBase = 500,           // initial backoff; doubles per attempt, capped
   maxRetryDelay = 10000,
+  ensureRunning = null,      // Lazy launch hook: async; called on connection
+                             // failure so the server can spawn Electron on demand.
 } = {}) {
   let _ws = null;        // current OPEN socket (or null)
   let _connecting = null; // in-flight getWs() promise (dedupes concurrent callers)
@@ -102,6 +104,14 @@ export function createWsClient({
         const err = connectionErr || new Error('connection refused');
         // eslint-disable-next-line no-console
         if (attempt > 0 && attempt % 4 === 0) console.error('[mcp] ws reconnect attempt', attempt, '-', err.message);
+
+        // Lazy launch: the first failure triggers the injected runner (spawns
+        // Electron on demand). ensureElectronRunning is idempotent — no-op when
+        // the port is already listening — so calling it on every retry is safe and
+        // also re-launches after a manual kill of Electron.
+        if (typeof ensureRunning === 'function') {
+          try { await ensureRunning(); } catch (_e) {}
+        }
 
         if (Date.now() >= deadline) throw new Error('WS reconnect timeout: ' + err.message);
         await wait(Math.min(retryBase * 2 ** attempt++, maxRetryDelay));

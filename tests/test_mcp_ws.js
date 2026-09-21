@@ -4,8 +4,21 @@
 // physical connections the client opens. Confirms connection reuse, correct
 // routing under concurrency, error mapping, and reconnect after a close.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import net from 'node:net';
 import { startWSServer } from '../src/main/ws_server.js';
 import { createWsClient } from '../src/main/mcp_ws.js';
+
+// Grab a deterministic port that is momentarily free (not listening), so the WS
+// client provably fails to connect to it.
+function closedPort() {
+  return new Promise((res) => {
+    const s = net.createServer();
+    s.listen(0, '127.0.0.1', () => {
+      const p = s.address().port;
+      s.close(() => res(p));
+    });
+  });
+}
 
 function makeServer(pm) {
   const server = startWSServer(pm, 0);
@@ -101,6 +114,27 @@ describe('mcp_ws persistent client', () => {
     client.close();
     await client.call('ui.evaluate', { js: 'again' });
     expect(pm._connections).toBe(before + 1); // fresh connection for the next call
+  });
+});
+
+describe('mcp_ws lazy launch', () => {
+  it('MW-6 invokes ensureRunning on connection failure, then keeps retrying', async () => {
+    const p = await closedPort();
+    let launches = 0;
+    const lazy = createWsClient({
+      url: `ws://127.0.0.1:${p}`,
+      timeout: 200,
+      reconnectTimeout: 600, // tiny budget so the test fails fast
+      retryBase: 50,
+      maxRetryDelay: 100,
+      ensureRunning: async () => { launches += 1; },
+    });
+    try {
+      await expect(lazy.call('ui.evaluate', { js: 'x' })).rejects.toThrow('WS reconnect timeout');
+    } finally {
+      lazy.close();
+    }
+    expect(launches).toBeGreaterThan(0); // lazy launch hook fired during retries
   });
 });
 

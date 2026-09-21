@@ -24,7 +24,15 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Persistent WS client — one reused connection with incrementing ids.
-const wsClient = createWsClient({ url: WS_URL, timeout: WS_TIMEOUT });
+// Lazy launch: no Electron is started at boot. The first browse_* call that
+// fails to connect triggers `ensureRunning`, which spawns Electron on demand
+// (ensureElectronRunning is idempotent). `ensureElectronRunning` is a hoisted
+// function declaration, so referencing it here is safe.
+const wsClient = createWsClient({
+  url: WS_URL,
+  timeout: WS_TIMEOUT,
+  ensureRunning: ensureElectronRunning,
+});
 
 // Probe whether the Electron WS server is already listening on the port.
 function checkPort(port) {
@@ -201,18 +209,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
-// Start via stdio (Claude Code/Cursor/Codex launch this as a subprocess)
 async function main() {
-  // Auto-launch Electron if the WS server isn't already running.
-  const ok = await ensureElectronRunning();
-  if (!ok) {
-    console.error('[mcp] ERROR: could not connect to AI Browser WS server on port 9223');
-    process.exit(1);
-  }
+  // Lazy loading: do NOT spawn Electron here. It used to start at MCP-server
+  // boot via ensureElectronRunning(), which made every MCP client launch pull up
+  // ai-browser even before any browse_* tool was called. Now Electron is brought
+  // up on first use, inside wsClient's connection-retry loop (via ensureRunning).
+  const listening = await checkPort(ELECTRON_PORT);
+  if (!listening) console.error('[mcp] ai-browser not running — will auto-start on first browse_* call');
   const transport = new StdioServerTransport();
   await server.connect(transport);
   // stderr is for logging only; stdout is the MCP protocol
-  console.error('AI Browser MCP server started (stdio)');
+  console.error('AI Browser MCP server started (stdio, lazy Electron)');
 }
 
 main().catch((e) => {
