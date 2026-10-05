@@ -70,7 +70,6 @@ ws://localhost:9223
 - ui.subscribe(events[])
 - ui.unsubscribe(subscription_id)
 - ui.navigate(url)
-- ui.screenshot(region?)  // 降级用
 - ui.get_focused()
 - ui.evaluate(js_code)   // 危险权限，可选关闭
 ```

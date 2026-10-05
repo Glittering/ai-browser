@@ -55,7 +55,6 @@ export const VALID_METHODS = [
   'ui.subscribe',
   'ui.unsubscribe',
   'ui.navigate',
-  'ui.screenshot',
   'ui.get_focused',
   'ui.evaluate',
 ];

@@ -90,8 +90,6 @@ DOM Tree + Computed Style
 │               • ui.get_tree() → SemanticUITree        │
 │               • ui.act(action, target, params)        │
 │               • ui.subscribe(events) → EventStream    │
-│               • ui.screenshot(region?) → base64       │
-│                  (截图是降级，仅在开发调试用)         │
 └─────────────────────────────────────────────────────┘
 ```
 
