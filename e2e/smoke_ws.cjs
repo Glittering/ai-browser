@@ -14,7 +14,9 @@ const path = require("node:path");
 const ROOT = path.resolve(__dirname, "..");
 const { Browser } = require(path.join(ROOT, "tools/browser.cjs"));
 const WS_HOST = "127.0.0.1";
-const WS_PORT = 9223;
+// 端口可配：默认 9223，被占用时用 AI_BROWSER_PORT=<其他端口> npm run smoke。
+// 启动 Electron 时必须把这个值传下去，否则浏览器仍会监听 9223，而这里在等别的端口。
+const WS_PORT = Number(process.env.AI_BROWSER_PORT) || 9223;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -105,16 +107,28 @@ async function main() {
   const server = await startServer();
   const PAGE_URL = `http://127.0.0.1:${server.address().port}/`;
 
-  // own the instance: fail if something already holds 9223
+  // own the instance: fail if something already holds the port
   try {
     await waitForPort(WS_PORT, 600);
-    console.error("!! port " + WS_PORT + " is busy — stop the running ai-browser first.");
+    console.error(
+      "!! port " + WS_PORT + " is busy — stop the running ai-browser first," +
+      " or pick a free port with: AI_BROWSER_PORT=<port> npm run smoke"
+    );
     process.exit(3);
   } catch { /* free */ }
 
   const electronPath = require("electron");
-  console.log("spawn electron @", electronPath);
-  const child = spawn(electronPath, ["."], { cwd: ROOT, stdio: "ignore", detached: true });
+  console.log("spawn electron @", electronPath, "port", WS_PORT);
+  const childEnv = { ...process.env, AI_BROWSER_PORT: String(WS_PORT) };
+  // ELECTRON_RUN_AS_NODE 会让 Electron 以纯 Node 模式启动 —— 不起窗口、
+  // 不监听 WS，smoke 永远等不到端口。这里要的是真正的应用进程，故剔除。
+  delete childEnv.ELECTRON_RUN_AS_NODE;
+  const child = spawn(electronPath, ["."], {
+    cwd: ROOT,
+    stdio: "ignore",
+    detached: true,
+    env: childEnv,
+  });
   await waitForPort(WS_PORT, 30000);
   console.log("WS ready on", WS_PORT);
 
