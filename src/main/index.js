@@ -1,11 +1,12 @@
 // main/index.js — Electron entry v5 (multi-tab, real UI)
 // One process, one WS server, multiple tabs with real tab bar.
-import { app, BrowserWindow, BrowserView, ipcMain, net } from 'electron';
+import { app, BrowserWindow, BrowserView, ipcMain, net, powerMonitor } from 'electron';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startWSServer } from './ws_server.js';
 import { PageManager } from './page_manager.js';
 import { config } from '../shared/config.js';
+import { parseWatchdogTargets, isWatchdogEnabled, shouldDeferRelaunch } from '../shared/watchdog.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -14,9 +15,11 @@ const __dirname = path.dirname(__filename);
 // is initialized during ready, so setting it after loses persistence.
 app.setPath('userData', config.userDataDir);
 
-// Disable GPU compositing — this app is a headless-style browser for API
-// access, not a visual browser. Avoids a whole class of GPU driver crashes
-// (exit_code=6) that take down the whole app on some systems.
+// Disable GPU compositing to avoid a whole class of GPU driver crashes
+// (exit_code=6) that take down the whole app on some systems. This only turns
+// off hardware acceleration — the window itself stays a real, visible window
+// and a human can drive it with mouse/keyboard at any time (login, QR scan,
+// captcha, correcting the agent).
 app.disableHardwareAcceleration();
 
 // Disable Chromium sandbox — required when launched from restricted
@@ -41,13 +44,16 @@ app.commandLine.appendSwitch('disable-background-timer-throttling');
 const PORT = config.wsPort;
 const TAB_BAR_HEIGHT = config.tabBarHeight;
 
-// Network watchdog tuning (#5). Fixed host keeps the framework simple (no config
-// matrix); any reachable stable host works because we only need the NetworkService
-// to round-trip, not specifically example.com.
-const WATCHDOG_URL = 'https://example.com/';
+// Network watchdog tuning (#5). We only need the NetworkService to round-trip,
+// not any specific host — so we probe MULTIPLE hosts concurrently and treat the
+// network as alive if ANY answers. A single hardcoded host (example.com) is
+// unreliable from mainland China and caused false "wedged" verdicts → reboot
+// loops. Override with AI_BROWSER_WATCHDOG_URLS (comma-separated, no spaces
+// required) or turn the whole watchdog off with AI_BROWSER_WATCHDOG=0.
+const WATCHDOG_TARGETS = parseWatchdogTargets(process.env.AI_BROWSER_WATCHDOG_URLS);
 const WATCHDOG_INTERVAL = 30000; // probe cadence
-const WATCHDOG_TIMEOUT = 5000;   // per-probe deadline
-const WATCHDOG_FAIL_LIMIT = 3;   // relaunch after this many consecutive failures
+const WATCHDOG_TIMEOUT = 5000;   // per-target per-probe deadline
+const WATCHDOG_FAIL_LIMIT = 5;   // relaunch after this many consecutive failures
 
 let mainWindow = null;
 let wsServer = null;
@@ -58,8 +64,6 @@ let networkWatchdog = null;
 let isQuitting = false;
 
 // === Single instance lock — second launch just focuses the existing window ===
-// Non-fatal: if the lock can't be acquired (EPERM on some sandboxed setups),
-// continue anyway rather than quitting.
 const gotLock = app.requestSingleInstanceLock();
 if (gotLock) {
   app.on('second-instance', () => {
@@ -68,6 +72,14 @@ if (gotLock) {
       mainWindow.focus();
     }
   });
+} else if (!(process.platform === 'darwin' && app.isPackaged)) {
+  // A real second instance would fight the first one over the :9223 WS port.
+  // Still tolerant of weird environments (EPERM on sandboxed setups, and
+  // macOS packaged builds where the lock can report false and quitting would
+  // make the app unlaunchable) — everywhere else, the duplicate exits and
+  // lets the existing window handle the request.
+  console.error('[index] another AI Browser instance is already running — quitting');
+  app.quit();
 }
 
 function createWindow() {
@@ -154,17 +166,25 @@ function createWindow() {
   // The Electron NetworkService can wedge as a whole (port stays listening but
   // every ui.navigate fails ERR_FAILED while curl works fine). A clean relaunch
   // restores it. Probe via the MAIN process net.request (shares the same
-  // NetworkService as all renderers) every ~30s; after ≥3 consecutive failures,
+  // NetworkService as all renderers) every ~30s; after ≥5 consecutive failures,
   // broadcast the event then relaunch — the MCP WS client auto-reconnects.
+  // Relaunch is skipped while a human appears to be actively using the window.
   StartNetworkWatchdog();
 }
 
-// Probe the NetworkService from the main process. Reuses Electron's own stack,
-// so a wedged service here means wedged for every tab. Resolves true on any HTTP
-// response (even 4xx — network is alive), false on error/timeout.
-function probeNetwork() {
+// Probe one target through the NetworkService from the main process. Reuses
+// Electron's own stack, so a wedged service here means wedged for every tab.
+// Resolves true on any HTTP response (even 4xx — network is alive), false on
+// error/timeout.
+function probeTarget(url) {
   return new Promise((resolve) => {
-    const req = net.request({ url: WATCHDOG_URL, method: 'HEAD' });
+    let req;
+    try {
+      req = net.request({ url, method: 'HEAD' });
+    } catch (e) {
+      resolve(false); // malformed url in AI_BROWSER_WATCHDOG_URLS
+      return;
+    }
     let done = false;
     const finish = (ok) => { if (!done) { done = true; resolve(ok); } };
     req.on('response', () => finish(true));
@@ -177,7 +197,19 @@ function probeNetwork() {
   });
 }
 
+// Probe every configured target concurrently. Any single success means the
+// NetworkService is alive — only a full sweep of failures counts as one failure.
+// This is what stops a flaky/geo-blocked host from looking like a dead stack.
+async function probeNetwork() {
+  const results = await Promise.all(WATCHDOG_TARGETS.map((url) => probeTarget(url)));
+  return results.some(Boolean);
+}
+
 function StartNetworkWatchdog() {
+  if (!isWatchdogEnabled(process.env.AI_BROWSER_WATCHDOG)) {
+    console.error('[index] watchdog disabled via AI_BROWSER_WATCHDOG');
+    return;
+  }
   if (networkWatchdog) clearInterval(networkWatchdog);
   let failStreak = 0;
   const spin = async () => {
@@ -186,6 +218,18 @@ function StartNetworkWatchdog() {
     if (ok) { failStreak = 0; return; }
     failStreak += 1;
     if (failStreak >= WATCHDOG_FAIL_LIMIT) {
+      // A relaunch destroys the session: login state, a half-filled form, a
+      // captcha the person is solving. If the window is focused and the OS
+      // reports recent input, a human is almost certainly mid-interaction —
+      // defer and retry next cycle instead of yanking the app out from under
+      // them. failStreak is deliberately NOT reset: once they walk away, the
+      // very next cycle relaunches.
+      const idleSeconds = powerMonitor.getSystemIdleTime();
+      if (shouldDeferRelaunch({ windowFocused: !!mainWindow && mainWindow.isFocused(), idleSeconds })) {
+        console.error('[index] NetworkService wedged but user appears active — deferring relaunch');
+        if (pageManager) { try { pageManager._broadcast('network_wedged_deferred', { reason: 'network service unreachable', deferred: true }); } catch (e) {} }
+        return;
+      }
       console.error('[index] NetworkService wedged — relaunching AI Browser');
       failStreak = 0; // prevent double-relaunch in flight
       if (pageManager) { try { pageManager._broadcast('network_wedged', { reason: 'network service unreachable' }); } catch (e) {} }
