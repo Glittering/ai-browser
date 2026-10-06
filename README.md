@@ -238,6 +238,16 @@ smoke    31 PASS                  (real WebContents contract layer)
 
 ---
 
+## Troubleshooting
+
+**The app restarts itself.** Electron's NetworkService can occasionally wedge as a whole — the port stays listening, but every navigation fails with `ERR_FAILED` while `curl` works fine. A watchdog probes the network from the main process every 30s; after 5 consecutive failures it broadcasts `network_wedged` and relaunches (the MCP client auto-reconnects).
+
+- **Change what it probes:** `AI_BROWSER_WATCHDOG_URLS=https://www.baidu.com/,https://example.com/` (comma-separated). Default is `example.com` + `baidu.com`; more than one host is deliberate — the network counts as alive if *any* target answers, so one flaky or geo-blocked host can't trigger a reboot loop.
+- **Turn it off entirely:** `AI_BROWSER_WATCHDOG=0` (also accepts `off` / `false` / `no`).
+- **Timing:** the first probe runs immediately at startup, then every 30s. With the default threshold of 5 consecutive failures a genuine wedge triggers a relaunch at roughly **2 minutes** (it was ~65 seconds before this was tunable).
+
+---
+
 ## Contributing
 
 This project is young and hungry. PRs that keep the core generic (not site-specific), harden reliability, or add verified site flows are very welcome.
