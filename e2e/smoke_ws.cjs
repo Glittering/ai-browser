@@ -123,6 +123,12 @@ async function main() {
   // ELECTRON_RUN_AS_NODE 会让 Electron 以纯 Node 模式启动 —— 不起窗口、
   // 不监听 WS，smoke 永远等不到端口。这里要的是真正的应用进程，故剔除。
   delete childEnv.ELECTRON_RUN_AS_NODE;
+  // 默认用独立 profile。不只是为了避免单实例锁打架：~/.ai-browser 是用户的
+  // 真实 profile（存着登录态），测试不该看见、更不该动到它。
+  if (!childEnv.AI_BROWSER_USER_DATA) {
+    childEnv.AI_BROWSER_USER_DATA = `/tmp/ai-browser-e2e-${WS_PORT}`;
+  }
+  console.log("userData:", childEnv.AI_BROWSER_USER_DATA);
   const child = spawn(electronPath, ["."], {
     cwd: ROOT,
     stdio: "ignore",
@@ -311,8 +317,23 @@ async function main() {
   check("OB-2 message_appeared detected (DOM scan)", obsEvents.msg.length > 0, "msg=" + obsEvents.msg.length);
   // js_error now flows via CDP Runtime.exceptionThrown (main process) — the
   // page's main-world Error must be captured with its message.
-  const errMsg = (obsEvents.err[0] && (obsEvents.err[0].message || obsEvents.err[0].text)) || "";
-  check("OB-3 js_error captured via CDP (not preload onerror)", obsEvents.err.length > 0 && errMsg.indexOf("SMSOOM") >= 0, "err=" + obsEvents.err.length + " msg=" + JSON.stringify(errMsg).slice(0, 80));
+  //
+  // 不要依赖 err[0]：js_error 是**全 tab 广播**（事件带 tabId），不按订阅方
+  // 关心的 tab 过滤，所以事件的顺序与下标都不保证。实测在干净实例上，启动页
+  // 会先抛一个 WebGL 报错排在最前面，导致 err[0] 不是我们要的那条 —— 这不是
+  // 缺陷，能力本身正常（两条都抓到了）。因此断言"任一 js_error 含目标错误"。
+  // 若将来要改成"只广播订阅方 tab 的 js_error"，那是产品行为取舍，另开讨论，
+  // 不要在这个测试里通过过滤来掩盖。
+  const errHit = obsEvents.err.find((e) => {
+    const m = (e && (e.message || e.text)) || "";
+    return m.indexOf("SMSOOM") >= 0;
+  });
+  const errMsg = (errHit && (errHit.message || errHit.text)) || "";
+  check(
+    "OB-3 js_error captured via CDP (not preload onerror)",
+    !!errHit,
+    "err=" + obsEvents.err.length + " 命中=" + JSON.stringify(errMsg).slice(0, 80)
+  );
 
   console.log("\n[submit + toggle action branches (P1)]");
   const cTab = (await b.call("ui.new_tab", { url: HOST + "/ctrls" })).result?.tab;

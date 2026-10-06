@@ -130,7 +130,12 @@ async function main() {
   // ELECTRON_RUN_AS_NODE 会让 Electron 以纯 Node 模式启动 —— 不起窗口、
   // 不监听 WS，测试永远等不到端口。这里要的是真正的应用进程，故剔除。
   delete childEnv.ELECTRON_RUN_AS_NODE;
-  if (process.env.AI_BROWSER_USER_DATA) childEnv.AI_BROWSER_USER_DATA = process.env.AI_BROWSER_USER_DATA;
+  // 默认用独立 profile。不只是为了避免单实例锁打架：~/.ai-browser 是用户的
+// 真实 profile（存着登录态），测试不该看见、更不该动到它。
+if (!childEnv.AI_BROWSER_USER_DATA) {
+  childEnv.AI_BROWSER_USER_DATA = `/tmp/ai-browser-e2e-${WS_PORT}`;
+}
+console.log("userData:", childEnv.AI_BROWSER_USER_DATA);
   const child = spawn(electronPath, ["."], {
     cwd: ROOT,
     stdio: "ignore",

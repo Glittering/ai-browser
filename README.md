@@ -326,9 +326,10 @@ AI_BROWSER_USER_DATA=~/.ai-browser-work npm start
 ## Test & dev
 
 ```bash
-npm test           # vitest — 174 tests across 19 files, all passing
-npm run smoke      # Electron contract layer against a local HTTP fixture — 31 checks, all passing
-npm run realsites  # navigate/read/act against a matrix of real sites
+npm test             # vitest — 174 tests across 19 files, all passing
+npm run smoke        # Electron contract layer, offline fixture — 31 checks, all passing
+npm run capabilities # text input / canvas / page source / network capture / DOM editing — 53 checks
+npm run realsites    # navigate/read/act against a matrix of real sites
 ```
 
 `npm run smoke` boots a genuine Electron against offline fixtures and exits non-zero on failure; it
@@ -336,11 +337,28 @@ covers things jsdom structurally cannot (preload integrity, `ui.evaluate` under 
 click hit-testing and off-screen scroll, multi-tab lifecycle, event fan-out to multiple clients, and
 the `evaluate` guard rails).
 
-It needs the WS port free — stop a running `npm start` first, or point it somewhere else:
+`npm run capabilities` is the user-facing capability matrix: typing into every kind of text field
+(plain inputs, `password`, `number`, `textarea`, `contenteditable`, plus `readonly` / `disabled` /
+`maxlength` behaviour — including **CJK input** and 1000-character text), what a `canvas` does and
+does not expose, reading page source, capturing response bodies, and editing the page through
+`ui.evaluate`.
+
+Both need the WS port free — stop a running `npm start` first, or point them somewhere else:
 
 ```bash
 AI_BROWSER_PORT=9333 npm run smoke
+AI_BROWSER_PORT=9333 npm run capabilities
 ```
+
+They boot their own Electron in an isolated profile (`/tmp/ai-browser-e2e-<port>` by default), so
+they never touch your real `~/.ai-browser` profile — the one holding your logged-in sessions.
+
+### What `npm run capabilities` proved about `canvas`
+
+A `canvas` is a node in the semantic tree (`role: canvas`) and nothing more — no value, no text, no
+pixels. You can read dimensions and raw pixels yourself via `ui.evaluate`
+(`getContext('2d').getImageData(...)`), but AI Browser does not screenshot or OCR, so it cannot tell
+you what a canvas *shows*. That is a deliberate boundary, not a bug.
 
 `npm run realsites` is table-driven from `e2e/realsites/sites.cjs`, currently 17 sites across 8 buckets
 (search, finance, media, dev, ecommerce, spa, editor, marketplace). Sites that require login or
