@@ -6,7 +6,7 @@
  *   2) 跑脚本：   node examples/raw-ws.mjs [URL]
  *                 例：node examples/raw-ws.mjs https://example.com
  *                 默认 URL：https://example.com
- *   3) 端口不是默认的，用环境变量覆盖： AI_BROWSER_WS=ws://localhost:9224 node examples/raw-ws.mjs
+ *   3) 端口不是默认的，用环境变量覆盖： AI_BROWSER_PORT=9224 node examples/raw-ws.mjs
  *
  * 协议就一层：发 { jsonrpc:'2.0', id, method, params }，收 { id, result } 或 { id, error }。
  * 方法名是 ui.* ：navigate / get_tree / act / evaluate / wait / scroll / peek /
@@ -14,7 +14,10 @@
  */
 import WebSocket from 'ws';
 
-const WS_URL = process.env.AI_BROWSER_WS || 'ws://localhost:9223';
+// 端口跟浏览器侧保持一致（src/shared/config.js 读的是 AI_BROWSER_PORT），
+// 这样 `AI_BROWSER_PORT=9224 npm start` 之后直接跑本脚本就能连上。
+const WS_PORT = Number(process.env.AI_BROWSER_PORT) || 9223;
+const WS_URL = `ws://localhost:${WS_PORT}`;
 const URL_TO_OPEN = process.argv[2] || 'https://example.com';
 
 /** 连接 WS；失败时交给调用方给出可行动的提示。 */
@@ -67,7 +70,7 @@ function notRunning(err) {
   console.error('\n  先启动浏览器，再跑本脚本：');
   console.error('    cd <ai-browser 项目根目录> && npm start\n');
   console.error('  （如果你走 MCP，不需要手动启动：第一次调用 browse_* 会自动拉起 Electron。）');
-  console.error('  （端口不对？用 AI_BROWSER_WS=ws://localhost:<port> 覆盖。）\n');
+  console.error('  （端口不对？用 AI_BROWSER_PORT=<port> 覆盖，启动浏览器时也用同一个。）\n');
 }
 
 async function main() {

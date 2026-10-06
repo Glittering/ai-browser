@@ -6,14 +6,17 @@
  *   2) 跑脚本：   node examples/read-page.mjs [URL]
  *                 例：node examples/read-page.mjs https://www.baidu.com
  *                 默认 URL：https://example.com
- *                 端口不同： AI_BROWSER_WS=ws://localhost:<port> node examples/read-page.mjs
+ *                 端口不同： AI_BROWSER_PORT=<port> node examples/read-page.mjs
  *
  * 输出每行一个可交互元素：索引 / role / label / data-ai-id（= 节点的 id，喂给 ui.act 的 target）。
  * 想直接喂给 agent，把打印换成 JSON.stringify(rows) 即可。
  */
 import WebSocket from 'ws';
 
-const WS_URL = process.env.AI_BROWSER_WS || 'ws://localhost:9223';
+// 端口跟浏览器侧保持一致（src/shared/config.js 读的是 AI_BROWSER_PORT），
+// 这样 `AI_BROWSER_PORT=9224 npm start` 之后直接跑本脚本就能连上。
+const WS_PORT = Number(process.env.AI_BROWSER_PORT) || 9223;
+const WS_URL = `ws://localhost:${WS_PORT}`;
 const URL_TO_OPEN = process.argv[2] || 'https://example.com';
 
 // 这些 role 才算"能操作的东西"；其余（div/section 之类）只用来做层级上下文。

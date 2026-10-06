@@ -6,7 +6,7 @@
  *   2) 跑脚本：   node examples/with-human.mjs [URL]
  *                 默认 URL：https://www.zhihu.com/creator（通常需要登录）
  *                 换成你自己的目标：node examples/with-human.mjs https://mail.example.com
- *                 端口不同： AI_BROWSER_WS=ws://localhost:<port> node examples/with-human.mjs
+ *                 端口不同： AI_BROWSER_PORT=<port> node examples/with-human.mjs
  *   3) 脚本会打印一句提示并等你敲回车。这时去那个真实可见的浏览器窗口里手动完成登录，
  *      回来敲回车，脚本重新读树确认。
  *
@@ -21,7 +21,10 @@
 import WebSocket from 'ws';
 import readline from 'node:readline';
 
-const WS_URL = process.env.AI_BROWSER_WS || 'ws://localhost:9223';
+// 端口跟浏览器侧保持一致（src/shared/config.js 读的是 AI_BROWSER_PORT），
+// 这样 `AI_BROWSER_PORT=9224 npm start` 之后直接跑本脚本就能连上。
+const WS_PORT = Number(process.env.AI_BROWSER_PORT) || 9223;
+const WS_URL = `ws://localhost:${WS_PORT}`;
 const URL_TO_OPEN = process.argv[2] || 'https://www.zhihu.com/creator';
 const MAX_ROUNDS = 3; // 最多请人帮忙几轮，避免死循环
 
