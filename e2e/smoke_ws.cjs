@@ -133,7 +133,9 @@ async function main() {
   console.log("WS ready on", WS_PORT);
 
   // lazily require the WS helper only after spawn checks
-  const b = new Browser();
+  // 端口必须显式传入：默认 9223 会连到"别的"ai-browser 实例上，那样即便
+  // AI_BROWSER_PORT 起了新进程，测的也还是旧实例 —— 结果毫无意义。
+  const b = new Browser(WS_PORT);
   await b.ready();
 
   console.log("\n[get_tree on CSP page]");
@@ -232,8 +234,8 @@ async function main() {
 
   console.log("\n[network monitor — multi-client regression locks]");
   // Two independent WS clients both subscribe to the same network events.
-  const A = new Browser();
-  const B = new Browser();
+  const A = new Browser(WS_PORT);
+  const B = new Browser(WS_PORT);
   await Promise.all([A.ready(), B.ready()]);
   const netTab = (await b.call("ui.new_tab", { url: HOST })).result?.tab;
   await sleep(1300); // let the CSP page load so in-page fetch works
@@ -296,7 +298,7 @@ async function main() {
   check("RE-3 setContent -> textarea fallback", taVal.includes("P1 textarea 文本"), taVal);
 
   console.log("\n[observe — captcha/message/js_error (P1)]");
-  const obs = new Browser();
+  const obs = new Browser(WS_PORT);
   await obs.ready();
   const obsEvents = { cap: [], msg: [], err: [] };
   obs.on("captcha_appeared", (d) => obsEvents.cap.push(d));
