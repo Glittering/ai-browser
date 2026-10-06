@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "ai-browser": {
+      "command": "node",
+      "args": [
+        "/ABSOLUTE/PATH/TO/ai-browser/src/main/mcp_server.js"
+      ]
+    }
+  }
+}
