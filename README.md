@@ -10,7 +10,7 @@
   <img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue.svg">
   <img alt="Electron" src="https://img.shields.io/badge/built%20with-Electron%2033-9cf">
   <img alt="Platforms" src="https://img.shields.io/badge/platforms-macOS%20%E2%80%A2%20Linux-blueviolet">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-161%20passing%20%2F%2018%20files-2ea043">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-174%20passing%20%2F%2019%20files-2ea043">
   <img alt="MCP" src="https://img.shields.io/badge/spec-MCP%20(stdio)-f5b23b">
 </p>
 
@@ -326,15 +326,21 @@ AI_BROWSER_USER_DATA=~/.ai-browser-work npm start
 ## Test & dev
 
 ```bash
-npm test           # vitest — 161 tests across 18 files, all passing
-npm run smoke      # Electron contract layer against a local HTTP fixture
+npm test           # vitest — 174 tests across 19 files, all passing
+npm run smoke      # Electron contract layer against a local HTTP fixture — 31 checks, all passing
 npm run realsites  # navigate/read/act against a matrix of real sites
 ```
 
 `npm run smoke` boots a genuine Electron against offline fixtures and exits non-zero on failure; it
 covers things jsdom structurally cannot (preload integrity, `ui.evaluate` under a strict CSP, CDP
 click hit-testing and off-screen scroll, multi-tab lifecycle, event fan-out to multiple clients, and
-the `evaluate` guard rails). It needs port 9223 free — stop a running `npm start` first.
+the `evaluate` guard rails).
+
+It needs the WS port free — stop a running `npm start` first, or point it somewhere else:
+
+```bash
+AI_BROWSER_PORT=9333 npm run smoke
+```
 
 `npm run realsites` is table-driven from `e2e/realsites/sites.cjs`, currently 17 sites across 8 buckets
 (search, finance, media, dev, ecommerce, spa, editor, marketplace). Sites that require login or
