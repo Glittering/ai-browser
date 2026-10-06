@@ -138,7 +138,7 @@ async function analyzeSite(b, site) {
 async function runContract(sites = SITES, opts = {}) {
   const runs = opts.runs || 1;
   const only = opts.only || null;
-  const b = new Browser();
+  const b = new Browser(opts.port || 9223);
   let PASS = 0, FAIL = 0;
   try {
     await b.ready();

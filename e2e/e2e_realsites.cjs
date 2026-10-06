@@ -13,7 +13,9 @@ const flows = require('./realsites/flows.cjs');
 const { Browser } = require(path.join(__dirname, '..', 'tools/browser.cjs'));
 
 const ROOT = path.resolve(__dirname, '..');
-const WS_PORT = 9223;
+// 端口可配：默认 9223，被占用时用 AI_BROWSER_PORT=<其他端口> npm run realsites。
+// 启动 Electron 时必须把值传下去，否则浏览器监听 9223，而这里在等别的端口。
+const WS_PORT = Number(process.env.AI_BROWSER_PORT) || 9223;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // 模块级记录本次自拉的 child（供超时/异常出口清理）；未自拉则为 null
@@ -42,9 +44,12 @@ async function waitForPort(port, ms) {
 // 便于按进程组精确清理，去除对 lsof CLI 的主依赖。
 async function ensureElectron() {
   if (await checkPort(WS_PORT)) return null;
-  console.log('port 9223 未监听 — spawn Electron');
+  console.log('port ' + WS_PORT + ' 未监听 — spawn Electron');
   const electronPath = require('electron');
-  const child = spawn(electronPath, ['.'], { cwd: ROOT, detached: true, stdio: 'ignore' });
+  const childEnv = { ...process.env, AI_BROWSER_PORT: String(WS_PORT) };
+  // ELECTRON_RUN_AS_NODE 会让 Electron 以纯 Node 模式启动（不起窗口、不监听 WS）。
+  delete childEnv.ELECTRON_RUN_AS_NODE;
+  const child = spawn(electronPath, ['.'], { cwd: ROOT, detached: true, stdio: 'ignore', env: childEnv });
   child.unref();
   if (!(await waitForPort(WS_PORT, 30000))) { console.error('Electron 30s 内未起来'); return null; }
   return child;
@@ -73,7 +78,7 @@ function pidof(port) {
 async function main() {
   const child = await ensureElectron();
   childRef = child;
-  if (!(await checkPort(WS_PORT))) { console.error('无法连接 9223 — 退出'); cleanupSpawned(child); process.exit(2); }
+  if (!(await checkPort(WS_PORT))) { console.error('无法连接 ' + WS_PORT + ' — 退出'); cleanupSpawned(child); process.exit(2); }
   const args = process.argv.slice(2);
   const runsArg = args.find((a) => a.startsWith('--runs='));
   const runs = runsArg ? Number(runsArg.split('=')[1]) : 1;
@@ -82,11 +87,11 @@ async function main() {
 
   // ==== 1) 矩阵三件套 ====
   section(`矩阵三件套（${SITES.length} 站 · runs=${runs}）`);
-  const { PASS, FAIL } = await runContract(SITES, { runs });
+  const { PASS, FAIL } = await runContract(SITES, { runs, port: WS_PORT });
 
   // ==== 2) 专项流程（默认全部；可用 --flow 过滤）。F2: 专项失败计入 flowFail → 影响退出码。
   let flowFail = 0;
-  const b = new Browser();
+  const b = new Browser(WS_PORT);
   try {
     await b.ready();
     const names = ['baiduFollowFirstResult', 'zhihuCreatorProbe', 'multiTab', 'githubSearch'];
@@ -107,9 +112,13 @@ async function main() {
 
 main().catch((e) => { console.error('e2e error:', e.message); cleanupSpawned(childRef); process.exit(2); });
 
-// 超时兜底同样清理本次自拉的 Electron
+// 超时兜底同样清理本次自拉的 Electron。
+// 原值 180s 对全矩阵不够：实测跑到第 11/17 站就被掐断（前 10 站全 PASS、0 FAIL）。
+// 按站点数放宽，并允许用 AI_BROWSER_E2E_TIMEOUT_MS 覆盖。
+const E2E_TIMEOUT_MS =
+  Number(process.env.AI_BROWSER_E2E_TIMEOUT_MS) || Math.max(180000, SITES.length * 45000);
 setTimeout(() => {
   console.error('E2E TIMEOUT');
   cleanupSpawned(childRef);
   process.exit(1);
-}, 180000);
+}, E2E_TIMEOUT_MS);
