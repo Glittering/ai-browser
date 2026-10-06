@@ -12,4 +12,11 @@ tools/**
 !tools/browser.cjs
 # 一次性调试探针请勿提交到 e2e/：只跑一次的定位脚本请挪到 tools/_oneoff/（已被 tools/** 忽略，只移不删）。
 e2e/_probe/**
+# 发稿物料里的一次性抓包正文与二进制配图不进仓库，避免 git add -A 误提交。
+# 用 ** 以便同时覆盖 docs/ 与 docs/marketing/ 下的同名文件。
+docs/**/_tmp_*
+docs/**/img_*
+# 本地 AI 工具的工作目录，不属于仓库内容。
+.trae/
+.workbuddy/
 .exec-trail/
