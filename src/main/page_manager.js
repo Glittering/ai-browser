@@ -562,6 +562,10 @@ class PageManager {
       modifiers: p.mod || 0,
     };
     await inputCmd('Input.dispatchKeyEvent', { ...base, type: 'rawKeyDown' });
+    // CDP 的 rawKeyDown 会忽略 text —— 带字符的键（换行）必须再发一个带
+    // text 的 char 事件才会真的把字符插进去，否则 Enter 在 textarea /
+    // 原生 contenteditable 里不产生任何换行（"a\nb\nc" 静默变成 "abc"）。
+    if (base.text) await inputCmd('Input.dispatchKeyEvent', { ...base, type: 'char' });
     await inputCmd('Input.dispatchKeyEvent', { ...base, type: 'keyUp' });
   }
 
@@ -744,7 +748,10 @@ class PageManager {
       `return {ok:true};`
     );
     if (!prep || !prep.ok) return null;
-    const norm = (s) => String(s || '').replace(/\s+/g, '');
+    // 校验用的归一化。\r\n 统一成 \n，再压掉"排版空白"（空格/tab），但换行
+    // 本身必须参与比对：把 \s 全剥掉会让 "a\nb\nc" 与 "abc" 等价，段落结构
+    // 丢失就被判成成功 —— 那是对调用方的谎报，出了问题无从察觉。
+    const norm = (s) => String(s || '').replace(/\r\n?/g, '\n').replace(/[^\S\n]+/g, '');
     // 幂等短路：若可编辑区当前内容已恰好等于目标文本，直接返回而不做清空+重打。
     // 每次全量重写都会把草稿标脏，重新触发编辑器自身的"草稿备份"/版本气泡——对
     // 相同文本的重复调用（重试/校正）不应让它反复闪烁。
@@ -777,9 +784,30 @@ class PageManager {
       await this._cdpKey(send, { key: 'Delete', code: 'Delete', vk: 46, mod: 0 });
     }
     const paras = String(text == null ? '' : text).split('\n');
+    // 段落内容快照：用来判断"这一下 Enter 到底有没有生效"。
+    const snap = () => run(
+      `var e=document.activeElement;var t=String((e&&(e.innerText||e.value))||'');` +
+      `var b=(e&&e.querySelectorAll)?e.querySelectorAll('p,div,br').length:0;` +
+      `return {len:t.length,nl:(t.match(/\\n/g)||[]).length,blocks:b};`
+    );
     for (let i = 0; i < paras.length; i++) {
       if (paras[i]) await this._typeChars(send, paras[i]);
-      if (i < paras.length - 1) await this._cdpKey(send, { key: 'Enter', code: 'Enter', vk: 13, mod: 0 });
+      if (i < paras.length - 1) {
+        // 段间换行。富文本编辑器（ProseMirror/Draft…）自己接 keydown 处理
+        // Enter 并已分好段；原生 textarea / 原生 contenteditable 没人接管，
+        // 而 rawKeyDown 不带 text 时默认编辑动作不触发 —— 换行会静默丢失。
+        // 故：先发受信 Enter，若内容毫无变化（说明没人处理它），再补一个带
+        // text 的 char 事件把换行真正插进去。给已分段的编辑器补发会多插空行，
+        // 所以这一步必须"看效果再决定"，不能无脑补。
+        const before = await snap();
+        await this._cdpKey(send, { key: 'Enter', code: 'Enter', vk: 13, mod: 0 });
+        const after = await snap();
+        const moved =
+          Number(after && after.len) > Number(before && before.len) ||
+          Number(after && after.nl) > Number(before && before.nl) ||
+          Number(after && after.blocks) > Number(before && before.blocks);
+        if (!moved) await this._cdpKey(send, { key: '\r', code: 'Enter', vk: 13, mod: 0, text: '\r' });
+      }
     }
     // 通用校验：非空文本要求内容包含目标文本；空文本要求已清空（只允许空块残留）。
     // 任一框架均可，无占位符/块数特判。

@@ -217,15 +217,17 @@ async function main() {
   check("A-11 textarea 多行写入 → 换行被保留（真实 DOM）", String(a11).indexOf("\n") >= 0 && String(a11).replace(/\n/g, "") === "abc", JSON.stringify(a11));
   const a12 = await treeVal(capTab, "ta");
   check("A-12 textarea 多行写入 → 换行被保留（tree.value）", String(a12).indexOf("\n") >= 0, JSON.stringify(a12));
-  check("A-13 textarea 多行写入后 act 应如实报告换行没写进去（success 应为 false）", !(taAct && taAct.result && taAct.result.success === true), JSON.stringify(taAct && taAct.result));
-  note("A-11..A-13 是真实能力缺口，不是断言写错：_inputViaCdp 按 '\\n' 切段后，段间换行用 "
-    + "_cdpKey({key:'Enter'}) 发出（page_manager.js:782），而 _cdpKey 只发 rawKeyDown+keyUp 且 text:''"
-    + "（page_manager.js:555-566），rawKeyDown 忽略 text —— textarea 因此拿不到换行，'a\\nb\\nc' 变成 'abc'。"
-    + "而它的校验用 norm() 去掉了所有空白，所以照样 success:true 谎报成功（A-13）。"
-    + "同一个 Enter 在原生 contenteditable 里同样不产生换行/分段（见 A-22）；smoke 里 ProseMirror 能分段，"
-    + "是因为富文本框架自己接了 keydown 处理 Enter，不是本项目输入链路的功劳。"
-    + "可行写法：把文本里的换行写成 \\r（A-14b / A-22b 均通过，浏览器归一为 \\n）—— "
-    + "_inputViaCdp 只按 \\n 切段，\\r 会走逐字符键入并成功插入换行。");
+  // 一致性校验：act 报的 success 必须和真实写进去的结果一致（不许谎报）。
+  const a13Dom = String(await domVal(capTab, "ta") || "");
+  const a13Truth = a13Dom === "a\nb\nc";
+  check("A-13 act 的 success 与真实写入结果一致（换行真写进去了才算 success）",
+    (taAct && taAct.result && taAct.result.success === true) === a13Truth,
+    JSON.stringify(taAct && taAct.result) + " dom=" + JSON.stringify(a13Dom));
+  note("多行文本：段间换行先发受信 Enter，若目标没反应（原生 textarea / 原生 contenteditable 无人接管"
+    + " keydown）再补发一个带 text 的 char 事件把换行插进去；富文本编辑器自己接 Enter 分好段时"
+    + "不补发，避免多插空行。把换行写成 \\r 同样有效（A-14b / A-22b）。"
+    + "act 的 success 校验现在让换行参与比对（norm 不再剥掉 \\n），所以换行真丢了会报 false —— "
+    + "A-13 校验的就是这份一致性，而不是写死某一种结果。");
 
   await typeInto(capTab, "ta", "中文多行\n第二行");
   await sleep(400);
