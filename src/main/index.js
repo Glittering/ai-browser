@@ -1,12 +1,12 @@
 // main/index.js — Electron entry v5 (multi-tab, real UI)
 // One process, one WS server, multiple tabs with real tab bar.
-import { app, BrowserWindow, BrowserView, ipcMain, net, powerMonitor } from 'electron';
+import { app, BrowserWindow, BrowserView, ipcMain, net } from 'electron';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startWSServer } from './ws_server.js';
 import { PageManager } from './page_manager.js';
 import { config } from '../shared/config.js';
-import { parseWatchdogTargets, isWatchdogEnabled, shouldDeferRelaunch } from '../shared/watchdog.js';
+import { parseWatchdogTargets, isWatchdogEnabled } from '../shared/watchdog.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -186,14 +186,28 @@ function probeTarget(url) {
       return;
     }
     let done = false;
-    const finish = (ok) => { if (!done) { done = true; resolve(ok); } };
-    req.on('response', () => finish(true));
-    req.on('error', () => finish(false));
-    req.setTimeout(WATCHDOG_TIMEOUT, () => {
+    let timer = null;
+    const finish = (ok) => {
+      if (done) return;
+      done = true;
+      if (timer) clearTimeout(timer);
+      resolve(ok);
+    };
+    // Electron 的 net.ClientRequest 没有 setTimeout()（调用会抛
+    // "req.setTimeout is not a function"），所以超时只能用外部定时器兜。
+    // 之前正是这里每次探测都抛异常，导致看门狗从未真正工作过。
+    timer = setTimeout(() => {
       try { req.abort(); } catch (e) {}
       finish(false);
-    });
-    req.end();
+    }, WATCHDOG_TIMEOUT);
+    req.on('response', () => finish(true));
+    req.on('error', () => finish(false));
+    req.on('abort', () => finish(false));
+    try {
+      req.end();
+    } catch (e) {
+      finish(false);
+    }
   });
 }
 
@@ -214,22 +228,18 @@ function StartNetworkWatchdog() {
   let failStreak = 0;
   const spin = async () => {
     if (isQuitting) return;
-    const ok = await probeNetwork();
+    let ok;
+    try {
+      ok = await probeNetwork();
+    } catch (e) {
+      // 探测本身抛异常不该变成 unhandled rejection，也不该计入 failStreak
+      // （那是"探测坏了"，不是"网络坏了"）。
+      console.error('[index] watchdog probe error:', (e && e.message) || e);
+      return;
+    }
     if (ok) { failStreak = 0; return; }
     failStreak += 1;
     if (failStreak >= WATCHDOG_FAIL_LIMIT) {
-      // A relaunch destroys the session: login state, a half-filled form, a
-      // captcha the person is solving. If the window is focused and the OS
-      // reports recent input, a human is almost certainly mid-interaction —
-      // defer and retry next cycle instead of yanking the app out from under
-      // them. failStreak is deliberately NOT reset: once they walk away, the
-      // very next cycle relaunches.
-      const idleSeconds = powerMonitor.getSystemIdleTime();
-      if (shouldDeferRelaunch({ windowFocused: !!mainWindow && mainWindow.isFocused(), idleSeconds })) {
-        console.error('[index] NetworkService wedged but user appears active — deferring relaunch');
-        if (pageManager) { try { pageManager._broadcast('network_wedged_deferred', { reason: 'network service unreachable', deferred: true }); } catch (e) {} }
-        return;
-      }
       console.error('[index] NetworkService wedged — relaunching AI Browser');
       failStreak = 0; // prevent double-relaunch in flight
       if (pageManager) { try { pageManager._broadcast('network_wedged', { reason: 'network service unreachable' }); } catch (e) {} }
