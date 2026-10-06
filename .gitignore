@@ -10,4 +10,6 @@ screenshots/
 # archive it so CI/repros don't break, keep the one real asset tracked.
 tools/**
 !tools/browser.cjs
+# 一次性调试探针请勿提交到 e2e/：只跑一次的定位脚本请挪到 tools/_oneoff/（已被 tools/** 忽略，只移不删）。
+e2e/_probe/**
 .exec-trail/
