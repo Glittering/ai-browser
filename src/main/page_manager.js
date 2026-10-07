@@ -5,6 +5,9 @@ import { ipcMain, BrowserView } from 'electron';
 import { config } from '../shared/config.js';
 import axExtractor from './axExtractor.js';
 import { NetworkMonitor, MAX_POST_DATA_SIZE } from './network_monitor.js';
+import valueContract from '../shared/value_contract.cjs';
+
+const { expandValueFetchTree } = valueContract;
 
 // 网络抓包默认开：只在有订阅时才启用会导致首屏/导航阶段的请求全丢（POST body、
 // 请求头都拿不到）。关闭开关：AI_BROWSER_NETWORK_CAPTURE=0。
@@ -142,6 +145,9 @@ class PageManager {
         }
       }, 5000);
     });
+    // 截断的 node.value 带内部字段 value_fetch_ref —— 展开成含实际 tab 的
+    // value_fetch（mcp/ws 两种可直接执行的调用提示），再删掉内部字段。
+    if (res && res.tree) expandValueFetchTree(res.tree, tid);
     return res;
   }
 
@@ -189,6 +195,8 @@ class PageManager {
     if (opts.subset === 'interactive' && main.tree) {
       main.tree = axExtractor.filterInteractive(main.tree);
     }
+    // 同 getTree：把 value_fetch_ref 展开成带实际 tab 的 value_fetch。
+    if (main && main.tree) expandValueFetchTree(main.tree, tid);
     return main;
   }
 
@@ -356,6 +364,10 @@ class PageManager {
     if (!view) return { success: false, error: 'Tab not found' };
     if (!target) return { success: false, error: 'No target' };
 
+    // 只读分支：取 node.value 的完整内容（树里只给前 200 code point）。
+    // 不聚焦、不触发 input/change、不改页面，也不走输入动作的 fallback。
+    if (action === 'get_value') return await this._getValue(view, target, params, tid);
+
     // CDP 受信输入优先（像人操作：受信点击/键盘/文本，对任何框架通用），
     // 无 debugger 时回退 preload 合成事件。
     if (action === 'click' || action === 'hover') {
@@ -405,6 +417,59 @@ class PageManager {
       preloadRes.opened_tab = this._consumeOpenedTab(tid, params.keep_tab === true);
     }
     return preloadRes;
+  }
+
+  // === 只读取全量 node.value（ui.act {action:'get_value'}）===
+  // 语义树里 node.value 只给前 200 Unicode code point；超长的节点带
+  // value_fetch 提示，调用方用它取全量（支持 offset/limit 分页）。
+  // 严格只读：不聚焦、不派发 input/change、不改 DOM，也不走输入动作 fallback。
+  async _getValue(view, target, params, tabId) {
+    const p = params || {};
+    const offset = Math.max(0, Number(p.offset) || 0);
+    const limit = (p.limit === undefined || p.limit === null) ? undefined : Number(p.limit);
+    // target 经 JSON.stringify 变成双引号 JS 字面量，拼进单引号选择器里 —— 无法
+    // 通过 target 内容跳出字符串。
+    const js =
+      "(function(){"
+      + "var el=document.querySelector('[data-ai-id=' + " + JSON.stringify(String(target)) + " + ']');"
+      + "if(!el)return {__miss:true};"
+      + "var tag=(el.tagName||'').toUpperCase();"
+      + "if(tag==='INPUT'){var ty=String(el.type||'').toLowerCase();"
+      + "if(ty==='password')return {__sensitive:'password'};"
+      + "if(ty==='file')return {__sensitive:'file'};"
+      + "return {text:el.value==null?'':String(el.value)};}"
+      + "if(tag==='TEXTAREA')return {text:el.value==null?'':String(el.value)};"
+      + "if(tag==='SELECT'){var o=el.selectedOptions&&el.selectedOptions.length?el.selectedOptions[0]:null;"
+      + "return {text:o?String(o.value||o.textContent||''):String(el.value||'')};}"
+      + "if(el.isContentEditable===true||(el.getAttribute&&el.getAttribute('contenteditable')==='true'))"
+      + "return {text:String(el.innerText||el.textContent||'')};"
+      + "if(typeof el.value==='string')return {text:el.value};"
+      + "return {text:String(el.innerText||el.textContent||'')};"
+      + "})()";
+
+    const run = async () => {
+      // OOPIF：在所属子帧上下文里执行（顶层 querySelector 看不到跨进程 iframe）。
+      if (/^axf-/.test(target)) {
+        const frame = await this._owningFrame(view, target);
+        if (frame) {
+          try { return await frame.executeJavaScript(js); } catch (e) { /* fall through */ }
+        }
+      }
+      try { return await this.evaluate(js, tabId); } catch (e) { return null; }
+    };
+
+    let raw = await run();
+    if (!raw || raw.__miss) {
+      // AX 读层的 handle 是按需 stamp 的（ensureHandles）—— 从未 act 过的节点
+      // DOM 上可能还没有 data-ai-id。补一次再读，仍没有才报 not found。
+      await this._ensureAxHandles(view, tabId);
+      raw = await run();
+    }
+    if (!raw || raw.__miss) return { success: false, error: 'target_not_found: no element with data-ai-id=' + String(target) };
+    if (raw.__sensitive) return { success: false, error: 'sensitive_value_not_readable: input[type=' + raw.__sensitive + '] is never exposed' };
+    if (typeof raw.text !== 'string') return { success: false, error: 'target_has_no_value' };
+    const sliced = valueContract.getValueResult(raw.text, offset, limit);
+    return { success: true, target, ...sliced };
   }
 
   // #3 helper: read & clear the "new tab opened by this source tab" entry.

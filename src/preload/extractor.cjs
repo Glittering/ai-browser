@@ -2,6 +2,9 @@
 // Split out of bridge.js v6.9. Pure DOM functions, no Electron dependency,
 // so it can be unit-tested under jsdom.
 // Exports: extractTree(), extractPageContext()
+var valueContract = require("../shared/value_contract.cjs");
+var truncateNodeValue = valueContract.truncateNodeValue;
+var sensitiveInputKind = valueContract.sensitiveInputKind;
 
 // ============================================================
 // 1. EXTRACT TREE — DOM → semantic tree with bounds + states
@@ -250,13 +253,40 @@ function extractTree() {
       actions: actions,
       bounds: bounds
     };
-    // Attach current value for input/textarea/contenteditable
+    // Attach current value for input/textarea/contenteditable.
+    // 截断走共享契约（src/shared/value_contract.cjs）：按 Unicode code point
+    // 计数，截断时带 value_truncated / value_full_length / value_fetch_ref，
+    // 未截断只给 value（不给普通节点加字段）。敏感控件不泄露值。
     if (tag === "input" || tag === "textarea" || tag === "select") {
-      var v = el.value;
-      if (v !== undefined && v !== "" && v !== null) node.value = v.slice(0, 200);
+      var sensitive = sensitiveInputKind(el);
+      if (sensitive) {
+        node.value_sensitive = true;
+        node.value_sensitive_reason = sensitive;
+      } else {
+        var v = el.value;
+        if (v !== undefined && v !== "" && v !== null) {
+          var cut = truncateNodeValue(v, aiId, 200);
+          node.value = cut.value;
+          if (cut.value_truncated) {
+            node.value_truncated = true;
+            node.value_full_length = cut.value_full_length;
+            node.value_length_unit = cut.value_length_unit;
+            node.value_fetch_ref = cut.value_fetch_ref;
+          }
+        }
+      }
     } else if (el.contentEditable === "true" || el.getAttribute("contenteditable") === "true") {
       var innerText = el.innerText;
-      if (innerText && innerText.trim()) node.value = innerText.slice(0, 200);
+      if (innerText && innerText.trim()) {
+        var cutCe = truncateNodeValue(innerText, aiId, 200);
+        node.value = cutCe.value;
+        if (cutCe.value_truncated) {
+          node.value_truncated = true;
+          node.value_full_length = cutCe.value_full_length;
+          node.value_length_unit = cutCe.value_length_unit;
+          node.value_fetch_ref = cutCe.value_fetch_ref;
+        }
+      }
     }
     if (Object.keys(attributes).length) node.attributes = attributes;
     if (editorType) node.editor_type = editorType;

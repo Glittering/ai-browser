@@ -32,14 +32,16 @@ export const MCP_TOOLS = [
   },
   {
     name: 'browse_act',
-    description: 'Perform an action on an element by its data-ai-id: click, type, clear, select, focus, hover, scroll_to, upload.',
+    description: 'Act on an element by data-ai-id: click, type, clear, select, focus, hover, scroll_to, upload, get_value (read a truncated node.value in full; read-only).',
     inputSchema: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['click', 'type', 'clear', 'focus', 'hover', 'scroll_to', 'upload'], description: 'Action.' },
+        action: { type: 'string', enum: ['click', 'type', 'clear', 'focus', 'hover', 'scroll_to', 'upload', 'get_value'], description: 'Action.' },
         target: { type: 'string', description: 'Element data-ai-id from the semantic tree.' },
         text: { type: 'string', description: 'Text to type (type only).' },
         value: { type: 'string', description: 'Value for select.' },
+        offset: { type: 'integer', description: 'get_value: start offset in Unicode code points (default 0).' },
+        limit: { type: 'integer', description: 'get_value: max code points to return (default 20000, hard cap 1000000).' },
         url: { type: 'string', description: 'For click: click the link whose href matches this URL instead of guessing the target label.' },
         keep_tab: { type: 'boolean', description: 'For click: keep the current tab active instead of auto-following a newly opened tab.' },
         file: { type: 'string', description: 'Absolute path to upload (upload only, target must be a file input).' },

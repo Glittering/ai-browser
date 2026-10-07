@@ -14,6 +14,11 @@
 //
 // This module is ADDITIVE: nothing here is called by the default getTree path yet.
 
+// node.value 的截断契约（legacy 读层 src/preload/extractor.cjs 用同一个 helper，
+// 两条读层不得各自实现 slice）。
+import valueContract from '../shared/value_contract.cjs';
+const { truncateNodeValue } = valueContract;
+
 // --- Pure: raw AXNode[] -> contract TreeNode -----------------------------
 // Raw AXNode (CDP Accessibility.AXNode):
 //   { nodeId, ignored, role:{value}, name:{value}, value:{value},
@@ -98,7 +103,24 @@ function build(node, idFor) {
   if (role === 'textbox' || role === 'combobox' || role === 'listbox' || role === 'searchbox') {
     let v = valueOf(node.value);
     if ((v == null || v === '') && readValue) v = readValue(node);
-    if (v != null && v !== '') tn.value = String(v).slice(0, 200);
+    // 密码框：AX 用 protected 属性标记。不返回值、长度或取全量提示。
+    const isProtected = valueOf(prop(nodeStore, node.nodeId, 'protected')) === true;
+    if (isProtected) {
+      tn.value_sensitive = true;
+      tn.value_sensitive_reason = 'password';
+    } else if (v != null && v !== '') {
+      // 与 legacy 读层共用同一截断契约（src/shared/value_contract.cjs）：
+      // code point 计数，截断时带 value_truncated / value_full_length /
+      // value_fetch_ref，未截断只给 value。
+      const cut = truncateNodeValue(String(v), tn.id, 200);
+      tn.value = cut.value;
+      if (cut.value_truncated) {
+        tn.value_truncated = true;
+        tn.value_full_length = cut.value_full_length;
+        tn.value_length_unit = cut.value_length_unit;
+        tn.value_fetch_ref = cut.value_fetch_ref;
+      }
+    }
   }
 
   const kids = [];

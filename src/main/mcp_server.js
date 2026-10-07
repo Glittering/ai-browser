@@ -128,6 +128,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           url: args.url,
           keep_tab: args.keep_tab,
           file: args.file,
+          offset: args.offset,
+          limit: args.limit,
         },
         tab: args.tab
       });
