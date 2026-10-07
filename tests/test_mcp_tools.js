@@ -4,8 +4,24 @@ import { MCP_TOOLS } from '../src/main/mcp_tools.js';
 describe('MCP tool list (token-cost guard)', () => {
   const names = MCP_TOOLS.map((t) => t.name);
 
-  it('keeps exactly 13 tools', () => {
-    expect(MCP_TOOLS).toHaveLength(13);
+  it('keeps exactly 14 tools', () => {
+    // 13 + browse_network（网络抓包聚合工具）。browse_subscribe /
+    // browse_network_body 在本主版本保留兼容，下一主版本换出后回到 13。
+    expect(MCP_TOOLS).toHaveLength(14);
+  });
+
+  it('exposes browse_network and nothing else new', () => {
+    expect(names).toContain('browse_network');
+    const op = MCP_TOOLS.find((t) => t.name === 'browse_network');
+    expect(op.inputSchema.properties.operation.enum).toEqual(['list', 'get', 'clear', 'configure']);
+    expect(op.inputSchema.required).toEqual(['operation']);
+  });
+
+  it('browse_act exposes the read-only get_value action', () => {
+    const act = MCP_TOOLS.find((t) => t.name === 'browse_act');
+    expect(act.inputSchema.properties.action.enum).toContain('get_value');
+    expect(act.inputSchema.properties.offset).toBeTruthy();
+    expect(act.inputSchema.properties.limit).toBeTruthy();
   });
 
   it('has unique tool names', () => {
