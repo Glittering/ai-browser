@@ -10,6 +10,7 @@
     "test:watch": "vitest",
     "smoke": "node e2e/smoke_ws.cjs",
     "capabilities": "node e2e/capabilities_ws.cjs",
+    "richtext": "node e2e/richtext_ws.cjs",
     "realsites": "node e2e/e2e_realsites.cjs",
     "realsites:meta": "vitest run tests/test_realsites_sites.js",
     "mcp": "node src/main/mcp_server.js"
