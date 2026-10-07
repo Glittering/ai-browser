@@ -210,10 +210,71 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
             send({ jsonrpc: '2.0', id, result: result || { ok: true } });
             break;
           }
-          // === ui.network_body — get HTTP response body by URL pattern ===
+          // === 网络抓包（可查询的 Network 面板）===
+          // 列表/详情/清理/配置。错误码见 network_monitor.NETWORK_ERROR_CODES：
+          // 不存在 / body 被淘汰 / body 拿不到 / 敏感头未开，各自独立，不静默 null。
+          case 'ui.network_list': {
+            const result = pageManager.networkList({
+              tab: tabId,
+              method: params.method,
+              url_contains: params.url_contains,
+              status: params.status,
+              resource_type: params.resource_type,
+              started_after: params.started_after,
+              started_before: params.started_before,
+              state: params.state,
+              limit: params.limit,
+              before_seq: params.before_seq,
+            });
+            send({ jsonrpc: '2.0', id, result });
+            break;
+          }
+          case 'ui.network_get': {
+            try {
+              const result = await pageManager.networkGet(String(params.network_id || ''), {
+                include_request_headers: params.include_request_headers === true,
+                include_request_body: params.include_request_body === true,
+                include_response_headers: params.include_response_headers === true,
+                include_response_body: params.include_response_body === true,
+                include_sensitive_headers: params.include_sensitive_headers === true,
+                request_body_offset: params.request_body_offset,
+                response_body_offset: params.response_body_offset,
+                body_limit: params.body_limit,
+              });
+              send({ jsonrpc: '2.0', id, result });
+            } catch (e) {
+              if (e && e.rpcCode) send({ jsonrpc: '2.0', id, error: { code: e.rpcCode, message: e.message, data: e.data || undefined } });
+              else send({ jsonrpc: '2.0', id, error: { code: -32603, message: e.message } });
+            }
+            break;
+          }
+          case 'ui.network_clear': {
+            const result = pageManager.networkClear(tabId);
+            send({ jsonrpc: '2.0', id, result });
+            break;
+          }
+          case 'ui.network_configure': {
+            const result = pageManager.networkConfigure(tabId, {
+              enabled: params.enabled,
+              capture_bodies: params.capture_bodies,
+            });
+            send({ jsonrpc: '2.0', id, result });
+            break;
+          }
+          // === ui.network_body — DEPRECATED，保留一个版本 ===
+          // 按 url_pattern 选最近完成的匹配项（内部转 network_get），响应仍为
+          // 旧形状 {body:string|null}。下一主版本删除。
           case 'ui.network_body': {
             const body = await pageManager.getNetworkBody(params.url_pattern || '', tabId);
-            send({ jsonrpc: '2.0', id, result: { body: body } });
+            send({
+              jsonrpc: '2.0', id,
+              result: {
+                body: body,
+                deprecated: true,
+                replacement: 'ui.network_list + ui.network_get',
+                warning: 'ui.network_body is deprecated and keeps only the first 5000 chars of the newest finished match — use ui.network_list/ui.network_get for method, headers, POST body and paging',
+              },
+            });
             break;
           }
           // === ui.quit — let MCP clients shut down the browser gracefully ===

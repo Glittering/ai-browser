@@ -188,6 +188,38 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return { content: [{ type: 'text', text: JSON.stringify(result) }] };
     }
 
+    case 'browse_network': {
+      const result = args.operation === 'list' || args.operation === 'configure' || args.operation === 'clear'
+        ? await wsClient.call('ui.network_' + args.operation, {
+            tab: args.tab,
+            method: args.method,
+            url_contains: args.url_contains,
+            status: (args.status_min !== undefined || args.status_max !== undefined)
+              ? { min: args.status_min, max: args.status_max } : undefined,
+            resource_type: args.resource_type,
+            state: args.state,
+            started_after: args.started_after,
+            started_before: args.started_before,
+            limit: args.limit,
+            before_seq: args.before_seq,
+            enabled: args.enabled,
+            capture_bodies: args.capture_bodies,
+          })
+        : await wsClient.call('ui.network_get', {
+            tab: args.tab,
+            network_id: args.network_id,
+            include_request_headers: args.include_request_headers,
+            include_request_body: args.include_request_body,
+            include_response_headers: args.include_response_headers,
+            include_response_body: args.include_response_body,
+            include_sensitive_headers: args.include_sensitive_headers,
+            request_body_offset: args.request_body_offset,
+            response_body_offset: args.response_body_offset,
+            body_limit: args.body_limit,
+          });
+      return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+    }
+
     case 'browse_network_body': {
       const result = await wsClient.call('ui.network_body', { url_pattern: args.url_pattern, tab: args.tab });
       return { content: [{ type: 'text', text: JSON.stringify(result) }] };

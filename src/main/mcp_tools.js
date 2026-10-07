@@ -126,6 +126,39 @@ export const MCP_TOOLS = [
     }
   },
   {
+    name: 'browse_network',
+    description: 'Query captured HTTP requests (Chrome Network panel): list/get/clear/configure. Captures method, headers and POST bodies; sensitive headers redacted by default.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        operation: { type: 'string', enum: ['list', 'get', 'clear', 'configure'], description: 'Operation.' },
+        tab: { type: 'integer', description: 'Tab id (default: active tab).' },
+        network_id: { type: 'string', description: 'get: id from list.' },
+        method: { type: 'array', items: { type: 'string' }, description: 'list: filter by HTTP method.' },
+        url_contains: { type: 'string', description: 'list: URL substring filter.' },
+        status_min: { type: 'integer', description: 'list: minimum status.' },
+        status_max: { type: 'integer', description: 'list: maximum status.' },
+        resource_type: { type: 'array', items: { type: 'string' }, description: 'list: XHR/Fetch/Document/...' },
+        state: { type: 'array', items: { type: 'string' }, description: 'list: pending/finished/failed.' },
+        started_after: { type: 'string', description: 'list: ISO timestamp.' },
+        started_before: { type: 'string', description: 'list: ISO timestamp.' },
+        limit: { type: 'integer', description: 'list: page size (default 50, max 200).' },
+        before_seq: { type: 'integer', description: 'list: cursor from pagination.next_before_seq.' },
+        include_request_headers: { type: 'boolean' },
+        include_request_body: { type: 'boolean' },
+        include_response_headers: { type: 'boolean' },
+        include_response_body: { type: 'boolean' },
+        include_sensitive_headers: { type: 'boolean', description: 'Requires AI_BROWSER_NETWORK_SENSITIVE=1.' },
+        request_body_offset: { type: 'integer' },
+        response_body_offset: { type: 'integer' },
+        body_limit: { type: 'integer', description: 'Body page size (default 65536, max 262144).' },
+        enabled: { type: 'boolean', description: 'configure: turn capture on/off.' },
+        capture_bodies: { type: 'string', enum: ['none', 'api', 'all'], description: 'configure.' }
+      },
+      required: ['operation']
+    }
+  },
+  {
     name: 'browse_network_body',
     description: 'Return the response body of a completed request whose URL contains the pattern (requires prior subscription).',
     inputSchema: {

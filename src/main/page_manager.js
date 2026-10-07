@@ -4,6 +4,11 @@
 import { ipcMain, BrowserView } from 'electron';
 import { config } from '../shared/config.js';
 import axExtractor from './axExtractor.js';
+import { NetworkMonitor, MAX_POST_DATA_SIZE } from './network_monitor.js';
+
+// 网络抓包默认开：只在有订阅时才启用会导致首屏/导航阶段的请求全丢（POST body、
+// 请求头都拿不到）。关闭开关：AI_BROWSER_NETWORK_CAPTURE=0。
+const NETWORK_CAPTURE_DEFAULT = !(process.env.AI_BROWSER_NETWORK_CAPTURE === '0' || process.env.AI_BROWSER_NETWORK_CAPTURE === 'false');
 
 class PageManager {
   constructor(browserWindow) {
@@ -17,6 +22,7 @@ class PageManager {
     this._wsClients = new Map();
     this._openedTabs = new Map();   // sourceTabId -> { id, url } (new tab opened by window.open)
     this._axDiffCache = new Map();  // tabId -> lite interactive snapshot (get_tree {mode:'diff'})
+    this.networkMonitor = new NetworkMonitor({}, { captureEnabled: NETWORK_CAPTURE_DEFAULT });
     this._setupIPC();
   }
 
@@ -125,7 +131,7 @@ class PageManager {
     const view = this._getView(tid);
     if (!view) return { tree: null, context: null };
 
-    return new Promise((resolve, reject) => {
+    const res = await new Promise((resolve, reject) => {
       const id = ++this._requestId;
       this._pendingRequests.set(id, { resolve, reject });
       view.webContents.send('ai:extract', { focusedOnly, id });
@@ -136,6 +142,7 @@ class PageManager {
         }
       }, 5000);
     });
+    return res;
   }
 
   // AX probe read layer (P0). Additive — the default getTree path is untouched.
@@ -926,7 +933,10 @@ class PageManager {
     // active, so network_response / js_error keep flowing without re-subscribing.
     // _ensureCdp attach + enable is idempotent (attach guarded by _cdpTabs).
     if (this._runtimeSubscribers.size > 0) this._ensureCdp(tabId, view, 'Runtime');
-    if (this._networkSubscribers.size > 0) this._ensureCdp(tabId, view, 'Network');
+    // Network：默认在首个真实导航前就启用（不再等订阅），否则初始 HTML/API 与
+    // 导航阶段发出的 POST 全部丢失 —— agent 永远拿不到它们的请求体。
+    // 关闭开关：AI_BROWSER_NETWORK_CAPTURE=0 或 ui.network_configure{enabled:false}。
+    this._ensureNetworkCapture(tabId, view);
 
     // Mask automation fingerprint: remove Electron from UA
     view.webContents.setUserAgent(config.userAgent);
@@ -1008,6 +1018,9 @@ class PageManager {
     for (const [requestId, r] of this._networkRequestMap) {
       if (r.tabId === tabId) this._networkRequestMap.delete(requestId);
     }
+    // 释放该 tab 的抓包日志与 body 内存，避免关掉的 tab 继续占着配额。
+    this.networkMonitor.clearBodyFetcher(tabId);
+    this.networkMonitor.clear(tabId);
   }
 
   listTabs() {
@@ -1056,17 +1069,32 @@ class PageManager {
 
   _networkRequestMap = new Map(); // requestId -> {url, tabId, finished}
 
+  // DEPRECATED：被 ui.network_list / ui.network_get 取代（下一主版本删除）。
+  // 兼容行为：按 url_pattern 选【最近完成】的匹配项（旧实现按 Map 正向遍历，
+  // 同 URL 多次请求时拿到的是最旧那条），响应仍保持旧形状 {body:string|null}。
   async getNetworkBody(urlPattern, tabId) {
-    // Find matching finished request and get body via CDP.
-    // The debugger is attached per-webContents (a tab attaches once, regardless
-    // of how many client sessions subscribe), so reach the tab's debugger
-    // directly instead of guessing which session map recorded it. Picking
-    // "the last session" ([...keys()].pop()) leaked across clients and was
-    // wrong whenever the target tab was owned by a different session.
     const tid = tabId !== undefined ? tabId : this.activeTab;
     const view = this._getView(tid);
     const dbg = view && view.webContents && view.webContents.debugger;
     if (!dbg || typeof dbg.isAttached !== 'function' || !dbg.isAttached()) return null;
+
+    const rec = this.networkMonitor.findLatestFinished(tid, urlPattern || '');
+    if (rec) {
+      try {
+        const detail = await this.networkMonitor.get(rec.network_id, {
+          include_response_body: true,
+          body_limit: 5000,
+        });
+        const body = detail && detail.response && detail.response.body && detail.response.body.raw
+          ? detail.response.body.raw.data : null;
+        return body == null ? null : body;
+      } catch (e) {
+        // body 被淘汰/不可用：旧契约只能表达 null，但至少不谎报成空响应。
+        return null;
+      }
+    }
+
+    // 抓包关闭时退回旧索引路径（Network 域可能由订阅启用但未记日志）。
     for (const [requestId, entry] of this._networkRequestMap) {
       if (entry.tabId === tid && entry.finished && entry.url.indexOf(urlPattern) >= 0) {
         try {
@@ -1118,7 +1146,60 @@ class PageManager {
     } catch (e) { /* mid-navigation / already-attached elsewhere; skip this tab */ }
   }
 
+  // 抓包用的 Network 域：默认在 tab 创建后、首个导航前启用。
+  // Network.enable 必须显式带 maxPostDataSize，否则 Chromium 可能不内联
+  // request.postData（POST 请求体就拿不到，只能靠 getRequestPostData 补）。
+  // 实验参数（durable messages / buffer size）在部分 Chromium 上不支持，
+  // 逐个降级，最后一档是裸 Network.enable。
+  _ensureNetworkCapture(tabId, view) {
+    const cfg = this.networkMonitor.tabConfig(tabId);
+    if (!cfg.enabled) return;
+    try {
+      const wc = view.webContents;
+      if (!this._cdpTabs.has(tabId)) {
+        wc.debugger.attach('1.3');
+        const entry = { wc, domains: new Set() };
+        this._cdpTabs.set(tabId, entry);
+        wc.debugger.on('message', (_event, method, params) => this._onCdpMessage(tabId, method, params));
+      }
+      const entry = this._cdpTabs.get(tabId);
+      if (entry.domains.has('Network')) return;
+      const attempts = [
+        {
+          maxPostDataSize: MAX_POST_DATA_SIZE,
+          maxTotalBufferSize: 32 * 1024 * 1024,
+          maxResourceBufferSize: 8 * 1024 * 1024,
+          enableDurableMessages: true,
+        },
+        { maxPostDataSize: MAX_POST_DATA_SIZE },
+        {},
+      ];
+      this.networkMonitor.setBodyFetcher(tabId, async (requestId, kind) => {
+        if (!wc.debugger || typeof wc.debugger.isAttached !== 'function' || !wc.debugger.isAttached()) return null;
+        if (kind === 'request') {
+          const r = await wc.debugger.sendCommand('Network.getRequestPostData', { requestId });
+          if (!r || r.postData == null) return null;
+          // multipart 的文件字节 CDP 不保证给出 —— 如实标 incomplete。
+          return { data: r.postData, complete: true };
+        }
+        const r = await wc.debugger.sendCommand('Network.getResponseBody', { requestId });
+        if (!r) return null;
+        return { data: r.body || '', base64Encoded: !!r.base64Encoded, complete: true };
+      });
+      const tryEnable = (i) => {
+        if (i >= attempts.length) return;
+        Promise.resolve(wc.debugger.sendCommand('Network.enable', attempts[i]))
+          .then(() => { entry.domains.add('Network'); })
+          .catch(() => tryEnable(i + 1));
+      };
+      tryEnable(0);
+    } catch (e) { /* mid-navigation / already attached; skip */ }
+  }
+
   _teardownCdpIfIdle() {
+    // 抓包默认开启时 debugger 是常驻资源，不能因为最后一个订阅者离开就 detach，
+    // 否则后续 ui.network_list 拿不到任何东西。
+    if (NETWORK_CAPTURE_DEFAULT) return;
     if (this._networkSubscribers.size > 0 || this._runtimeSubscribers.size > 0) return;
     for (const entry of this._cdpTabs.values()) {
       try { entry.wc.debugger.detach(); } catch(e) {}
@@ -1129,7 +1210,7 @@ class PageManager {
   async _startNetworkMonitor(sessionId) {
     if (this._networkSubscribers.has(sessionId)) return;
     this._networkSubscribers.add(sessionId);
-    for (const [tabId, view] of this.tabs) this._ensureCdp(tabId, view, 'Network');
+    for (const [tabId, view] of this.tabs) this._ensureNetworkCapture(tabId, view);
   }
 
   async _startRuntimeMonitor(sessionId) {
@@ -1139,6 +1220,12 @@ class PageManager {
   }
 
   _onCdpMessage(tabId, method, params) {
+    // 抓包：请求侧（method / headers / POST body / initiator）与响应侧都落进
+    // network_monitor；旧的网络事件推送行为保持不变。
+    if (typeof method === 'string' && method.indexOf('Network.') === 0) {
+      this._onNetworkCdpMessage(tabId, method, params);
+      return;
+    }
     if (method === 'Runtime.exceptionThrown') {
       // CDP captures page main-world exceptions that preload window.onerror
       // (an isolated world) can never see under contextIsolation.
@@ -1152,19 +1239,105 @@ class PageManager {
         columnNumber: d.columnNumber,
         tabId,
       });
-    } else if (method === 'Network.responseReceived') {
-      const r = params.response;
-      this._networkRequestMap.set(params.requestId, { url: r.url, tabId });
-      this._broadcast('network_response', { url: r.url, status: r.status, statusText: r.statusText, mimeType: r.mimeType, tabId });
-    } else if (method === 'Network.loadingFinished') {
-      const entry = this._networkRequestMap.get(params.requestId);
-      if (entry) entry.finished = true;
-    } else if (method === 'Network.loadingFailed') {
-      const requestId = params.requestId || '';
-      const entry = this._networkRequestMap.get(requestId);
-      const url = entry ? entry.url : requestId;
-      this._broadcast('network_response', { url, status: 0, statusText: 'Failed', errorText: params.errorText || '', tabId });
     }
+  }
+
+  _onNetworkCdpMessage(tabId, method, params) {
+    const m = this.networkMonitor;
+    switch (method) {
+      case 'Network.requestWillBeSent': {
+        const rec = m.onRequestWillBeSent(tabId, params);
+        // 旧 getNetworkBody 的索引（结构保持 {url, tabId, finished}）。
+        this._networkRequestMap.set(params.requestId, {
+          url: rec ? rec.url : (params.request && params.request.url) || '',
+          tabId,
+          finished: false,
+        });
+        return;
+      }
+      case 'Network.requestWillBeSentExtraInfo':
+        m.onRequestWillBeSentExtraInfo(tabId, params);
+        return;
+      case 'Network.responseReceivedExtraInfo':
+        m.onResponseReceivedExtraInfo(tabId, params);
+        return;
+      case 'Network.dataReceived':
+        m.onDataReceived(tabId, params);
+        return;
+      case 'Network.responseReceived': {
+        m.onResponseReceived(tabId, params);
+        const r = params.response || {};
+        const entry = this._networkRequestMap.get(params.requestId);
+        if (entry) entry.url = r.url;
+        else this._networkRequestMap.set(params.requestId, { url: r.url, tabId, finished: false });
+        this._broadcast('network_response', { url: r.url, status: r.status, statusText: r.statusText, mimeType: r.mimeType, tabId });
+        return;
+      }
+      case 'Network.loadingFinished': {
+        m.onLoadingFinished(tabId, params);
+        const entry = this._networkRequestMap.get(params.requestId);
+        if (entry) entry.finished = true;
+        return;
+      }
+      case 'Network.loadingFailed': {
+        m.onLoadingFailed(tabId, params);
+        const requestId = params.requestId || '';
+        const entry = this._networkRequestMap.get(requestId);
+        const url = entry ? entry.url : requestId;
+        this._broadcast('network_response', { url, status: 0, statusText: 'Failed', errorText: params.errorText || '', tabId });
+        return;
+      }
+      default:
+        return;
+    }
+  }
+
+  // ==== 网络抓包查询（ui.network_list / get / clear / configure）====
+
+  networkList(filter = {}) {
+    return this.networkMonitor.list(filter);
+  }
+
+  async networkGet(networkId, opts = {}) {
+    return await this.networkMonitor.get(networkId, opts);
+  }
+
+  networkClear(tabId) {
+    const cleared = this.networkMonitor.clear(tabId);
+    // 只清内存日志。浏览器 cache / cookie / storage 一概不动 —— 命名与响应都
+    // 要避免被调用方误以为清了会话。
+    return {
+      ok: true,
+      ...cleared,
+      cleared_browser_cache: false,
+      cleared_cookies: false,
+      cleared_storage: false,
+      scope: 'in_memory_request_log_only',
+      warning: 'only the in-memory request log was cleared; browser cache, cookies and storage are untouched',
+    };
+  }
+
+  networkConfigure(tabId, opts = {}) {
+    // 上限只能由受控 env/config 改，调用方不能通过 WS 设成无限。
+    const cfg = this.networkMonitor.configure(tabId, opts);
+    if (cfg.enabled) {
+      const view = this._getView(tabId);
+      if (view) this._ensureNetworkCapture(tabId, view);
+    }
+    return {
+      enabled: cfg.enabled,
+      capture_bodies: cfg.capture_bodies,
+      effective: cfg.enabled ? 'future_requests' : 'disabled',
+      reload_required_for_initial_navigation: true,
+      capabilities: {
+        request_headers: true,
+        request_body: true,
+        durable_response_bodies: false,
+        sensitive_headers_optin: this.networkMonitor.sensitiveAllowed,
+      },
+      limits: this.networkMonitor.captureInfo(tabId).limits,
+      note: 'retention limits are controlled by AI_BROWSER_NETWORK_* env only, never by this call',
+    };
   }
 
   async _stopNetworkMonitor(sessionId) {
@@ -1187,6 +1360,7 @@ class PageManager {
     this._cdpTabs.clear();
     this._networkSubscribers.clear();
     this._runtimeSubscribers.clear();
+    this.networkMonitor.clear();
     // Reject any in-flight requests so callers don't hang on close.
     for (const [id, pending] of this._pendingRequests) {
       try { pending.reject(new Error('PageManager closing')); } catch (e) {}
