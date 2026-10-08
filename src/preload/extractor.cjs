@@ -609,9 +609,21 @@ function extractPageContext() {
     if (!t || t.length > 120) return "";
     return t;
   }
-  // 报错对应到具体字段：只在"同一容器内恰好一个输入控件"时才认领，宁可空着也不猜。
-  // （errF1 → f1、errF2 → f2、tagDup → tagInput；页面级汇总的容器里有多个输入 → 不认领）
+  // 报错对应到具体字段。两条可靠路径，都没有就宁可空着也不猜：
+  //  1) 标准 ARIA 关联：哪个输入用 aria-describedby / aria-errormessage 指到这个
+  //     报错元素（mTitle[aria-describedby=mErr] → mErr 的 field 就是 mTitle）。
+  //  2) 同一容器内恰好一个输入控件（#tagWrap 里的 tagDup → tagInput）。
+  // 刻意不做"找最近的 input"这类位置猜测：报错常集中渲染在表单底部/顶部，
+  // 离它最近的 input 往往不是它对应的那个字段，猜出来的对应关系比没有更糟。
   function fieldOf(el) {
+    var eid = el.id;
+    if (eid) {
+      try {
+        var ref = document.querySelector(
+          '[aria-errormessage~="' + eid + '"],[aria-describedby~="' + eid + '"]');
+        if (ref) return ref.id || ref.name || "";
+      } catch (e) {}
+    }
     var p = el.parentElement;
     if (!p) return "";
     var inps = p.querySelectorAll("input:not([type=hidden]),textarea,select");
