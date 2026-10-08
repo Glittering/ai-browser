@@ -10,7 +10,7 @@
   <img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue.svg">
   <img alt="Electron" src="https://img.shields.io/badge/built%20with-Electron%2033-9cf">
   <img alt="Platforms" src="https://img.shields.io/badge/platforms-macOS%20%E2%80%A2%20Linux-blueviolet">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-174%20passing%20%2F%2019%20files-2ea043">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-223%20unit%20%2B%20251%20e2e-2ea043">
   <img alt="MCP" src="https://img.shields.io/badge/spec-MCP%20(stdio)-f5b23b">
 </p>
 
@@ -100,9 +100,10 @@ or any system prompt; it teaches the tool loop, the token-saving params, and whe
 
 ---
 
-## The 13 tools
+## The MCP tools
 
-Source of truth: [`src/main/mcp_tools.js`](src/main/mcp_tools.js).
+Source of truth: [`src/main/mcp_tools.js`](src/main/mcp_tools.js). There are 14 today;
+`browse_canvas` is landing next, bringing it to 15.
 
 | Tool | One line |
 |---|---|
@@ -116,7 +117,8 @@ Source of truth: [`src/main/mcp_tools.js`](src/main/mcp_tools.js).
 | `browse_new_tab` | Open a new tab, optionally at a URL. |
 | `browse_close_tab` | Close a tab by id. |
 | `browse_set_active_tab` | Switch which tab subsequent calls act on. |
-| `browse_network_body` | Get the response body of a completed request matching a URL substring. |
+| `browse_network` | Chrome-DevTools-style network inspection: `list` (filter by method / URL / status / type), `get` (request + response headers and bodies), `clear`, `configure`. |
+| `browse_network_body` | Legacy: response body of the most recent request matching a URL substring. Superseded by `browse_network`. |
 | `browse_subscribe` | Subscribe to `dom_change` / `network_response` / `captcha_appeared` / `message_appeared` / `js_error` / `state_changed`; `"*"` for all. |
 | `browse_quit` | Shut the whole browser down and release the process. |
 
@@ -125,7 +127,11 @@ Notes that save round-trips:
 - `browse_get_tree` accepts `subset: "interactive"` to drop layout-only branches, `mode: "diff"` to
   return only nodes that appeared/disappeared since the last read, and `ax: true` to read through the
   accessibility layer (links then carry `url`).
-- `browse_network_body` needs a prior `browse_subscribe` — bodies are only retained while subscribed.
+- `browse_act` also takes `action: "get_value"` — a **read-only** way to fetch an element's full text,
+  which matters because `browse_get_tree` truncates long values at 200 characters (see below).
+- `browse_network` captures requests from the moment a tab opens, **including POST request bodies** —
+  no subscription needed. Request headers are redacted by default
+  (`authorization` / `cookie` → `[REDACTED]`); pass `include_sensitive_headers: true` to see them.
 - Most tools take an optional `tab` for multi-tab work; without it they target the active tab.
 
 ---
@@ -326,39 +332,66 @@ AI_BROWSER_USER_DATA=~/.ai-browser-work npm start
 ## Test & dev
 
 ```bash
-npm test             # vitest — 174 tests across 19 files, all passing
-npm run smoke        # Electron contract layer, offline fixture — 31 checks, all passing
-npm run capabilities # text input / canvas / page source / network capture / DOM editing — 53 checks
+npm test             # vitest — 223 tests across 21 files (218 passing, 5 skipped)
+npm run smoke        # Electron contract layer, offline fixture      — 31 checks
+npm run capabilities # text fields, canvas, page source, network, DOM editing — 53 checks
+npm run richtext     # rich-text editors, nested menus, forms, errors, tags, upload — 111 checks
+npm run network      # request log, POST bodies, headers, pagination, redaction — 41 checks
+npm run value        # value truncation contract + read-only get_value — 15 checks
+npm run canvas       # canvas draw-call capture — see below
 npm run realsites    # navigate/read/act against a matrix of real sites
 ```
 
-`npm run smoke` boots a genuine Electron against offline fixtures and exits non-zero on failure; it
-covers things jsdom structurally cannot (preload integrity, `ui.evaluate` under a strict CSP, CDP
-click hit-testing and off-screen scroll, multi-tab lifecycle, event fan-out to multiple clients, and
-the `evaluate` guard rails).
+All e2e suites boot a genuine Electron against offline fixtures and exit non-zero on failure.
+Together they cover what jsdom structurally cannot: preload integrity, `ui.evaluate` under a strict
+CSP, CDP click hit-testing, multi-tab lifecycle, event fan-out, and the `evaluate` guard rails.
 
-`npm run capabilities` is the user-facing capability matrix: typing into every kind of text field
-(plain inputs, `password`, `number`, `textarea`, `contenteditable`, plus `readonly` / `disabled` /
-`maxlength` behaviour — including **CJK input** and 1000-character text), what a `canvas` does and
-does not expose, reading page source, capturing response bodies, and editing the page through
-`ui.evaluate`.
-
-Both need the WS port free — stop a running `npm start` first, or point them somewhere else:
+They all need the WS port free — stop a running `npm start` first, or point them elsewhere:
 
 ```bash
 AI_BROWSER_PORT=9333 npm run smoke
-AI_BROWSER_PORT=9333 npm run capabilities
 ```
 
-They boot their own Electron in an isolated profile (`/tmp/ai-browser-e2e-<port>` by default), so
-they never touch your real `~/.ai-browser` profile — the one holding your logged-in sessions.
+They boot their own Electron in an **isolated profile** (`/tmp/ai-browser-e2e-<port>` by default), so
+they never touch your real `~/.ai-browser` profile — the one holding your logged-in sessions. They
+also clean up their Electron on exit, including on Ctrl-C / timeout / crash: an orphaned process
+would otherwise hold the port and the single-instance lock, and you would find `npm start` refusing
+to launch with *"another AI Browser instance is already running"*.
 
-### What `npm run capabilities` proved about `canvas`
+### What each capability suite proved
 
-A `canvas` is a node in the semantic tree (`role: canvas`) and nothing more — no value, no text, no
-pixels. You can read dimensions and raw pixels yourself via `ui.evaluate`
-(`getContext('2d').getImageData(...)`), but AI Browser does not screenshot or OCR, so it cannot tell
-you what a canvas *shows*. That is a deliberate boundary, not a bug.
+**`npm run richtext`** — the deepest suite. Rich-text editors and formatting, two- and three-level
+nested menus, required vs optional fields (native `required`, `aria-required`, red asterisks),
+error and warning surfaces (field-level, form-level, toasts, modal dialogs), radio / checkbox /
+select / combobox, tag inputs and Weibo-style topic insertion, and image upload. Every
+action assertion is checked against the **real DOM**, not just the semantic tree.
+
+Two things it changed in the product:
+
+- A click on a button that dismisses itself used to fire **twice** (the hit-test ran after the
+  dispatch, found the target gone, and fell back to a second click). Duplicate submissions,
+  duplicate mentions. Clicks now hit-test before dispatching and no longer fall back.
+- Field-level errors used to be invisible — they are carried by bare `<span>`s with no ARIA role and
+  were pruned as layout. They now surface in `context.errors` / `context.field_errors`, scanned
+  across the whole document rather than only inside dialog containers.
+
+**`npm run capabilities`** — typing into every kind of text field (plain inputs, `password`,
+`number`, `textarea`, `contenteditable`, plus `readonly` / `disabled` / `maxlength` — including
+**CJK input** and 1000-character text), reading page source, capturing response bodies, and editing
+the page through `ui.evaluate`.
+
+**`npm run network`** — that a POST can be captured with its full request body, that headers are
+redacted by default, and that bodies paginate instead of being silently truncated.
+
+### Boundaries worth knowing before you rely on them
+
+- **`node.value` is truncated at 200 characters.** That is *our* limit, not CDP's. When it truncates
+  the node carries `value_truncated: true`, `value_full_length`, and a ready-to-call `value_fetch`
+  hint — use `browse_act(action: "get_value")`, which is read-only and paginates.
+- **Password fields expose no value at all** — only `value_sensitive: true`. The semantic tree is fed
+  wholesale into your agent's context, so it should not carry secrets.
+- **`js_error` is broadcast for every tab** (each event carries `tabId`), so ordering and indices are
+  not guaranteed. Filter by `tabId`; do not rely on "the first error is the one I care about".
 
 `npm run realsites` is table-driven from `e2e/realsites/sites.cjs`, currently 17 sites across 8 buckets
 (search, finance, media, dev, ecommerce, spa, editor, marketplace). Sites that require login or
