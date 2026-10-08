@@ -841,6 +841,30 @@ class PageManager {
       `return {ok:true};`
     );
     if (!prep || !prep.ok) return null;
+    // 清空收尾：拆掉残留的空块外壳。selectAll + 受信 Delete 只删文本不删外层块
+    // 标签，浏览器会保留至少一个空块承载光标 —— 清一个 H2 段落得到的是
+    // `<h2><br></h2>` 而不是空。残留外壳会让随后的排版一层层嵌进旧外壳（实测出现
+    // h2>blockquote>pre>ul>li 的套娃），editor_blocks 的 role 也随之失真。
+    // 只在"确实已经没有文本内容"时拆，有内容的块一个都不动。
+    const stripEmptyShells = () => run(
+      `var el=document.querySelector('[data-ai-id=' + ${JSON.stringify(String(aiId))} + ']');if(!el)return false;` +
+      `var ed=el;if(ed.querySelector){var inner=ed.querySelector('[contenteditable=true],input,textarea');if(inner)ed=inner;}` +
+      `if(ed.tagName==='INPUT'||ed.tagName==='TEXTAREA')return false;` +
+      `if(ed.contentEditable!=='true')return false;` +
+      `if((ed.innerText||'').trim()!=='')return false;` +
+      `var BLOCK=/^(H1|H2|H3|H4|H5|H6|P|BLOCKQUOTE|PRE|UL|OL|LI|DIV|SECTION|ARTICLE)$/;` +
+      `for(var g=0;g<12;g++){` +
+      `if(ed.children.length!==1)break;` +
+      `var k=ed.children[0];` +
+      `if(!BLOCK.test(k.tagName))break;` +
+      `if((k.innerText||'').trim()!=='')break;` +
+      `while(k.firstChild)ed.insertBefore(k.firstChild,k);` +
+      `ed.removeChild(k);}` +
+      `return true;`
+    );
+    // clear 时先拆一遍：编辑器可能已经是"空但带外壳"的状态，不拆的话下面的
+    // 幂等短路会把它当成"已经是空的"直接返回，外壳就永远留在那儿。
+    if (!text) await stripEmptyShells();
     // 校验用的归一化。\r\n 统一成 \n，再压掉"排版空白"（空格/tab），但换行
     // 本身必须参与比对：把 \s 全剥掉会让 "a\nb\nc" 与 "abc" 等价，段落结构
     // 丢失就被判成成功 —— 那是对调用方的谎报，出了问题无从察觉。
@@ -876,6 +900,7 @@ class PageManager {
       // 清空失败但目标非空：先不空转，仍尝试继续键入（若编辑器未清空，键入会拼接而非替换）。
       await this._cdpKey(send, { key: 'Delete', code: 'Delete', vk: 46, mod: 0 });
     }
+    if (!text) await stripEmptyShells();
     const paras = String(text == null ? '' : text).split('\n');
     // 段落内容快照：用来判断"这一下 Enter 到底有没有生效"。
     const snap = () => run(
