@@ -25,6 +25,7 @@ class PageManager {
     this._wsClients = new Map();
     this._openedTabs = new Map();   // sourceTabId -> { id, url } (new tab opened by window.open)
     this._axDiffCache = new Map();  // tabId -> lite interactive snapshot (get_tree {mode:'diff'})
+    this._revertTimers = new Map(); // tabId -> 挂起的 ui.peek 自动回撤定时器（新 peek 会取消它）
     this.networkMonitor = new NetworkMonitor({}, { captureEnabled: NETWORK_CAPTURE_DEFAULT });
     this._setupIPC();
   }
@@ -318,6 +319,11 @@ class PageManager {
     const view = this._getView(tid);
     if (!view) return { revealed: [], hidden: [], mode: 'hover', error: 'Tab not found' };
     if (!target) return { revealed: [], hidden: [], mode: 'hover', error: 'No target' };
+    // 取消上一次 peek 挂起的自动回撤。回撤是"把鼠标挪走"的延迟动作，若前一次的
+    // 定时器还在，它会在本次 peek 已经把鼠标放到新目标上之后才触发，把刚刚探出来的
+    // 菜单又关掉 —— 表现为 revertMs=0（语义：别回撤）依然失效。谁后动手谁说了算。
+    const staleRevert = this._revertTimers.get(tid);
+    if (staleRevert) { clearTimeout(staleRevert); this._revertTimers.delete(tid); }
     const out = { revealed: [], hidden: [], mode: 'hover' };
     try {
       this._ensureCdp(tid, view, 'Accessibility');
@@ -360,7 +366,11 @@ class PageManager {
       // 未传则沿用 1500ms 默认（同上，0 不再是 falsy）。
       const revertMs = msOr(opts.revertMs, 1500);
       if (revertMs > 0) {
-        setTimeout(() => { try { send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 4, y: 4 }); } catch (e) {} }, revertMs);
+        const h = setTimeout(() => {
+          this._revertTimers.delete(tid);
+          try { send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 4, y: 4 }); } catch (e) {}
+        }, revertMs);
+        this._revertTimers.set(tid, h);
       }
     } catch (e) {
       out.error = String((e && e.message) || e).slice(0, 200);
