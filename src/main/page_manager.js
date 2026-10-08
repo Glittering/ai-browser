@@ -333,7 +333,12 @@ class PageManager {
         `el.scrollIntoView({block:'center',inline:'center',behavior:'instant'});` +
         `var r=el.getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)};})()`,
         tid);
-      if (!center) return out;
+      // 定位不到 target 必须如实报错。此前直接返回未带 error 的空 out，与"hover 了
+      // 但这里确实没有可展开项"完全无法区分 —— agent 会误判成"菜单没有更深的入口"
+      // 而放弃探索，实际只是 target 拼错/句柄失效。
+      if (!center) {
+        return { ...out, error: 'target_not_found: no element with data-ai-id=' + String(target) };
+      }
       try {
         if (this.window.show) this.window.show();
         if (this.window.moveTop) this.window.moveTop();
@@ -342,13 +347,18 @@ class PageManager {
       } catch (e) {}
       const send = (method, params) => dbg.sendCommand(method, params);
       await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: center.x, y: center.y });
-      const hoverMs = Math.max(0, Number(opts.hoverMs) || 450);
+      // 区分"没传"与"显式传 0"：0 是合法语义（hoverMs=0 不等、revertMs=0 不回撤）。
+      // 原来的 `Number(x) || 450` 把 0 当 falsy 顶成默认值，revertMs=0 永远失效。
+      const msOr = (v, dflt) => (v === undefined || v === null || v === '') ? dflt : Math.max(0, Number(v) || 0);
+      const hoverMs = msOr(opts.hoverMs, 450);
       await new Promise((r) => setTimeout(r, hoverMs));
       const afterRaw = await axExtractor.axRaw(dbg);
       const diff = axExtractor.diffAx(beforeRaw, afterRaw);
       out.revealed = diff.revealed;
       out.hidden = diff.hidden;
-      const revertMs = Math.max(0, Number(opts.revertMs) || 1500);
+      // revertMs=0 表示"别回撤，我要接着点" —— 只有显式传 0 才不该回撤，
+      // 未传则沿用 1500ms 默认（同上，0 不再是 falsy）。
+      const revertMs = msOr(opts.revertMs, 1500);
       if (revertMs > 0) {
         setTimeout(() => { try { send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 4, y: 4 }); } catch (e) {} }, revertMs);
       }
