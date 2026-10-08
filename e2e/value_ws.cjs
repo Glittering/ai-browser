@@ -92,11 +92,13 @@ async function main() {
   } catch { /* free */ }
 
   const electronPath = require("electron");
+const guard = require('./_spawn_guard.cjs');
   const childEnv = { ...process.env, AI_BROWSER_PORT: String(WS_PORT) };
   delete childEnv.ELECTRON_RUN_AS_NODE;
   if (!childEnv.AI_BROWSER_USER_DATA) childEnv.AI_BROWSER_USER_DATA = `/tmp/ai-browser-e2e-${WS_PORT}`;
   console.log("spawn electron port", WS_PORT, "userData", childEnv.AI_BROWSER_USER_DATA);
   const child = spawn(electronPath, ["."], { cwd: ROOT, stdio: "ignore", detached: true, env: childEnv });
+guard.track(child);
   spawnedChild = child;
   await waitForPort(WS_PORT, 30000);
 

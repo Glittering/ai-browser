@@ -126,6 +126,7 @@ async function main() {
 
   const electronPath = require("electron");
   console.log("spawn electron @", electronPath, "port", WS_PORT);
+const guard = require('./_spawn_guard.cjs');
   const childEnv = { ...process.env, AI_BROWSER_PORT: String(WS_PORT) };
   // ELECTRON_RUN_AS_NODE 会让 Electron 以纯 Node 模式启动 —— 不起窗口、
   // 不监听 WS，测试永远等不到端口。这里要的是真正的应用进程，故剔除。
@@ -142,6 +143,7 @@ console.log("userData:", childEnv.AI_BROWSER_USER_DATA);
     detached: true,
     env: childEnv,
   });
+guard.track(child);
   await waitForPort(WS_PORT, 30000);
   console.log("WS ready on", WS_PORT);
 
@@ -208,7 +210,15 @@ console.log("userData:", childEnv.AI_BROWSER_USER_DATA);
   await sleep(300);
   const a7 = await domVal(capTab, "pwd");
   check("A-07 input[type=password] 中文写入 → 真实 DOM value", a7 === "密码ABC", JSON.stringify(a7));
-  check("A-08 input[type=password] 中文写入 → tree.value 读回", (await treeVal(capTab, "pwd")) === "密码ABC", JSON.stringify(await treeVal(capTab, "pwd")));
+  // 密码框是敏感输入：语义树会被整段喂进 agent（LLM）上下文，所以**故意不返回
+  // value**，只标 value_sensitive。写入是否成功由 A-07（真实 DOM）单独验证，
+  // 这里断言的是"不泄露"。
+  const pwdNode = await nodeOf(capTab, "pwd");
+  check(
+    "A-08 input[type=password] 不暴露 value，只标 value_sensitive",
+    !!pwdNode && pwdNode.value === undefined && pwdNode.value_sensitive === true,
+    JSON.stringify(pwdNode)
+  );
 
   await typeInto(capTab, "num", "12345");
   await sleep(300);

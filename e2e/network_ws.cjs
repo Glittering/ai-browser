@@ -137,6 +137,7 @@ async function main() {
 
   const electronPath = require("electron");
   console.log("spawn electron @", electronPath, "port", WS_PORT);
+const guard = require('./_spawn_guard.cjs');
   const childEnv = { ...process.env, AI_BROWSER_PORT: String(WS_PORT), ...CHILD_ENV_LIMITS };
   // 铁律 2：ELECTRON_RUN_AS_NODE 会让 Electron 以纯 Node 模式启动 —— 不起窗口、
   // 不监听 WS，测试永远等不到端口。
@@ -146,6 +147,7 @@ async function main() {
   console.log("userData:", childEnv.AI_BROWSER_USER_DATA, "limits:", JSON.stringify(CHILD_ENV_LIMITS));
 
   const child = spawn(electronPath, ["."], { cwd: ROOT, stdio: "ignore", detached: true, env: childEnv });
+guard.track(child);
   spawnedChild = child;
   await waitForPort(WS_PORT, 30000);
   console.log("WS ready on", WS_PORT);

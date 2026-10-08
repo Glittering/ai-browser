@@ -46,10 +46,12 @@ async function ensureElectron() {
   if (await checkPort(WS_PORT)) return null;
   console.log('port ' + WS_PORT + ' 未监听 — spawn Electron');
   const electronPath = require('electron');
+const guard = require('./_spawn_guard.cjs');
   const childEnv = { ...process.env, AI_BROWSER_PORT: String(WS_PORT) };
   // ELECTRON_RUN_AS_NODE 会让 Electron 以纯 Node 模式启动（不起窗口、不监听 WS）。
   delete childEnv.ELECTRON_RUN_AS_NODE;
   const child = spawn(electronPath, ['.'], { cwd: ROOT, detached: true, stdio: 'ignore', env: childEnv });
+guard.track(child);
   child.unref();
   if (!(await waitForPort(WS_PORT, 30000))) { console.error('Electron 30s 内未起来'); return null; }
   return child;
