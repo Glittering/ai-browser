@@ -574,10 +574,21 @@ function extractPageContext() {
         id: inps[ii].id || inps[ii].name || "",
         type: inps[ii].type || inps[ii].tagName.toLowerCase(),
         placeholder: (inps[ii].placeholder || "").slice(0, 40),
-        required: inps[ii].required || false
+        // 只读原生 required 会把只用 aria-required 标必填的站点（不少组件库如此）
+        // 整片当成选填 —— agent 于是跳过必填项、提交必失败。ARIA 的 "true"/"false"
+        // 都按字面认，其它值（含缺失）不认。
+        required: isRequired(inps[ii])
       });
     }
     if (fields.length) formList.push({ fields: fields });
+  }
+
+  // 必填判定：原生 required 或 aria-required="true"。站点/组件库常只用 ARIA 标必填
+  // （原生 required 会触发浏览器自带的气泡校验，很多站点刻意绕开它）。
+  function isRequired(el) {
+    if (el.required === true) return true;
+    var ar = el.getAttribute ? el.getAttribute("aria-required") : null;
+    return ar === "true";
   }
 
   // ---- 顶层错误 / 提示扫描（P0-2 / P1-6）----
