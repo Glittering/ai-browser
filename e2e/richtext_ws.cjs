@@ -948,8 +948,8 @@ guard.track(child);
 
   // 2) aria-required
   const f2 = formField(ctxC, "f2");
-  check("C-04 aria-required 标记 → context.forms[].fields[].required 读不到（边界事实）",
-    !(f2 && f2.required === true), JSON.stringify(f2));
+  check("C-04 aria-required 标记 → context.forms[].fields[].required 能读到",
+    !!(f2 && f2.required === true), JSON.stringify(f2));
   if (!(f2 && f2.required === true)) {
     defect("P1", "C/必填识别",
       "aria-required=\"true\" 的必填字段在 context.forms[].fields[].required 里报 false。" +

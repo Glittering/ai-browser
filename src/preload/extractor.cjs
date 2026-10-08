@@ -444,7 +444,7 @@ function extractPageContext() {
         var fieldEntry = {
           type: inp.type || inp.tagName.toLowerCase(),
           placeholder: (inp.placeholder || "").slice(0, 40),
-          required: inp.required || false
+          required: isRequired(inp)
         };
 
         // Field-level error: aria-describedby or adjacent error sibling
