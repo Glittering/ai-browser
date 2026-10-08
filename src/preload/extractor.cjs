@@ -580,6 +580,85 @@ function extractPageContext() {
     if (fields.length) formList.push({ fields: fields });
   }
 
+  // ---- 顶层错误 / 提示扫描（P0-2 / P1-6）----
+  // context.modals[] 的 errSel 扫描只在 class 含 modal/dialog/popup/drawer/
+  // overlay/mask 的容器内部生效，而"页面即表单"的站点根本没有这类容器 ——
+  // 字段级小红字（无 role 的 <span class="field-error">）、表单级汇总、toast、
+  // 服务端报错统统读不到：agent 提交了表单却看不到哪里错了。这里把同类扫描
+  // 扩到整个 document，并落到**顶层** context。
+  //
+  // 刻意**不**把这些元素提升为语义树节点：站点用裸 span/div 承载提示文案是常态，
+  // isPureLayout 剪掉它们正是为了压住语义树的 token 体积（真实页面上量极大）。
+  // 只读文本、只进 context —— 主树一个节点都不加（实测节点数与改动前完全一致）。
+  var ERROR_SEL = [
+    "[class*=error]", "[class*=err]", "[class*=invalid]", "[class*=fail]",
+    "[class*=warning]", "[class*=warn]", "[class*=toast]", "[class*=snackbar]",
+    "[role=alert]"
+  ];
+  var HINT_SEL = [
+    "[class*=tip]", "[class*=hint]", "[class*=notice]", "[class*=help]",
+    "[class*=counter]", "[class*=remaining]", "[role=status]", "[aria-live]"
+  ];
+  // 字数/计数类文案（"0/256"）常被塞进连 class 都没有的裸 span —— 无 class 可依，
+  // 只能认文本形态。限定"叶子元素 + 文本很短"来降噪，避免整页文本被收进来。
+  var LIMIT_RE = /^[^\d]{0,10}\d+\s*\/\s*\d+[^\d]{0,10}$/;
+
+  function textOf(el) {
+    if (!isShown(el)) return "";
+    var t = (el.textContent || "").trim();
+    if (!t || t.length > 120) return "";
+    return t;
+  }
+  // 报错对应到具体字段：只在"同一容器内恰好一个输入控件"时才认领，宁可空着也不猜。
+  // （errF1 → f1、errF2 → f2、tagDup → tagInput；页面级汇总的容器里有多个输入 → 不认领）
+  function fieldOf(el) {
+    var p = el.parentElement;
+    if (!p) return "";
+    var inps = p.querySelectorAll("input:not([type=hidden]),textarea,select");
+    if (inps.length !== 1) return "";
+    return inps[0].id || inps[0].name || "";
+  }
+  function scanSelectors(sels) {
+    var out = [];
+    for (var si = 0; si < sels.length; si++) {
+      var els;
+      try { els = document.querySelectorAll(sels[si]); } catch (e) { continue; }
+      for (var ei = 0; ei < els.length && out.length < 40; ei++) {
+        var t = textOf(els[ei]);
+        if (t && out.indexOf(t) < 0) out.push(t);
+      }
+    }
+    return out;
+  }
+
+  var topErrors = scanSelectors(ERROR_SEL);
+  var fieldErrors = [];
+  var seenFieldErr = {};
+  for (var fes = 0; fes < ERROR_SEL.length && fieldErrors.length < 40; fes++) {
+    var feEls;
+    try { feEls = document.querySelectorAll(ERROR_SEL[fes]); } catch (e) { continue; }
+    for (var fei = 0; fei < feEls.length && fieldErrors.length < 40; fei++) {
+      var fet = textOf(feEls[fei]);
+      if (!fet) continue;
+      var fid = fieldOf(feEls[fei]);
+      if (!fid) continue;
+      var fkey = fid + " " + fet;
+      if (seenFieldErr[fkey]) continue;
+      seenFieldErr[fkey] = 1;
+      fieldErrors.push({ field: fid, text: fet });
+    }
+  }
+  var topHints = scanSelectors(HINT_SEL);
+  try {
+    var cand = document.querySelectorAll("span,div,p,small,em,i,label,li,strong,b");
+    for (var ci2 = 0; ci2 < cand.length && topHints.length < 40; ci2++) {
+      if (cand[ci2].children && cand[ci2].children.length) continue; // 只认叶子，避免整页文本
+      var ht = textOf(cand[ci2]);
+      if (!ht || !LIMIT_RE.test(ht)) continue;
+      if (topHints.indexOf(ht) < 0) topHints.push(ht);
+    }
+  } catch (e) {}
+
   // SESSION — more robust detection
   var hasPwdInput = document.querySelector("input[type=password]");
   var bodyText = document.body.innerText || "";
@@ -596,6 +675,12 @@ function extractPageContext() {
     url: document.URL,
     forms: formList.length ? formList : null,
     modals: modals.length ? modals : null,
+    // 顶层报错/提示：不依赖容器 class 是否含 modal 关键词，普通页面也能读到。
+    // errors —— 全文档扫描到的可见错误文案；field_errors —— 能对应到具体输入
+    // 框的那些（{field, text}）；hints —— 字数/提示/轻通知类辅助文案。
+    errors: topErrors.length ? topErrors : null,
+    field_errors: fieldErrors.length ? fieldErrors : null,
+    hints: topHints.length ? topHints : null,
     session: { logged_in: loggedIn },
     stats: {
       inputs: document.querySelectorAll("input:not([type=hidden])").length,
