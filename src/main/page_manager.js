@@ -415,6 +415,10 @@ class PageManager {
     // preload 合成点击也可能触发 window.open → 新 tab，同样回报 opened_tab。
     if (action === 'click' && preloadRes && preloadRes.success) {
       preloadRes.opened_tab = this._consumeOpenedTab(tid, params.keep_tab === true);
+      // 路径可区分：CDP 受信点击报 clicked_via='cdp-click'，回退路径报
+      // 'preload-click'。两种都只报 success 的话，agent（和人）无从判断这一下
+      // 到底是真实输入还是合成事件 —— 双发 bug 正是靠这个字段才暴露出来的。
+      preloadRes.clicked_via = 'preload-click';
     }
     return preloadRes;
   }
@@ -734,12 +738,13 @@ class PageManager {
     } catch(e) {}
     const dbg = view.webContents.debugger;
     const send = (method, params) => dbg.sendCommand(method, params);
-    await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: vp.x, y: vp.y });
+    // 命中校验必须在派发【之前】做，且派发成功就不再回退 —— 否则一次 act 会点两次。
+    // 事后校验的致命漏洞：mousePressed/mouseReleased 一发出，点击就已生效；而"点了
+    // 之后自身消失/收起"的目标（话题候选收起列表、提交后置灰、菜单项、@提及、点赞）
+    // 此刻已经被自己点没了，elementFromPoint 必然命中不到 → 返回 null → executeAction
+    // 回退 preload 再点一次 → DOM 上出现两份插入/两次提交。派发前的坐标命中才是
+    // "这一下会不会落在目标上"的唯一可信判断；校验失败（被遮挡/屏外/已隐藏）才回退。
     if (action === 'click') {
-      await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: vp.x, y: vp.y, button: 'left', buttons: 1, clickCount: 1 });
-      await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: vp.x, y: vp.y, button: 'left', buttons: 0, clickCount: 1 });
-      // 命中校验：坐标必须真的落在目标上（否则点击不聚焦却报成功，误导 agent）。
-      // 校验失败返回 null，回退 preload（el.focus()+click，focus 会自带滚入视口）。
       const hit = inFrame
         ? await owning.executeJavaScript(
             `(function(){var el=document.querySelector('[data-ai-id="${aiId}"]');if(!el)return false;` +
@@ -748,8 +753,14 @@ class PageManager {
             `(function(){var el=document.querySelector('[data-ai-id="${aiId}"]');if(!el)return false;` +
             `var h=document.elementFromPoint(${center.x},${center.y});return !!(h&&(h===el||el.contains(h)));})()`,
             tabId);
-      if (!hit) return null;
+      if (!hit) return null; // 坐标落不到目标上 —— 交给 preload 的 focus()+click 兜底
     }
+    await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: vp.x, y: vp.y });
+    if (action === 'click') {
+      await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: vp.x, y: vp.y, button: 'left', buttons: 1, clickCount: 1 });
+      await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: vp.x, y: vp.y, button: 'left', buttons: 0, clickCount: 1 });
+    }
+    // 走到这里说明受信点击已经真实派发成功 —— 绝不回退 preload 再点第二次。
     return action === 'hover' ? 'cdp-hover' : 'cdp-click';
   }
 
