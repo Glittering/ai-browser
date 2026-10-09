@@ -142,6 +142,29 @@ Notes that save round-trips:
 
 ## Letting a human step in
 
+### It does not steal your focus
+
+The agent works fine while the window is in the **background**. CDP trusted input
+(`Input.dispatchKeyEvent` / `Input.dispatchMouseEvent`) does not need the window to be frontmost, and
+the app already runs with `disable-backgrounding-occluded-windows`, `disable-renderer-backgrounding`
+and `disable-background-timer-throttling`, so a background window is neither throttled nor losing
+events. Verified: with another application active and `document.hasFocus() === false`, both typing and
+clicking land normally.
+
+So the window stays visible — that is the whole point — but it is **not** dragged to the front on
+every action. You can keep working while the agent drives.
+
+If a site genuinely needs to be active, or you prefer the old behaviour:
+
+```bash
+AI_BROWSER_FOCUS=always npm start   # show + moveTop + focus on every action (pre-1.2 behaviour)
+AI_BROWSER_FOCUS=never npm start    # never touch window state
+```
+
+Default is `auto`: restore the window only if it is minimised or hidden, otherwise leave it alone.
+
+---
+
 This is the part most easily misunderstood, so plainly: **the agent drives the browser, and the human
 can always take over the window.**
 

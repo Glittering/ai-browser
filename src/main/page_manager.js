@@ -353,10 +353,9 @@ class PageManager {
         return { ...out, error: 'target_not_found: no element with data-ai-id=' + String(target) };
       }
       try {
-        if (this.window.show) this.window.show();
-        if (this.window.moveTop) this.window.moveTop();
-        if (this.window.focus) this.window.focus();
-        view.webContents.focus();
+    // 抢焦点会打断人正在做的事（agent 干活时人几乎不能用电脑）。
+    // 策略见 _focusWindow：默认只保证窗口可见，不把它拽到最前、不抢焦点。
+    this._focusWindow(view);
       } catch (e) {}
       const send = (method, params) => dbg.sendCommand(method, params);
       await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: center.x, y: center.y });
@@ -738,10 +737,9 @@ class PageManager {
     // click 语义，已验证可装载正文编辑器。hover 仍走 CDP mousemove(视口坐标)。
     if (inFrame && action === 'click') {
       try {
-        if (this.window.show) this.window.show();
-        if (this.window.moveTop) this.window.moveTop();
-        if (this.window.focus) this.window.focus();
-        view.webContents.focus();
+    // 抢焦点会打断人正在做的事（agent 干活时人几乎不能用电脑）。
+    // 策略见 _focusWindow：默认只保证窗口可见，不把它拽到最前、不抢焦点。
+    this._focusWindow(view);
       } catch (e) {}
       try {
         const ok = await owning.executeJavaScript(
@@ -770,10 +768,9 @@ class PageManager {
       if (off) vp = { x: center.x + Math.round(off.x), y: center.y + Math.round(off.y) };
     }
     try {
-      if (this.window.show) this.window.show();
-      if (this.window.moveTop) this.window.moveTop();
-      if (this.window.focus) this.window.focus();
-      view.webContents.focus();
+    // 抢焦点会打断人正在做的事（agent 干活时人几乎不能用电脑）。
+    // 策略见 _focusWindow：默认只保证窗口可见，不把它拽到最前、不抢焦点。
+    this._focusWindow(view);
     } catch(e) {}
     const dbg = view.webContents.debugger;
     const send = (method, params) => dbg.sendCommand(method, params);
@@ -855,10 +852,9 @@ class PageManager {
     // 先激活窗口/视图，再在页面内聚焦（顺序保证渲染进程处于激活态）。
     // 被遮挡时窗口 visibilityState=hidden，键盘事件同样会被渲染器丢弃。
     try {
-      if (this.window.show) this.window.show();
-      if (this.window.moveTop) this.window.moveTop();
-      if (this.window.focus) this.window.focus();
-      view.webContents.focus();
+    // 抢焦点会打断人正在做的事（agent 干活时人几乎不能用电脑）。
+    // 策略见 _focusWindow：默认只保证窗口可见，不把它拽到最前、不抢焦点。
+    this._focusWindow(view);
     } catch(e) {}
     // 定位可编辑区并原生聚焦（不做 DOM 全选——交给 Cmd+A 受信按键）
     const prep = await run(
@@ -1425,6 +1421,38 @@ class PageManager {
       this.canvasMonitor.markHook(tabId, false, [`canvas hook install failed: ${(e && e.message) || e}`]);
       return false;
     }
+  }
+
+  /**
+   * 窗口焦点策略 —— 这是个真实的可用性问题：agent 每次点击/输入都把窗口
+   * 拽到最前，等于人完全没法用电脑。
+   *
+   * AI_BROWSER_FOCUS:
+   *   auto   (默认) 只在窗口被最小化/隐藏时恢复可见，**不** moveTop、**不** focus。
+   *                 CDP 受信输入（Input.dispatchKeyEvent / dispatchMouseEvent）在窗口
+   *                 非前台时依然生效，加上已有的 disable-backgrounding-occluded-windows /
+   *                 disable-renderer-backgrounding / disable-background-timer-throttling，
+   *                 后台窗口不会被降频或丢事件。
+   *   always        旧行为：每次都 show + moveTop + focus（需要抢焦点时用）。
+   *   never         完全不碰窗口状态。
+   */
+  _focusWindow(view) {
+    const policy = String(process.env.AI_BROWSER_FOCUS || 'auto').toLowerCase();
+    if (policy === 'never') return;
+    try {
+      if (policy === 'always') {
+        if (this.window.show) this.window.show();
+        if (this.window.moveTop) this.window.moveTop();
+        if (this.window.focus) this.window.focus();
+        if (view && view.webContents && view.webContents.focus) view.webContents.focus();
+        return;
+      }
+      // auto：产品承诺"窗口真实可见、人可随时介入"，所以被最小化时要恢复；
+      // 但不主动抢到最前 —— 人可以继续用别的窗口，需要时自己点过来。
+      const hidden = (this.window.isVisible && !this.window.isVisible()) ||
+                     (this.window.isMinimized && this.window.isMinimized());
+      if (hidden && this.window.show) this.window.show();
+    } catch (e) { /* 窗口已销毁等情况，忽略 */ }
   }
 
   _canvasTab(tabId) {
