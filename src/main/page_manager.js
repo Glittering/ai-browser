@@ -1239,10 +1239,43 @@ class PageManager {
     if (view) {
       this.window.addBrowserView(view);
       this._layoutView(view);
-      view.webContents.focus();
+      this._focusWebContents(view);
       view.webContents.setBackgroundThrottling(false);
     }
     return true;
+  }
+
+  /**
+   * 让**页面**处于活动状态，但**不**把窗口拽到前台。
+   *
+   * 这是实测出来的（e2e/focus_ws.cjs）：ui.new_tab / ui.set_active_tab 每次都调
+   * webContents.focus()，而它会把整个窗口激活 —— agent 每开一个标签页就把人正在
+   * 做的事打断一次。其它所有操作（act / get_tree / evaluate / peek / scroll /
+   * canvas / network）经逐项测量都不抢焦点，只有这两个不是。
+   *
+   * AI_BROWSER_FOCUS=auto（默认）：不碰真实窗口焦点，改用 CDP
+   *   Emulation.setFocusEmulationEnabled 让页面内的 document.hasFocus() 等状态
+   *   保持正常（依赖它的懒加载 / 动画 / 富文本聚焦态不会僵住），但键盘焦点留在
+   *   用户那边 —— 这正是我们要的。
+   *   always：旧行为，直接把焦点交给 web contents（个别站点确需时用）。
+   *   never：两者都不做。
+   */
+  _focusWebContents(view) {
+    const policy = String(process.env.AI_BROWSER_FOCUS || 'auto').toLowerCase();
+    try {
+      if (!view || !view.webContents || view.webContents.isDestroyed()) return;
+      if (policy === 'never') return;
+      if (policy === 'always') {
+        view.webContents.focus();
+        return;
+      }
+      // auto：只"伪造"页面内的焦点状态。CDP 尚未 attach（首次导航前的短暂窗口期）
+      // 会 reject，静默忽略 —— 绝不因此影响标签页创建或导航。
+      const p = view.webContents.debugger.sendCommand(
+        'Emulation.setFocusEmulationEnabled', { enabled: true }
+      );
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+    } catch (e) { /* debugger 未 attach / 页面已销毁 —— 忽略 */ }
   }
 
   _layoutView(view) {
@@ -1447,11 +1480,18 @@ class PageManager {
         if (view && view.webContents && view.webContents.focus) view.webContents.focus();
         return;
       }
-      // auto：产品承诺"窗口真实可见、人可随时介入"，所以被最小化时要恢复；
+      // auto：产品承诺"窗口真实可见、人可随时介入"，所以被最小化/隐藏时要恢复可见；
       // 但不主动抢到最前 —— 人可以继续用别的窗口，需要时自己点过来。
+      // 用 showInactive()，语义才前后一致：auto 分支**从不**夺走键盘焦点。
       const hidden = (this.window.isVisible && !this.window.isVisible()) ||
                      (this.window.isMinimized && this.window.isMinimized());
-      if (hidden && this.window.show) this.window.show();
+      if (hidden) {
+        if (this.window.isMinimized && this.window.isMinimized() && this.window.restore) {
+          try { this.window.restore(); } catch (e) { /* 已销毁 */ }
+        }
+        if (typeof this.window.showInactive === 'function') this.window.showInactive();
+        else if (this.window.show) this.window.show();
+      }
     } catch (e) { /* 窗口已销毁等情况，忽略 */ }
   }
 

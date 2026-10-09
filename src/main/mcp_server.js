@@ -62,10 +62,14 @@ async function ensureElectronRunning() {
   if (await checkPort(ELECTRON_PORT)) return true;
   console.error('[mcp] port 9223 not listening — spawning Electron via npm start');
   // Run `npm start` (which runs `electron .`) from project root.
+  // AI_BROWSER_LAUNCHED_BY_AGENT：告诉 Electron 它是被 agent 拉起来的，因此
+  // 窗口出现时**不要**抢焦点（showInactive）—— 否则 agent 第一次连上来就会把
+  // 用户正在做的事打断。人手动 `npm start` 时没有这个变量，窗口正常显示在前台。
   const child = spawn('npm', ['start'], {
     cwd: path.resolve(__dirname, '..', '..'),
     detached: true,
     stdio: 'ignore',
+    env: { ...process.env, AI_BROWSER_LAUNCHED_BY_AGENT: '1' },
   });
   child.unref();
   // Give Electron up to 30s to start the WS server.

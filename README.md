@@ -10,7 +10,7 @@
   <img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue.svg">
   <img alt="Electron" src="https://img.shields.io/badge/built%20with-Electron%2033-9cf">
   <img alt="Platforms" src="https://img.shields.io/badge/platforms-macOS%20%E2%80%A2%20Linux-blueviolet">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-223%20unit%20%2B%20251%20e2e-2ea043">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-239%20unit%20%2B%20286%20e2e-2ea043">
   <img alt="MCP" src="https://img.shields.io/badge/spec-MCP%20(stdio)-f5b23b">
 </p>
 
@@ -148,20 +148,33 @@ The agent works fine while the window is in the **background**. CDP trusted inpu
 (`Input.dispatchKeyEvent` / `Input.dispatchMouseEvent`) does not need the window to be frontmost, and
 the app already runs with `disable-backgrounding-occluded-windows`, `disable-renderer-backgrounding`
 and `disable-background-timer-throttling`, so a background window is neither throttled nor losing
-events. Verified: with another application active and `document.hasFocus() === false`, both typing and
-clicking land normally.
+events.
 
-So the window stays visible — that is the whole point — but it is **not** dragged to the front on
-every action. You can keep working while the agent drives.
+That was already true for `act` / `get_tree` / `evaluate` / `peek` / `scroll` — but two paths used to
+drag the window to the front on **every** call: `new_tab` and `set_active_tab` (they called
+`webContents.focus()`, which activates the whole window). On top of that the window was shown with
+`show()` at boot even when the *agent* launched it. Both are fixed:
 
-If a site genuinely needs to be active, or you prefer the old behaviour:
+- `new_tab` / `set_active_tab` no longer take window focus. The page still *thinks* it is focused —
+  `Emulation.setFocusEmulationEnabled` keeps `document.hasFocus()` and focus-dependent lazy-loading
+  behaving normally — while the keyboard focus stays wherever you left it.
+- When the agent launches the browser (over MCP), the window appears via `showInactive()`:
+  **visible, but not stealing focus**. When *you* run `npm start`, it comes up in front as usual.
+
+So the window stays visible — that is the whole point — but it is **not** dragged to the front while
+the agent drives. You can keep working.
 
 ```bash
-AI_BROWSER_FOCUS=always npm start   # show + moveTop + focus on every action (pre-1.2 behaviour)
-AI_BROWSER_FOCUS=never npm start    # never touch window state
+AI_BROWSER_FOCUS=always npm start   # pre-1.2 behaviour: show + moveTop + focus on every action
+AI_BROWSER_FOCUS=never npm start    # never change focus (the window is still shown)
 ```
 
-Default is `auto`: restore the window only if it is minimised or hidden, otherwise leave it alone.
+Default is `auto`: keep the window visible (restore it if it was minimised or hidden), but never steal
+focus. Whatever the value, the window is always displayed — that is a product invariant.
+
+`npm run focus` asserts all of this **from the outside** (macOS `lsappinfo`, no accessibility
+permission needed) and includes a deliberate control group configured to steal focus — so the suite
+would go red if the measurement ever stopped working, instead of passing vacuously.
 
 ---
 
@@ -364,13 +377,14 @@ AI_BROWSER_USER_DATA=~/.ai-browser-work npm start
 ## Test & dev
 
 ```bash
-npm test             # vitest — 223 tests across 21 files (218 passing, 5 skipped)
+npm test             # vitest — 239 tests across 22 files (234 passing, 5 skipped)
 npm run smoke        # Electron contract layer, offline fixture      — 31 checks
-npm run capabilities # text fields, canvas, page source, network, DOM editing — 53 checks
+npm run capabilities # text fields, canvas, page source, network, DOM editing — 54 checks
 npm run richtext     # rich-text editors, nested menus, forms, errors, tags, upload — 111 checks
 npm run network      # request log, POST bodies, headers, pagination, redaction — 41 checks
 npm run value        # value truncation contract + read-only get_value — 15 checks
 npm run canvas       # canvas draw-call capture — 13 checks
+npm run focus        # the agent must not steal your focus (has a control group) — 21 checks
 npm run realsites    # navigate/read/act against a matrix of real sites
 ```
 

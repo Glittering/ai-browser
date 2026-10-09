@@ -86,6 +86,9 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
+    // 先不显示：如何显示由 showInitialWindow() 按焦点策略决定 —— 窗口必须真实可见
+    // （产品承诺人可随时介入），但被 agent 拉起时不该把用户正在做的事打断。
+    show: false,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -170,6 +173,35 @@ function createWindow() {
   // broadcast the event then relaunch — the MCP WS client auto-reconnects.
   // Relaunch is skipped while a human appears to be actively using the window.
   StartNetworkWatchdog();
+
+  showInitialWindow();
+}
+
+/**
+ * 首次显示窗口。
+ *
+ * 窗口必须在屏幕上真实可见 —— 这是产品承诺（人可以随时手动介入，例如扫码登录）。
+ * 但"可见"不等于"抢焦点"：如果是 agent 通过 MCP 拉起的（mcp_server 会传
+ * AI_BROWSER_LAUNCHED_BY_AGENT=1），用 showInactive() 让窗口出现但**不**夺走键盘
+ * 焦点，人可以继续在原来的窗口里做事；人手动 `npm start` 时窗口照常显示在前台。
+ *
+ * AI_BROWSER_FOCUS=always / never 可整体覆盖（见 page_manager._focusWindow）。
+ */
+function showInitialWindow() {
+  if (!mainWindow) return;
+  const policy = String(process.env.AI_BROWSER_FOCUS || 'auto').toLowerCase();
+  const byAgent = process.env.AI_BROWSER_LAUNCHED_BY_AGENT === '1';
+  // 窗口**一定**要显示出来 —— 这是产品不变量（人可随时手动介入：登录、扫码、过验证码、
+  // 纠正 agent 的操作），任何策略值都不允许把窗口变成看不见的黑盒。
+  // 策略只决定**显示时抢不抢焦点**：只有人手动启动、或显式 always，才显示并激活；
+  // agent 拉起（或 never）走 showInactive —— 窗口出现，但键盘焦点留在用户那边。
+  const shouldActivate = policy === 'always' || (policy !== 'never' && !byAgent);
+  try {
+    if (shouldActivate) mainWindow.show();
+    else mainWindow.showInactive();
+  } catch (e) {
+    try { mainWindow.show(); } catch (e2) { /* 窗口已销毁 */ }
+  }
 }
 
 // Probe one target through the NetworkService from the main process. Reuses
