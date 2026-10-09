@@ -10,7 +10,7 @@
   <img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue.svg">
   <img alt="Electron" src="https://img.shields.io/badge/built%20with-Electron%2033-9cf">
   <img alt="Platforms" src="https://img.shields.io/badge/platforms-macOS%20%E2%80%A2%20Linux-blueviolet">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-239%20unit%20%2B%20286%20e2e-2ea043">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-239%20unit%20%2B%20297%20e2e-2ea043">
   <img alt="MCP" src="https://img.shields.io/badge/spec-MCP%20(stdio)-f5b23b">
 </p>
 
@@ -175,6 +175,17 @@ focus. Whatever the value, the window is always displayed — that is a product 
 `npm run focus` asserts all of this **from the outside** (macOS `lsappinfo`, no accessibility
 permission needed) and includes a deliberate control group configured to steal focus — so the suite
 would go red if the measurement ever stopped working, instead of passing vacuously.
+
+It also proves the stronger claim — that the window **does not need to be in the foreground at all**.
+With another app holding the foreground, it runs a representative slice of the API and checks the real
+result of each one: typing lands, a click fires exactly once, `get_tree` returns a tree, canvas
+`getImageData` returns real pixels, `network_list` sees the request, `navigate` completes — and after
+sitting in the background for 10 seconds it still does all of the above without ever coming forward.
+
+> Note on `document.hasFocus()`: it returns `true` even when the window is in the background, because
+> `Emulation.setFocusEmulationEnabled` is deliberately on — that is what keeps focus-dependent
+> lazy-loading and animations from stalling. So it is **not** a valid way to detect "am I in the
+> foreground"; the test uses the external observer instead.
 
 ---
 
@@ -384,7 +395,7 @@ npm run richtext     # rich-text editors, nested menus, forms, errors, tags, upl
 npm run network      # request log, POST bodies, headers, pagination, redaction — 41 checks
 npm run value        # value truncation contract + read-only get_value — 15 checks
 npm run canvas       # canvas draw-call capture — 13 checks
-npm run focus        # the agent must not steal your focus (has a control group) — 21 checks
+npm run focus        # no focus stealing + full capability while backgrounded — 32 checks
 npm run realsites    # navigate/read/act against a matrix of real sites
 ```
 

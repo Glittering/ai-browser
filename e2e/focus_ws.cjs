@@ -91,13 +91,29 @@ function isTargetRunning() {
 // ---- fixture ---------------------------------------------------------------
 
 const PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>FocusFixture</title></head>
-<body><input id="txt" type="text"><button id="btn" onclick="window.__n=(window.__n||0)+1">b</button></body></html>`;
+<body><input id="txt" type="text"><button id="btn" onclick="window.__n=(window.__n||0)+1">b</button>
+<canvas id="cv" width="200" height="80"></canvas>
+<script>
+  var x = document.getElementById('cv').getContext('2d');
+  x.fillStyle = '#ff0000';
+  x.fillRect(0, 0, 10, 10);
+  window.__pong = null;
+  fetch('/api/ping').then(function(r){ return r.text(); }).then(function(t){ window.__pong = t; });
+</script></body></html>`;
+
+const PAGE2 = `<!doctype html><html><head><meta charset="utf-8"><title>FocusFixture2</title></head>
+<body><p id="p2">PAGE2-MARKER</p></body></html>`;
 
 function startServer() {
   return new Promise((resolve) => {
-    const server = http.createServer((_req, res) => {
+    const server = http.createServer((req, res) => {
+      const p = req.url.split("?")[0];
+      if (p === "/api/ping") {
+        res.setHeader("Content-Type", "text/plain; charset=utf-8");
+        return res.end("PONG-BG");
+      }
       res.setHeader("Content-Type", "text/html; charset=utf-8");
-      res.end(PAGE);
+      res.end(p === "/focus2" ? PAGE2 : PAGE);
     });
     server.listen(0, "127.0.0.1", () => resolve(server));
   });
@@ -121,7 +137,7 @@ function waitForPort(port, timeoutMs) {
 
 // ---- 一组配置的完整测量 -----------------------------------------------------
 
-async function runGroup({ label, port, extraEnv, expectStealOnBoot, expectStealOnAction, HOST }) {
+async function runGroup({ label, port, extraEnv, expectStealOnBoot, expectStealOnAction, backgroundCheck, HOST }) {
   console.log(`\n[${label}]`);
 
   // 先把前台切给靶子 app，这样"启动窗口"这一步是否抢焦点也能被观测到。
@@ -191,6 +207,83 @@ async function runGroup({ label, port, extraEnv, expectStealOnBoot, expectStealO
   await step("ui.get_tree（只读）", () => b.call("ui.get_tree", { tab }), false);
   await step("ui.network_list（只读）", () => b.call("ui.network_list", { tab }), false);
 
+  // ── 后台功能完整性 ──────────────────────────────────────────────────────
+  // 用户真正的问题是"agent 干活的时候电脑几乎不能用"，也就是「是不是必须前台」。
+  // 只证明"不抢焦点"还不够 —— 还要证明**窗口在后台时整套能力照常可用**。
+  // 下面把前台让给别的 app，然后跑一遍代表性操作，每一顶都落到真实结果上。
+  if (backgroundCheck) {
+    console.log(`\n[${label} 后台功能完整性 —— 窗口在后台时是否照常可用]`);
+    focusTarget();
+    await sleep(1500);
+    const bgFront = frontApp();
+
+    const ev = async (js, t) => {
+      const r = await b.call("ui.evaluate", { js, tab: t });
+      return r && r.result ? r.result.value : undefined;
+    };
+
+    // ⚠️ 判断"窗口是否在前台"**不能**用 document.hasFocus() —— 我们有意开了
+    // Emulation.setFocusEmulationEnabled(true)（见 page_manager._focusWebContents），
+    // 它让页面认为自己有焦点，所以 hasFocus() 在前台/后台都会返回 true。
+    // 这也正是本套件从**外部**（lsappinfo）观测的原因。
+    check(`${label} 后台确认 · 窗口确实不在前台`, !isBrowserApp(frontApp()), `前台=${frontApp()}`);
+    // 反过来，这条是**正面**断言：页面在后台仍认为自己活着，依赖焦点的懒加载/
+    // 动画不会被卡住（这正是 emulation 存在的理由）。
+    const hf = await ev("document.hasFocus()", tab);
+    check(`${label} 后台时页面仍认为自己有焦点（focus emulation 生效）`, hf === true, JSON.stringify(hf));
+    // 三个防后台开关（disable-backgrounding-occluded-windows /
+    // disable-renderer-backgrounding / disable-background-timer-throttling）的作用就是
+    // 让窗口在后台时**不**被降频。这是"不必须前台"的底层依据。
+    const vis = await ev("document.visibilityState", tab);
+    check(`${label} 后台确认 · 页面未被降频（visibilityState=visible）`, vis === "visible", JSON.stringify(vis));
+
+    // 在后台停留一会儿：如果 Chromium 会因失焦而节流，停留越久越容易暴露。
+    await sleep(10000);
+    check(`${label} 后台停留 10s 后仍未把窗口拉到前台`, !isBrowserApp(frontApp()), `前台=${frontApp()}`);
+
+    await b.call("ui.act", { action: "setContent", target: "txt", params: { text: "后台输入-OK" }, tab });
+    await sleep(400);
+    const bgTxt = await ev("document.getElementById('txt').value", tab);
+    check(`${label} 后台输入生效`, bgTxt === "后台输入-OK", JSON.stringify(bgTxt));
+
+    // 只断言"比之前多 1"——前面的 step 已经点过一次，写死绝对值会误判。
+    const clicksBefore = await ev("window.__n||0", tab);
+    await b.call("ui.act", { action: "click", target: "btn", tab });
+    await sleep(500);
+    const clicksAfter = await ev("window.__n||0", tab);
+    check(
+      `${label} 后台点击生效且只触发一次`,
+      clicksAfter === clicksBefore + 1,
+      `${clicksBefore} -> ${clicksAfter}`
+    );
+
+    const bgTree = await b.call("ui.get_tree", { tab });
+    const treeBody = bgTree && bgTree.result && (bgTree.result.tree || bgTree.result.root || bgTree.result);
+    check(`${label} 后台能提取语义树`, !!treeBody, JSON.stringify(treeBody && Object.keys(treeBody).slice(0, 6)));
+
+    const px = await ev(
+      "Array.prototype.join.call(document.getElementById('cv').getContext('2d').getImageData(0,0,1,1).data, ',')",
+      tab
+    );
+    check(`${label} 后台能读 canvas 像素（renderer 未被挂起）`, px === "255,0,0,255", JSON.stringify(px));
+
+    const netRes = await b.call("ui.network_list", { url_contains: "/api/ping", tab, limit: 10 });
+    const netItems = (netRes && netRes.result && netRes.result.requests) || [];
+    check(
+      `${label} 后台能抓到网络请求`,
+      netItems.some((r) => String(r.url).indexOf("/api/ping") >= 0),
+      `匹配 ${netItems.length} 条`
+    );
+
+    await b.call("ui.navigate", { url: HOST + "/focus2", tab });
+    await sleep(2200);
+    const navPath = await ev("location.pathname", tab);
+    check(`${label} 后台导航完成`, navPath === "/focus2", JSON.stringify(navPath));
+
+    const bgAfter = frontApp();
+    check(`${label} 上述后台操作全程没有抢焦点`, !isBrowserApp(bgAfter), `前台 ${bgFront} -> ${bgAfter}`);
+  }
+
   try { b.close(); } catch { /* ignore */ }
   try {
     process.kill(-child.pid, "SIGTERM");
@@ -227,12 +320,15 @@ async function main() {
   note("测试期间会反复把「计算器」切到前台，这是测量本身需要，不是被测程序的行为");
 
   // G1：agent 通过 MCP 拉起 + 默认策略 → 从启动到操作都不该打扰人
+  //     另外在这里跑一遍"后台功能完整性"：证明窗口在后台时能力照常可用，
+  //     也就是**完全不需要前台**（其余两组会被自己抢到前台，测不了后台）。
   await runGroup({
     label: "G1 agent 拉起(auto)",
     port: WS_PORT,
     extraEnv: { AI_BROWSER_LAUNCHED_BY_AGENT: "1" },
     expectStealOnBoot: false,
     expectStealOnAction: false,
+    backgroundCheck: true,
     HOST,
   });
 
