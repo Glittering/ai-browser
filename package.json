@@ -15,6 +15,7 @@
     "value": "node e2e/value_ws.cjs",
     "canvas": "node e2e/canvas_ws.cjs",
     "focus": "node e2e/focus_ws.cjs",
+    "interact": "node e2e/interact_ws.cjs",
     "realsites": "node e2e/e2e_realsites.cjs",
     "realsites:meta": "vitest run tests/test_realsites_sites.js",
     "mcp": "node src/main/mcp_server.js"

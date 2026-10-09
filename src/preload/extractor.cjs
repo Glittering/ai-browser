@@ -113,8 +113,45 @@ function extractTree() {
       case "slider": return ["scroll_to", "focus"];
       case "checkbox": case "radio": return ["click", "focus"];
       case "dialog": return ["open", "close"];
-      default: return [];
+      default: return inferContainerActions(el);
     }
+  }
+
+  // 容器类节点（group / generic / image …）原先一律返回空动作。但**很多真实可交互
+  // 元素恰恰落在这里**：画布节点的 <div>、自定义下拉、可拖卡片。只按 role 判定，
+  // agent 就完全看不出它们可点/可拖 —— 实测在 React Flow 工作流编辑器上，66 个
+  // 画布节点全是 `role:group, actions:[]`，"选中一个节点"这个最基本的操作因此无从
+  // 下手（只能靠试）。
+  //
+  // 这里改用**行为信号**推断，而不是猜类名（类名是各框架私有的，猜不通用）：
+  //   cursor 拽取态 / draggable 属性 → 可拖（并且按下松开即可点选，故同时给 click）
+  //   cursor:pointer / 真实 onclick    → 可点
+  //   显式 tabindex>=0                → 可 focus
+  // 只补充**已有节点**的动作清单，不新增节点，所以不会撑大语义树体积。
+  //
+  // 刻意**不给推断节点加 hover**：hover 只有在"悬停会揭示东西"时才有意义，而这一点
+  // 从行为信号看不出来，加了就是猜。实测加上后 177 个节点里 172 个都报 hover，
+  // 纯噪声、白花 token，却什么都没告诉 agent。
+  function inferContainerActions(el) {
+    var acts = [];
+    try {
+      var cursor = "";
+      try { cursor = (window.getComputedStyle(el).cursor || "").toLowerCase(); } catch (e) {}
+      var draggable =
+        (el.getAttribute && el.getAttribute("draggable") === "true") ||
+        /^(grab|grabbing|move|col-resize|row-resize|ew-resize|ns-resize|nesw-resize|nwse-resize|crosshair)$/.test(cursor);
+      var clickable =
+        draggable ||
+        cursor === "pointer" ||
+        (typeof el.onclick === "function") ||
+        (el.hasAttribute && el.hasAttribute("data-ai-clickable"));
+      var ti = el.getAttribute ? el.getAttribute("tabindex") : null;
+      var focusable = ti !== null && ti !== undefined && Number(ti) >= 0;
+      if (clickable) acts.push("click");
+      if (draggable) acts.push("drag");
+      if (focusable) acts.push("focus");
+    } catch (e) { /* 推断失败就不给动作 —— 宁可少报，绝不猜一个假动作 */ }
+    return acts;
   }
 
   function detectEditorType(el) {

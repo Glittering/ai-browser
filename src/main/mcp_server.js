@@ -134,6 +134,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           file: args.file,
           offset: args.offset,
           limit: args.limit,
+          // drag：终点与端点锚点。to_x/to_y 是绝对视口坐标（用于拖到空白处，
+          // 例如平移画布）；to_target 是落到另一个元素上（例如连线）。
+          // 这些名字与 raw WS 层完全一致 —— 归一由 page_manager._cdpDrag 单点负责，
+          // 这里不再做第二套映射（两套名字 = 迟早有一层不认识）。
+          to_target: args.to_target,
+          dx: args.dx,
+          dy: args.dy,
+          to_x: args.to_x,
+          to_y: args.to_y,
+          from_anchor: args.from_anchor,
+          from: (args.from_x !== undefined && args.from_y !== undefined)
+            ? { x: args.from_x, y: args.from_y }
+            : undefined,
+          to_anchor: args.to_anchor,
+          hold: args.hold,
+          // press：单个键或按键序列
+          key: args.key,
+          keys: args.keys,
+          dx: args.delta_x,
+          dy: args.delta_y,
         },
         tab: args.tab
       });

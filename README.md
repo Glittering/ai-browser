@@ -10,7 +10,7 @@
   <img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue.svg">
   <img alt="Electron" src="https://img.shields.io/badge/built%20with-Electron%2033-9cf">
   <img alt="Platforms" src="https://img.shields.io/badge/platforms-macOS%20%E2%80%A2%20Linux-blueviolet">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-239%20unit%20%2B%20297%20e2e-2ea043">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-239%20unit%20%2B%20324%20e2e-2ea043">
   <img alt="MCP" src="https://img.shields.io/badge/spec-MCP%20(stdio)-f5b23b">
 </p>
 
@@ -109,7 +109,7 @@ small surface, since every tool schema is injected into your agent's context on 
 |---|---|
 | `browse_navigate` | Load a URL in the active (or given) tab. |
 | `browse_get_tree` | Read the page as a semantic tree + page context (modals, messages, stats). |
-| `browse_act` | `click` / `type` / `setContent` / `clear` / `focus` / `hover` / `scroll_to` / `upload` / `get_value` on a `data-ai-id`. |
+| `browse_act` | `click` / `type` (append at caret) / `setContent` (replace all) / `clear` / `focus` / `hover` / `scroll_to` / `upload` / `get_value` (read-only) / `drag` / `press` / `wheel` on a `data-ai-id`. |
 | `browse_canvas` | Read `<canvas>` through captured draw calls: `list` / `read` / `configure` / `capture`. **Experimental — see the canvas section below.** |
 | `browse_evaluate` | Run a JS *expression* in page context (5000-char cap, Node identifiers rejected). |
 | `browse_scroll` | Scroll the page, or scroll an element into view. |
@@ -133,6 +133,27 @@ Notes that save round-trips:
   `setContent` (or `clear` first).
 - `browse_act` also takes `action: "get_value"` — a **read-only** way to fetch an element's full text,
   which matters because `browse_get_tree` truncates long values at 200 characters (see below).
+- **Pointer gestures are first-class**: `drag`, `press` and `wheel`. Canvas / board / sortable UIs are
+  built on them, and no amount of `evaluate` can substitute — synthetic `PointerEvent`s do not move a
+  framework that uses Pointer Capture (measured on a React Flow canvas: the node's position changed by
+  exactly 0,0), so these go through CDP trusted input.
+  - `drag`: `dx`/`dy`, `to_x`/`to_y`, or `to_target` (drop onto another element). `from_anchor`
+    / `to_anchor` (`left`/`right`/`top`/`bottom`/`center`) grab a side — a side prefers that element's
+    connection handle, **but only if the handle is actually hit-testable** (see the note below).
+    `from_x`/`from_y` start from a bare point (panning empty canvas), in which case no `target` is needed.
+  - `press`: `key` (`Delete`, `Escape`, `ArrowRight`, `Enter`, … or a combo like `"Meta+a"`), or `keys`
+    for a sequence. Deleting a node, undo, deselection — all keyboard-only.
+  - `wheel`: `delta_x` / `delta_y` plus `hold: ["Control"]` for canvas zoom. **`browse_scroll` cannot do
+    this** — it calls `window.scrollBy`, which an infinite canvas ignores entirely.
+  - The drag result reports `drag_from` / `drag_to` **and** which element actually sits at each point
+    (`from_at_id`), plus `warning` + `start_hit_target: false` when the press landed on a *different*
+    element — visual overlap otherwise looks exactly like "drag does nothing".
+- **`actions` is inferred from behaviour, not from `role`.** An element whose computed `cursor` is a
+  drag cursor, or that has `draggable="true"` / `cursor: pointer` / an `onclick`, now advertises
+  `drag` / `click` in the tree even when its role is `group`. Without this, a canvas full of
+  `role: group` nodes reported `actions: []` and the agent could not tell they were interactive at all.
+
+---
 - `browse_network` captures requests from the moment a tab opens, **including POST request bodies** —
   no subscription needed. Request headers are redacted by default
   (`authorization` / `cookie` → `[REDACTED]`); pass `include_sensitive_headers: true` to see them.
@@ -234,7 +255,7 @@ MCP is a thin stdio adapter. Anything MCP can do is reachable directly over JSON
 | `ui.act` | `params.action` + `params.target`; per-action args nested under `params.params` | `browse_act` |
 | `ui.navigate` | Load a URL (`params.url`, optional `tab`) | `browse_navigate` |
 | `ui.evaluate` | Run JS in page context, same guard as MCP | `browse_evaluate` |
-| `ui.scroll` | Scroll page or element (`direction`, `amount`, `target`) | `browse_scroll` |
+| `ui.scroll` | Scroll page or element (`direction`, `amount`, `target`). **Document scrolling only** — for canvas apps use `ui.act{action:'wheel'}`. | `browse_scroll` |
 | `ui.wait` | Poll until a condition or timeout | `browse_wait` |
 | `ui.new_tab` / `ui.close_tab` / `ui.list_tabs` / `ui.set_active_tab` | Tab management | `browse_*_tab` |
 | `ui.subscribe` / `ui.unsubscribe` | Event subscription; `params.events`, `"*"` for all | — (WS only — see below) |
@@ -396,6 +417,7 @@ npm run network      # request log, POST bodies, headers, pagination, redaction 
 npm run value        # value truncation contract + read-only get_value — 15 checks
 npm run canvas       # canvas draw-call capture — 13 checks
 npm run focus        # no focus stealing + full capability while backgrounded — 32 checks
+npm run interact     # trusted drag / key press / wheel (pointer gestures) — 27 checks
 npm run realsites    # navigate/read/act against a matrix of real sites
 ```
 
@@ -488,6 +510,14 @@ Disable entirely with `AI_BROWSER_CANVAS_HOOK=0`.
   wholesale into your agent's context, so it should not carry secrets.
 - **`js_error` is broadcast for every tab** (each event carries `tabId`), so ordering and indices are
   not guaranteed. Filter by `tabId`; do not rely on "the first error is the one I care about".
+- **A "connection handle" is only used if a real pointer could hit it.** Many sites render handles as
+  `pointer-events: none` + `opacity: 0` decorations (verified on the rhtv canvas: every handle is
+  `pe:none / op:0`). Anchoring on such an element would press the node body instead — so the resolver
+  self-checks with `elementFromPoint` and **falls back to the element's border midpoint, reporting
+  `via: "edge"`**. If you see `via: "edge"` where you expected a handle, that is the honest answer:
+  drag-to-connect is not available at that spot, and the site must wire nodes some other way.
+- **`ui.scroll` is document scrolling.** It does `window.scrollBy`, so it is a no-op on canvas-based
+  editors, maps and charts. Use `ui.act{action:'wheel'}` there.
 
 `npm run realsites` is table-driven from `e2e/realsites/sites.cjs`, currently 17 sites across 8 buckets
 (search, finance, media, dev, ecommerce, spa, editor, marketplace). Sites that require login or

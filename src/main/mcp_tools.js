@@ -32,12 +32,12 @@ export const MCP_TOOLS = [
   },
   {
     name: 'browse_act',
-    description: 'Act on an element by data-ai-id. type = append at caret; setContent = replace all; clear = empty. Also click, focus, hover, scroll_to, upload, get_value (read-only).',
+    description: 'Act on an element by data-ai-id: click, type (append at caret), setContent (replace all), clear, focus, hover, scroll_to, upload, get_value (read-only), drag, press, wheel.',
     inputSchema: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['click', 'type', 'clear', 'focus', 'hover', 'scroll_to', 'upload', 'get_value'], description: 'Action.' },
-        target: { type: 'string', description: 'Element data-ai-id from the semantic tree.' },
+        action: { type: 'string', enum: ['click', 'type', 'clear', 'focus', 'hover', 'scroll_to', 'upload', 'get_value', 'drag', 'press', 'wheel'], description: 'Action.' },
+        target: { type: 'string', description: 'Element data-ai-id from the semantic tree. Omit for press (keys go to the current focus); for drag you may also omit it and pass from_x/from_y to start from a bare point.' },
         text: { type: 'string', description: 'Text to type (type only).' },
         value: { type: 'string', description: 'Value for select.' },
         offset: { type: 'integer', description: 'get_value: start offset in Unicode code points (default 0).' },
@@ -45,9 +45,23 @@ export const MCP_TOOLS = [
         url: { type: 'string', description: 'For click: click the link whose href matches this URL instead of guessing the target label.' },
         keep_tab: { type: 'boolean', description: 'For click: keep the current tab active instead of auto-following a newly opened tab.' },
         file: { type: 'string', description: 'Absolute path to upload (upload only, target must be a file input).' },
+        to_target: { type: 'string', description: 'drag: data-ai-id to drop onto (e.g. drag from one node\'s output to another node to connect them).' },
+        dx: { type: 'number', description: 'drag: horizontal distance to move (use with dy instead of to_target).' },
+        dy: { type: 'number', description: 'drag: vertical distance to move.' },
+        to_x: { type: 'number', description: 'drag: absolute viewport x to end at (overrides dx).' },
+        to_y: { type: 'number', description: 'drag: absolute viewport y to end at.' },
+        from_x: { type: 'number', description: 'drag: explicit viewport x to start the drag at (no target needed — e.g. panning empty canvas).' },
+        from_y: { type: 'number', description: 'drag: explicit viewport y to start the drag at.' },
+        from_anchor: { type: 'string', enum: ['center', 'left', 'right', 'top', 'bottom'], description: 'drag: which point of target to grab; a side prefers that node\'s connection handle (default center).' },
+        to_anchor: { type: 'string', enum: ['center', 'left', 'right', 'top', 'bottom'], description: 'drag: which point of to_target to drop on.' },
+        hold: { type: 'array', items: { type: 'string' }, description: 'drag: modifier keys held during the drag (e.g. ["Shift"]).' },
+        key: { type: 'string', description: 'press: a key name such as Delete, Escape, ArrowRight, Enter, or a combo like "Meta+a".' },
+        delta_x: { type: 'number', description: 'wheel: horizontal scroll amount (positive scrolls right).' },
+        delta_y: { type: 'number', description: 'wheel: vertical scroll amount. Negative scrolls up / zooms out; add hold:["Control"] for canvas zoom.' },
+        keys: { type: 'array', items: { type: 'string' }, description: 'press: sequence of keys to press in order.' },
         tab: { type: 'integer', description: 'Tab id (default: active tab).' }
       },
-      required: ['action', 'target']
+      required: ['action']
     }
   },
   {

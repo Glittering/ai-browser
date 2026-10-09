@@ -18,6 +18,81 @@ const CANVAS_BRIDGE_KEY = '__aiCanvasBridge';
 // 请求头都拿不到）。关闭开关：AI_BROWSER_NETWORK_CAPTURE=0。
 const NETWORK_CAPTURE_DEFAULT = !(process.env.AI_BROWSER_NETWORK_CAPTURE === '0' || process.env.AI_BROWSER_NETWORK_CAPTURE === 'false');
 
+// 具名按键 → CDP Input.dispatchKeyEvent 参数。agent 用自然名字（'Delete'、
+// 'Escape'、'ArrowRight'、'a'）而不是让人去查 Windows 虚拟键码。
+// vk 用 Windows 虚拟键码（Chromium 在 macOS 上也按它解释）。
+const NAMED_KEYS = {
+  Enter: { key: 'Enter', code: 'Enter', vk: 13 },
+  NumpadEnter: { key: 'Enter', code: 'NumpadEnter', vk: 13 },
+  Tab: { key: 'Tab', code: 'Tab', vk: 9 },
+  Escape: { key: 'Escape', code: 'Escape', vk: 27 },
+  Esc: { key: 'Escape', code: 'Escape', vk: 27 },
+  Backspace: { key: 'Backspace', code: 'Backspace', vk: 8 },
+  Delete: { key: 'Delete', code: 'Delete', vk: 46 },
+  Space: { key: ' ', code: 'Space', vk: 32, text: ' ' },
+  ArrowUp: { key: 'ArrowUp', code: 'ArrowUp', vk: 38 },
+  ArrowDown: { key: 'ArrowDown', code: 'ArrowDown', vk: 40 },
+  ArrowLeft: { key: 'ArrowLeft', code: 'ArrowLeft', vk: 37 },
+  ArrowRight: { key: 'ArrowRight', code: 'ArrowRight', vk: 39 },
+  Home: { key: 'Home', code: 'Home', vk: 36 },
+  End: { key: 'End', code: 'End', vk: 35 },
+  PageUp: { key: 'PageUp', code: 'PageUp', vk: 33 },
+  PageDown: { key: 'PageDown', code: 'PageDown', vk: 34 },
+  Minus: { key: '-', code: 'Minus', vk: 189 },
+  Equal: { key: '=', code: 'Equal', vk: 187 },
+  '0': { key: '0', code: 'Digit0', vk: 48 },
+  '1': { key: '1', code: 'Digit1', vk: 49 },
+  '2': { key: '2', code: 'Digit2', vk: 50 },
+  '3': { key: '3', code: 'Digit3', vk: 51 },
+  '4': { key: '4', code: 'Digit4', vk: 52 },
+  '5': { key: '5', code: 'Digit5', vk: 53 },
+};
+
+// 修饰键 → CDP modifiers 位掩码（Alt=1, Ctrl=2, Meta=4, Shift=8）。
+function modifierMask(modifiers) {
+  let m = 0;
+  for (const k of modifiers || []) {
+    const s = String(k).toLowerCase();
+    if (s === 'alt' || s === 'option') m |= 1;
+    else if (s === 'control' || s === 'ctrl') m |= 2;
+    else if (s === 'meta' || s === 'cmd' || s === 'command') m |= 4;
+    else if (s === 'shift') m |= 8;
+  }
+  return m;
+}
+
+/**
+ * 解析一个按键名到 _cdpKey 需要的参数。支持具名键、单字符（字母/数字/符号）、
+ * 以及 'Shift+Delete' / 'Meta+a' / 'Control+ArrowRight' 这类组合写法。
+ * 返回 null 表示无法识别 —— 调用方报错，不静默发一个错误按键。
+ */
+function keySpec(name, extraModifiers) {
+  const raw = String(name == null ? '' : name);
+  const parts = raw.split('+').map((p) => p.trim()).filter(Boolean);
+  const baseName = parts.length ? parts[parts.length - 1] : raw;
+  const combos = parts.slice(0, -1);
+  let mod = modifierMask([...(extraModifiers || []), ...combos]);
+
+  let spec = NAMED_KEYS[baseName] || null;
+  if (!spec && /^[a-zA-Z]$/.test(baseName)) {
+    const up = baseName.toUpperCase();
+    // key 用调用方给的大小写（'a' → 'a'），code 永远指物理键（'KeyA'）。
+    // 曾经写成 `key: baseName !== up ? up : baseName` —— 对任何小写字母
+    // baseName 都 !== 其大写，于是 'a' 被发成 'A'，页面 keydown 里读到的全是大写。
+    spec = { key: baseName, code: 'Key' + up, vk: up.charCodeAt(0) };
+    if (baseName === up) mod |= 8; // 大写字母本身意味着 Shift 按下
+  }
+  if (!spec && baseName.length === 1) {
+    spec = { key: baseName, code: '', vk: baseName.toUpperCase().charCodeAt(0), text: baseName };
+  }
+  if (!spec) return null;
+  // 真实浏览器在 Shift 按下时，字母键报的是大写 key。对齐它，否则页面里的
+  // 快捷键判断（e.key === 'A'）会失灵。
+  let key = spec.key;
+  if ((mod & 8) && /^[a-z]$/.test(key)) key = key.toUpperCase();
+  return { ...spec, key, mod };
+}
+
 class PageManager {
   constructor(browserWindow) {
     this.window = browserWindow;
@@ -388,7 +463,15 @@ class PageManager {
     const tid = tabId !== undefined ? tabId : this.activeTab;
     const view = this._getView(tid);
     if (!view) return { success: false, error: 'Tab not found' };
-    if (!target) return { success: false, error: 'No target' };
+    // press 是唯一不要求目标的动作：快捷键通常挂在 document/window 上（删除节点、
+    // 撤销重做、取消选中），发给"当前焦点"就是正确语义。
+    // drag 给了显式起点坐标（params.from）时同样不要求目标 —— "从空白处起拖"正是
+    // 平移画布、框选这类操作的表达，而空白画布上根本没有可寻址的元素。
+    // wheel 也不要求目标：不指定就落在视口中心（缩放画布正是这样用的）。
+    const hasExplicitDragFrom = action === 'drag' && params.from && Number.isFinite(Number(params.from.x));
+    const targetOptional = action === 'press' || action === 'wheel' || hasExplicitDragFrom;
+    if (!target && !targetOptional) return { success: false, error: 'No target' };
+    target = target || '';
 
     // 只读分支：取 node.value 的完整内容（树里只给前 200 code point）。
     // 不聚焦、不触发 input/change、不改页面，也不走输入动作的 fallback。
@@ -447,6 +530,32 @@ class PageManager {
       } catch (e) { /* fall through to preload */ }
       // 无 CDP 时 preload 无法真正赋值文件（受安全限制），返回失败让 agent 感知。
       return { success: false, error: 'Upload requires CDP (input file set) — no file input found' };
+    } else if (action === 'drag') {
+      try {
+        const r = await this._cdpDrag(view, target, params, tid);
+        if (r) return { ...r, opened_tab: null };
+      } catch (e) {
+        return { success: false, error: String((e && e.message) || e).slice(0, 200), opened_tab: null };
+      }
+      // 拖拽没有 preload 等价物：合成 PointerEvent 不被采用 Pointer Capture 的
+      // 应用信任（实测 React Flow 上 moved 恒为 0），因此明确报错而不是假装成功。
+      return { success: false, error: 'Drag requires CDP — the debugger is not attached to this tab' };
+    } else if (action === 'wheel') {
+      try {
+        const r = await this._cdpWheel(view, target, params, tid);
+        if (r) return { ...r, opened_tab: null };
+      } catch (e) {
+        return { success: false, error: String((e && e.message) || e).slice(0, 200), opened_tab: null };
+      }
+      return { success: false, error: 'wheel requires CDP — the debugger is not attached to this tab' };
+    } else if (action === 'press') {
+      try {
+        const r = await this._cdpPress(view, target, params, tid);
+        if (r) return { ...r, opened_tab: null };
+      } catch (e) {
+        return { success: false, error: String((e && e.message) || e).slice(0, 200), opened_tab: null };
+      }
+      return { success: false, error: 'press requires CDP — the debugger is not attached to this tab' };
     }
 
     const preloadRes = await this._executeViaPreload(action, target, params, tid);
@@ -800,6 +909,307 @@ class PageManager {
     return action === 'hover' ? 'cdp-hover' : 'cdp-click';
   }
 
+  // 受信滚轮（ui.act {action:'wheel'}）。
+  //
+  // 为什么需要：`ui.scroll` 只是 `window.scrollBy`，对**画布类应用完全无效** ——
+  // 无限画布/地图/图表靠 wheel 事件缩放与平移，而不是文档滚动。实测在 rhtv 画布上
+  // ui.scroll 一点用都没有，agent 因此既看不见全图、也缩不进去。
+  //   params.dy < 0 → 向上滚 / 缩小；> 0 → 向下滚 / 放大（配合 hold:['Control']）
+  //   params.dx     横向滚动
+  //   params.at     显式落点坐标；否则落在 target 元素中心（先滚入视口），再否则视口中心
+  //   params.keys   修饰键（画布缩放通常要 Control）
+  async _cdpWheel(view, aiId, params, tabId) {
+    if (!this._canCdp(view)) return null;
+    const owning = /^axf-/.test(aiId) ? await this._owningFrame(view, aiId) : null;
+    const run = async (body) => {
+      const fn = `(function(){${body}})()`;
+      return owning ? owning.executeJavaScript(fn) : this.evaluate(fn, tabId);
+    };
+    try {
+      this._focusWindow(view);
+    } catch (e) {}
+
+    const dims = await run('return {w:window.innerWidth,h:window.innerHeight};');
+    let at = null;
+    if (params.at && Number.isFinite(Number(params.at.x))) {
+      at = { x: Math.round(Number(params.at.x)), y: Math.round(Number(params.at.y)) };
+    } else if (aiId) {
+      const c = await run(
+        `var el=document.querySelector(${JSON.stringify(`[data-ai-id="${aiId}"]`)});if(!el)return null;` +
+        `el.scrollIntoView({block:'center',inline:'center',behavior:'instant'});` +
+        `var r=el.getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)};`
+      );
+      if (c) at = c;
+    }
+    if (!at) at = { x: Math.round(dims.w / 2), y: Math.round(dims.h / 2) };
+    if (at.x < 0 || at.y < 0 || at.x > dims.w || at.y > dims.h) {
+      return { success: false, error: `wheel: point (${at.x},${at.y}) is outside the viewport (${dims.w}x${dims.h})`, at };
+    }
+
+    const dx = Number(params.dx) || 0;
+    const dy = Number(params.dy) || 0;
+    if (!dx && !dy) {
+      return { success: false, error: 'wheel: need dx or dy (e.g. dy:-600 zooms/pans up; add hold:["Control"] for canvas zoom)' };
+    }
+    const mod = modifierMask(params.hold || params.keys);
+    const steps = Math.min(20, Math.max(1, Number(params.steps) || 1));
+    const dbg = view.webContents.debugger;
+    for (let i = 0; i < steps; i++) {
+      await dbg.sendCommand('Input.dispatchMouseEvent', {
+        type: 'mouseWheel',
+        x: at.x,
+        y: at.y,
+        deltaX: Math.round(dx / steps),
+        deltaY: Math.round(dy / steps),
+        modifiers: mod,
+      });
+      if (steps > 1) await new Promise((r) => setTimeout(r, 30));
+    }
+    return { success: true, wheeled_via: 'cdp-wheel', at, delta: { x: dx, y: dy }, modifiers: mod, steps };
+  }
+
+  // 受信拖拽（ui.act {action:'drag'}）—— 画布/看板/滑块/排序/框选这类交互的
+  // 唯一通路。实测：合成 PointerEvent 拖不动采用 Pointer Capture 的应用
+  // （React Flow 的画布节点，moved 恒为 0,0），因为 setPointerCapture 要求
+  // 真实指针；合成 KeyboardEvent/MouseEvent 同理不被信任。所以拖拽**必须**
+  // 走 CDP 的 Input.dispatchMouseEvent 序列，不是"有更好"。
+  //
+  // 端点解析：
+  //   target                    起点元素（data-ai-id）
+  //   params.from / params.to   {x,y} 视口绝对坐标（给了就优先，用于空白处起拖/落点）
+  //   params.to_target          终点元素（data-ai-id）
+  //   params.dx / params.dy     相对起点的位移（移动节点最常用）
+  //   params.from_anchor/to_anchor  'center'(默认)|'left'|'right'|'top'|'bottom'
+  //     方位锚点会优先落在元素内部的**连接点**（类名含 handle/port/anchor/
+  //     connector 的小元素）上 —— 这正是"从 A 的右侧连到 B 的左侧"的自然表达，
+  //     不需要 agent 知道连接点的 DOM 类名或 data-ai-id（它们通常没有）。
+  //   params.steps / params.duration_ms  中间 mouseMoved 步数与总时长
+  //   params.keys               拖拽期间按住的修饰键（如 ['Shift'] 轴向锁定）
+  async _cdpDrag(view, aiId, params, tabId) {
+    if (!this._canCdp(view)) return null;
+    const owning = /^axf-/.test(aiId) ? await this._owningFrame(view, aiId) : null;
+    const run = async (body) => {
+      const fn = `(function(){${body}})()`;
+      return owning ? owning.executeJavaScript(fn) : this.evaluate(fn, tabId);
+    };
+    try {
+      this._focusWindow(view);
+    } catch (e) {}
+
+    const anchorOf = (a) => {
+      const s = String(a || 'center').toLowerCase();
+      return ['center', 'left', 'right', 'top', 'bottom'].indexOf(s) >= 0 ? s : 'center';
+    };
+    // 元素内的锚点解析（页内执行）。
+    //   center  → 元素的几何中心，**不吸附**任何内部元素。这是"移动/平移"的语义，
+    //             若吸附到连接点，在 React Flow 这类库里会变成"从连接点拉线"，
+    //             与调用方的意图相反。
+    //   四周    → 优先该方位的**连接点**（handle/port/connector 类的小元素），
+    //             没有则退化为该边的中点。这是"连线"的语义。
+    // 连接点识别用 classList 逐 token 词边界匹配 —— 上一版用
+    // `[class*="anchor"]` 会把 `is-node-anchored` 这类无关类名当成连接点
+    // （实测抢到了"标签"按钮），拖拽起点完全错位。
+    const pointFor = async (sel, anchor, offset) => {
+      const body =
+        `var el=document.querySelector(${JSON.stringify(sel)});if(!el)return null;` +
+        `var r=el.getBoundingClientRect();var side=${JSON.stringify(anchor)};` +
+        `var cx=r.x+r.width/2,cy=r.y+r.height/2;` +
+        `function isHandle(h){var cl=h.classList;for(var i=0;i<cl.length;i++){var t=cl[i];` +
+        `if(/(^|[-_])handle([-_]|$)/.test(t)||/(^|[-_])port([-_]|$)/.test(t)||` +
+        `/(^|[-_])connector([-_]|$)/.test(t)||/(^|[-_])anchor([-_]|$)/.test(t))return true;}return false;}` +
+        `if(side==='center')return {x:cx,y:cy,via:'center'};` +
+        `var M=12;` + // 连接点通常骑在边框上（一半在内一半在外），给一点容差
+        `var hs=el.querySelectorAll('[data-handlepos],[class]');` +
+        `var best=null,bestScore=-1e9;` +
+        `for(var i=0;i<hs.length;i++){var h=hs[i];` +
+        `if(!h.hasAttribute('data-handlepos')&&!isHandle(h))continue;` +
+        `var hr=h.getBoundingClientRect();if(hr.width<=0&&hr.height<=0)continue;` +
+        `var hx=hr.x+hr.width/2,hy=hr.y+hr.height/2;` +
+        // 连接点必须附着在元素**自身**范围内。不加这条，元素内部某个用绝对定位
+        // 甩到很远的子孙会被当成"最右侧的连接点"（实测解析出的点离节点 300px，
+        // 于是连线整条落空、还报 success）。
+        `if(hx<r.left-M||hx>r.right+M||hy<r.top-M||hy>r.bottom+M)continue;` +
+        `var sc;` +
+        `if(side==='right')sc=(hx-cx);else if(side==='left')sc=(cx-hx);` +
+        `else if(side==='bottom')sc=(hy-cy);else if(side==='top')sc=(cy-hy);` +
+        `if(sc>bestScore){bestScore=sc;best={x:hx,y:hy,via:'handle',el:h};}}` +
+        // 自证可命中：选中的"连接点"必须真的是指针落在那个坐标时会命中的元素。
+        // 很多站点把连接点画成 `pointer-events:none` + `opacity:0` 的**装饰**
+        // （实测 rhtv 的画布：handle 全是 pe:none / op:0），此时按下去命中的其实是
+        // 节点本体 —— 却仍报 via:'handle'，把"按错了地方"伪装成"按在连接点上"。
+        //
+        // 判定必须是"命中即是连接点，或连接点的子孙"。**不能**接受
+        // `hit.contains(handle)`：节点本体当然包含自己的连接点，那样会把这个
+        // 失败情形原样放行（第一版就是这么写的，实测仍然报 handle）。
+        `if(best){var hit=document.elementFromPoint(best.x,best.y);` +
+        `if(!(hit&&(hit===best.el||best.el.contains(hit))))best=null;}` +
+        `if(best){delete best.el;return best;}` +
+        `if(side==='right')return {x:r.right,y:r.y+r.height/2,via:'edge'};` +
+        `if(side==='left')return {x:r.left,y:r.y+r.height/2,via:'edge'};` +
+        `if(side==='bottom')return {x:r.x+r.width/2,y:r.bottom,via:'edge'};` +
+        `return {x:r.x+r.width/2,y:r.y,via:'edge'};`;
+      const p = await run(body);
+      if (!p) return null;
+      const ox = offset && Number.isFinite(Number(offset.x)) ? Number(offset.x) : 0;
+      const oy = offset && Number.isFinite(Number(offset.y)) ? Number(offset.y) : 0;
+      return { x: Math.round(p.x + ox), y: Math.round(p.y + oy), via: p.via };
+    };
+
+    // 起点/落点上"实际是哪个元素"——拖拽最容易悄悄打偏（坐标落到了浮层、
+    // 遮挡层或相邻的另一个节点上），不报出来就又是一次"报成功但没做对"。
+    // 同时向上找最近的 data-ai-id：如果它**不是**本次目标，说明抓错了节点
+    // （实测踩过：两个节点视觉重叠时，拖 A 实际按在叠在上面的 B 的浮层上，
+    // 事件照常派发、success 照常返回，但什么都没动）。
+    const atPointJs = (p, selfId) =>
+      `var e=document.elementFromPoint(${p.x},${p.y});if(!e)return null;` +
+      `var anc=e.closest?e.closest('[data-ai-id]'):null;` +
+      `var id=anc?anc.getAttribute('data-ai-id'):null;` +
+      `return {el:(e.tagName||'')+' '+(typeof e.className==='string'?e.className:'').slice(0,60),` +
+      `id:id,is_target:(id===null||id===${JSON.stringify(String(selfId))})};`;
+
+    // 起点
+    let from = null;
+    if (params.from && Number.isFinite(Number(params.from.x))) {
+      from = { x: Math.round(Number(params.from.x)), y: Math.round(Number(params.from.y)), via: 'explicit' };
+    } else if (aiId) {
+      from = await pointFor(`[data-ai-id="${aiId}"]`, anchorOf(params.from_anchor), params.from_offset);
+    }
+    if (!from) return { success: false, error: 'drag: start element not found: ' + aiId };
+
+    // 终点：显式坐标 > to_target 元素 > dx/dy 相对位移
+    // 绝对坐标同时接受 {to:{x,y}} 与扁平的 to_x/to_y —— MCP 的 schema 用扁平写法
+    // （更好填），raw WS 习惯嵌套写法。两种都在**这里**归一，避免"某一层认识、
+    // 另一层不认识"的隐性不一致（实测踩过：raw WS 传 to_x 被当成没给落点）。
+    let to = null;
+    const explicitTo =
+      params.to && Number.isFinite(Number(params.to.x))
+        ? params.to
+        : (Number.isFinite(Number(params.to_x)) || Number.isFinite(Number(params.to_y)))
+          ? { x: params.to_x, y: params.to_y }
+          : null;
+    if (explicitTo && Number.isFinite(Number(explicitTo.x)) && Number.isFinite(Number(explicitTo.y))) {
+      to = { x: Math.round(Number(explicitTo.x)), y: Math.round(Number(explicitTo.y)), via: 'explicit' };
+    } else if (params.to_target) {
+      to = await pointFor(`[data-ai-id="${params.to_target}"]`, anchorOf(params.to_anchor), params.to_offset);
+      if (!to) return { success: false, error: 'drag: to_target not found: ' + params.to_target };
+    } else if (Number.isFinite(Number(params.dx)) || Number.isFinite(Number(params.dy))) {
+      to = { x: Math.round(from.x + Number(params.dx || 0)), y: Math.round(from.y + Number(params.dy || 0)), via: 'delta' };
+    }
+    if (!to) return { success: false, error: 'drag: need one of params.to / to_target / dx,dy' };
+
+    // 视口校验：视口外的点直接派发会落到别的元素上，必须明确报错而不是静默误报成功。
+    const dims = await run('return {w:window.innerWidth,h:window.innerHeight};');
+    const inVp = (p) => p && p.x >= 0 && p.y >= 0 && p.x <= dims.w && p.y <= dims.h;
+    if (!inVp(from)) {
+      return { success: false, error: `drag: start point (${from.x},${from.y}) is outside the viewport (${dims.w}x${dims.h})`, drag_from: from };
+    }
+    if (!inVp(to)) {
+      return { success: false, error: `drag: end point (${to.x},${to.y}) is outside the viewport (${dims.w}x${dims.h})`, drag_from: from, drag_to: to };
+    }
+
+    // 修饰键 → CDP modifiers 位掩码
+    const mod = modifierMask(params.hold || params.keys);
+
+    const dbg = view.webContents.debugger;
+    const send = (m, p) => dbg.sendCommand(m, p);
+    const steps = Math.min(60, Math.max(2, Number(params.steps) || 14));
+    const total = Math.min(5000, Math.max(60, Number(params.duration_ms) || 420));
+    const per = Math.max(4, Math.round(total / steps));
+
+    // 记录起点/落点上到底是哪个元素：命中遮挡层或**另一个节点**时，调用方能立刻
+    // 看出这一拖是不是打偏了，而不是拿到一个笼统的 success 去猜。
+    const fromAt = await run(atPointJs(from, aiId)).catch(() => null);
+    const toAt = await run(atPointJs(to, aiId)).catch(() => null);
+    // 起点抓到了别的节点 = 视觉重叠下的抓错目标。事件会照常派发、页面却纹丝不动，
+    // 必须显式告诉调用方，否则调用方只会以为"拖拽不生效"。
+    const startOffTarget = !!(fromAt && fromAt.id && fromAt.id !== aiId);
+
+    // 同坐标先 move 一次：让页面进入 hover 态（部分实现只在 hover 后才可拖）。
+    await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: from.x, y: from.y, modifiers: mod });
+    await new Promise((r) => setTimeout(r, 30));
+    await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: from.x, y: from.y, button: 'left', buttons: 1, clickCount: 1, modifiers: mod });
+    // 按下后必须在**同一点**再补一次 mouseMoved：拖拽实现普遍以"按下后的第一个
+    // mousemove"为位移基准点，若直接进位移循环，这一步的偏移会被吃掉 —— 实测
+    // 请求 (-180,150) 只走到 (-167,139)，恰好是 13/14，稳定复现。
+    await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: from.x, y: from.y, button: 'left', buttons: 1, modifiers: mod });
+    await new Promise((r) => setTimeout(r, Math.max(20, per)));
+    // 中间位移是拖拽的本质：没有它，mousePressed/mouseReleased 同坐标就只是"点击"。
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps;
+      const x = Math.round(from.x + (to.x - from.x) * t);
+      const y = Math.round(from.y + (to.y - from.y) * t);
+      await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'left', buttons: 1, modifiers: mod });
+      await new Promise((r) => setTimeout(r, per));
+    }
+    // 收尾再补一次终点位置并等一拍再释放：实测「最后一步 mouseMoved 会被紧跟着的
+    // mouseReleased 吃掉」，位移会稳定少 1/steps（14 步时实测 -180,150 只走了
+    // -167,139 = 13/14）。多补一次终点让落点精确。
+    await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: to.x, y: to.y, button: 'left', buttons: 1, modifiers: mod });
+    await new Promise((r) => setTimeout(r, Math.max(30, per)));
+    // 终点"停稳"：再补几个亚像素级的微动。高缩放的画布上连接点只有 1–3 像素，
+    // 一次到点未必被框架的命中判定捕捉到（实测 8.3% 缩放的 React Flow 画布上
+    // 连线时好时坏）；人手在目标上也会有这种细微停顿/抖动。
+    const settle = Number(params.settle_moves) >= 0 ? Number(params.settle_moves) : 3;
+    for (let k = 0; k < settle; k++) {
+      const jx = to.x + (k % 2 === 0 ? 1 : -1);
+      await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: jx, y: to.y, button: 'left', buttons: 1, modifiers: mod });
+      await new Promise((r) => setTimeout(r, Math.max(12, Math.round(per / 3))));
+    }
+    await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: to.x, y: to.y, button: 'left', buttons: 1, modifiers: mod });
+    await new Promise((r) => setTimeout(r, Math.max(20, Math.round(per / 2))));
+    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: to.x, y: to.y, button: 'left', buttons: 0, clickCount: 1, modifiers: mod });
+    return {
+      success: true,
+      dragged_via: 'cdp-drag',
+      target: aiId,
+      drag_from: from,
+      drag_to: to,
+      from_at: fromAt && fromAt.el,
+      from_at_id: fromAt && fromAt.id,
+      to_at: toAt && toAt.el,
+      to_at_id: toAt && toAt.id,
+      start_hit_target: !startOffTarget,
+      steps,
+      // 抓在了别的元素上：这一拖很可能什么也没动。明确警告而不是让调用方
+      // 从"什么都没发生"里自己猜原因。
+      warning: startOffTarget
+        ? `drag started on a different element (${fromAt.id}) than the target (${aiId}) — often caused by visual overlap; pass from_offset to aim at another point of the element`
+        : undefined,
+    };
+  }
+
+  // 受信按键（ui.act {action:'press'}）——删除节点/撤销重做/取消选中/方向键微调
+  // 这类应用快捷键的唯一通路。target 可选：给了就先在页内聚焦它，否则按键发给
+  // 当前焦点（多数画布应用的快捷键挂在 document/window 上，先点一下画布即可）。
+  async _cdpPress(view, aiId, params, tabId) {
+    if (!this._canCdp(view)) return null;
+    const owning = /^axf-/.test(aiId) ? await this._owningFrame(view, aiId) : null;
+    const run = async (body) => {
+      const fn = `(function(){${body}})()`;
+      return owning ? owning.executeJavaScript(fn) : this.evaluate(fn, tabId);
+    };
+    try {
+      this._focusWindow(view);
+    } catch (e) {}
+    if (aiId) {
+      await run(`var el=document.querySelector(${JSON.stringify('[data-ai-id="' + String(aiId) + '"]')});if(el&&el.focus)el.focus();return true;`);
+    }
+    const list = Array.isArray(params.keys) && params.keys.length
+      ? params.keys
+      : [params.key !== undefined ? params.key : 'Enter'];
+    const dbg = view.webContents.debugger;
+    const send = (m, p) => dbg.sendCommand(m, p);
+    const done = [];
+    for (const name of list) {
+      const spec = keySpec(name, params.modifiers);
+      if (!spec) return { success: false, error: 'press: unsupported key: ' + String(name), pressed: done };
+      await this._cdpKey(send, spec);
+      done.push(spec.key);
+      await new Promise((r) => setTimeout(r, Math.max(20, Number(params.interval_ms) || 60)));
+    }
+    return { success: true, pressed_via: 'cdp-key', pressed: done };
+  }
+
   // 文件上传（封面/附件等，跨框架通用）：HTMLInputElement[type=file] 只能由
   // DevTools 的 DOM.setFileInputFiles 写入真实文件路径（网页脚本无法伪造
   // FileList，preload 同样受限），对任何站点/上传组件一视同仁。找到目标 input
@@ -872,7 +1282,7 @@ class PageManager {
     // h2>blockquote>pre>ul>li 的套娃），editor_blocks 的 role 也随之失真。
     // 只在"确实已经没有文本内容"时拆，有内容的块一个都不动。
     const stripEmptyShells = () => run(
-      `var el=document.querySelector('[data-ai-id=' + ${JSON.stringify(String(aiId))} + ']');if(!el)return false;` +
+      `var el=document.querySelector(${JSON.stringify('[data-ai-id="' + String(aiId) + '"]')});if(!el)return false;` +
       `var ed=el;if(ed.querySelector){var inner=ed.querySelector('[contenteditable=true],input,textarea');if(inner)ed=inner;}` +
       `if(ed.tagName==='INPUT'||ed.tagName==='TEXTAREA')return false;` +
       `if(ed.contentEditable!=='true')return false;` +
@@ -919,7 +1329,7 @@ class PageManager {
       const at = opts.at === 'start' || opts.at === 'cursor' ? opts.at : 'end';
       if (at !== 'cursor') {
         await run(
-          `var el=document.querySelector('[data-ai-id=' + ${JSON.stringify(String(aiId))} + ']');if(!el)return false;` +
+          `var el=document.querySelector(${JSON.stringify('[data-ai-id="' + String(aiId) + '"]')});if(!el)return false;` +
           `var ed=el;if(ed.querySelector){var inner=ed.querySelector('[contenteditable=true],input,textarea');if(inner)ed=inner;}` +
           `if(ed.tagName==='INPUT'||ed.tagName==='TEXTAREA'){var L=(ed.value||'').length;` +
           `var p=(${JSON.stringify(at)}==='start')?0:L;try{ed.setSelectionRange(p,p);}catch(e){}return true;}` +
@@ -950,13 +1360,13 @@ class PageManager {
         // 实测残留 "第一段<div>第二段</div><h2>第三段</h2>"。因此清完校验一次，
         // 仍有文本就换编辑器原生 selectAll+delete 再清一遍。
         const left = await run(
-          `var el=document.querySelector('[data-ai-id=' + ${JSON.stringify(String(aiId))} + ']');if(!el)return 0;` +
+          `var el=document.querySelector(${JSON.stringify('[data-ai-id="' + String(aiId) + '"]')});if(!el)return 0;` +
           `var ed=el;if(ed.querySelector){var inner=ed.querySelector('[contenteditable=true],input,textarea');if(inner)ed=inner;}` +
           `return String((ed.innerText!=null?ed.innerText:ed.value)||'').trim().length;`
         );
         if (left > 0) {
           await run(
-            `var el=document.querySelector('[data-ai-id=' + ${JSON.stringify(String(aiId))} + ']');if(!el)return false;` +
+            `var el=document.querySelector(${JSON.stringify('[data-ai-id="' + String(aiId) + '"]')});if(!el)return false;` +
             `var ed=el;if(ed.querySelector){var inner=ed.querySelector('[contenteditable=true],input,textarea');if(inner)ed=inner;}` +
             `try{ed.focus();document.execCommand('selectAll');document.execCommand('delete');}catch(e){}return true;`
           );
@@ -1266,6 +1676,15 @@ class PageManager {
       if (!view || !view.webContents || view.webContents.isDestroyed()) return;
       if (policy === 'never') return;
       if (policy === 'always') {
+        // 必须与 _focusWindow 的 always 分支做同样的事：只调 webContents.focus()
+        // **不会**把窗口带到前台（实测 focus 套件的 G2 对照组里 new_tab /
+        // set_active_tab 因此不抢，而 act type/click 抢 —— 同一个 always 策略
+        // 两套行为）。always 的契约就是"每次操作都把窗口带到前台"，这里补齐。
+        try {
+          if (this.window.show) this.window.show();
+          if (this.window.moveTop) this.window.moveTop();
+          if (this.window.focus) this.window.focus();
+        } catch (e) { /* 窗口已销毁 */ }
         view.webContents.focus();
         return;
       }

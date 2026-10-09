@@ -76,6 +76,34 @@ function frontApp() {
 // Electron 应用的进程名就是 "Electron"（未打包时）。
 const isBrowserApp = (name) => /electron|ai-browser/i.test(name || "");
 
+// 锁屏 / 屏保时前台进程是 `loginwindow` —— 那种状态下"谁都不可能抢到焦点"，
+// G1/G3 会**假通过**、G2 对照组会**假失败**（实测：解锁前 focus 30/2、解锁后
+// 32/0，代码一字未改）。测量前提不成立却照样出红/绿，就是一条没意义的测试。
+//
+// 注意 `caffeinate -u -t 1` 只顶 1 秒，跑完一组就重新锁回去了（实测套件中途
+// 又会变回 loginwindow）。所以这里起一个覆盖整个套件时长的后台 caffeinate，
+// 持续声明"用户在场"，中途锁屏就不会发生。
+let KEEP_AWAKE = null;
+function keepAwake(seconds) {
+  if (process.platform !== "darwin") return;
+  try {
+    KEEP_AWAKE = spawn("caffeinate", ["-d", "-u", "-t", String(seconds)], { stdio: "ignore", detached: false });
+    KEEP_AWAKE.unref();
+    KEEP_AWAKE.on("error", () => { KEEP_AWAKE = null; });
+  } catch {
+    KEEP_AWAKE = null;
+  }
+}
+function stopKeepAwake() {
+  try { if (KEEP_AWAKE) KEEP_AWAKE.kill(); } catch { /* 已退出 */ }
+  KEEP_AWAKE = null;
+}
+
+function measurementUnavailable() {
+  const f = frontApp();
+  return !f || /^loginwindow$/i.test(f) || /screensaver/i.test(f);
+}
+
 // 用"计算器"当靶子：它是个普通 GUI app，切到前台后如果被 ai-browser 抢走，
 // 前台名字就会从「计算器」变成 Electron —— 这正是我们要断言的。
 const TARGET_APP = "Calculator";
@@ -306,6 +334,21 @@ async function main() {
     process.exit(0);
   }
 
+  // 锁屏状态下前台永远是 loginwindow，观测无意义。整个套件期间保持"用户在场"
+  // （防止跑到一半又锁回去），再校验一次前提。
+  keepAwake(Math.ceil(GLOBAL_TIMEOUT_MS / 1000) + 60);
+  process.on("exit", stopKeepAwake);
+  await sleep(2000);
+  if (measurementUnavailable()) {
+    stopKeepAwake();
+    console.log("\n⚠️  测量前提不成立：会话不可观测（前台是 loginwindow / 屏保，通常是屏幕已锁定）。");
+    console.log("   此时 G1/G3 会假通过、G2 对照组会假失败 —— 这不是产品缺陷，是测量本身不成立。");
+    console.log("   解锁屏幕后重跑：AI_BROWSER_PORT=<port> npm run focus\n");
+    console.log(`==== focus SKIPPED (measurement unavailable) PASS=${PASS} FAIL=${FAIL} ====`);
+    server.close();
+    process.exit(0);
+  }
+
   // 端口必须是空闲的（默认 9223 很可能被正在跑的 ai-browser 占着）
   try {
     await waitForPort(WS_PORT, 600);
@@ -357,6 +400,7 @@ async function main() {
   if (!calcWasRunning) {
     try { execSync(`pkill -x ${TARGET_APP}`, { stdio: "ignore" }); } catch { /* ignore */ }
   }
+  stopKeepAwake();
   server.close();
   process.exit(FAIL > 0 ? 1 : 0);
 }
