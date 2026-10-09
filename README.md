@@ -102,7 +102,8 @@ or any system prompt; it teaches the tool loop, the token-saving params, and whe
 
 ## The MCP tools
 
-Source of truth: [`src/main/mcp_tools.js`](src/main/mcp_tools.js). There are 15.
+Source of truth: [`src/main/mcp_tools.js`](src/main/mcp_tools.js). There are 13 — a deliberately
+small surface, since every tool schema is injected into your agent's context on every turn.
 
 | Tool | One line |
 |---|---|
@@ -118,8 +119,6 @@ Source of truth: [`src/main/mcp_tools.js`](src/main/mcp_tools.js). There are 15.
 | `browse_close_tab` | Close a tab by id. |
 | `browse_set_active_tab` | Switch which tab subsequent calls act on. |
 | `browse_network` | Chrome-DevTools-style network inspection: `list` (filter by method / URL / status / type), `get` (request + response headers and bodies), `clear`, `configure`. |
-| `browse_network_body` | Legacy: response body of the most recent request matching a URL substring. Superseded by `browse_network`. |
-| `browse_subscribe` | Subscribe to `dom_change` / `network_response` / `captcha_appeared` / `message_appeared` / `js_error` / `state_changed`; `"*"` for all. |
 | `browse_quit` | Shut the whole browser down and release the process. |
 
 Notes that save round-trips:
@@ -186,15 +185,20 @@ MCP is a thin stdio adapter. Anything MCP can do is reachable directly over JSON
 | `ui.scroll` | Scroll page or element (`direction`, `amount`, `target`) | `browse_scroll` |
 | `ui.wait` | Poll until a condition or timeout | `browse_wait` |
 | `ui.new_tab` / `ui.close_tab` / `ui.list_tabs` / `ui.set_active_tab` | Tab management | `browse_*_tab` |
-| `ui.subscribe` / `ui.unsubscribe` | Event subscription; `params.events`, `"*"` for all | `browse_subscribe` |
+| `ui.subscribe` / `ui.unsubscribe` | Event subscription; `params.events`, `"*"` for all | — (WS only — see below) |
 | `ui.get_focused` | The focused element subtree | — |
 | `ui.peek` | Hover a folded/hover-only affordance and return the diff, without committing | — |
-| `ui.network_body` | Response body by URL substring (`url_pattern`) | `browse_network_body` |
+| `ui.network_body` | Response body by URL substring (`url_pattern`) | — (superseded by `browse_network`) |
 | `ui.quit` | Graceful shutdown | `browse_quit` |
 
 Note two differences from the MCP spelling, both visible in the switch above: it is `focusedOnly`
 (camelCase), not `focused_only`; and `ui.act` nests its per-action arguments under `params.params`.
 `ui.subscribe` / `ui.unsubscribe` are also valid as notifications with no `id`.
+
+`ui.subscribe` is deliberately **not** exposed as an MCP tool: MCP's stdio path drops
+server→client notifications, so an MCP caller would subscribe and then never receive a single
+event. Real-time events are a raw-WebSocket capability only. For anything pull-based, use
+`browse_network` instead.
 
 ```js
 import WebSocket from 'ws';

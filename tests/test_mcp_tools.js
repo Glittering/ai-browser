@@ -4,12 +4,21 @@ import { MCP_TOOLS } from '../src/main/mcp_tools.js';
 describe('MCP tool list (token-cost guard)', () => {
   const names = MCP_TOOLS.map((t) => t.name);
 
-  it('keeps exactly 15 tools', () => {
-    // 13 + browse_network（网络抓包聚合）+ browse_canvas（canvas 绘制记录聚合）。
-    // browse_subscribe / browse_network_body 在本主版本保留兼容，下一主版本
+  it('keeps exactly 13 tools', () => {
+    // browse_subscribe 与 browse_network_body 已换出：
+    // - browse_subscribe：MCP 路径收不到 server→client 通知（mcp_ws.js 丢弃无 id
+    //   的推送），订阅对它毫无作用；且网络采集已改为默认开启，它"启动采集"的
+    //   副作用也不再需要。
+    // - browse_network_body：被 browse_network 严格超集替代。
     // 换出后回到 13。工具数每增加 1 都会抬高每轮上下文成本，因此这个数字
     // 必须是**有意**变更，改这里就要说明理由。
-    expect(MCP_TOOLS).toHaveLength(15);
+    expect(MCP_TOOLS).toHaveLength(13);
+  });
+
+  it('换出的两个工具不再出现在 MCP 清单里', () => {
+    // raw WS 层的 ui.subscribe / ui.network_body 仍然保留，只是不再暴露给 MCP
+    expect(names).not.toContain('browse_subscribe');
+    expect(names).not.toContain('browse_network_body');
   });
 
   it('exposes browse_network and nothing else new', () => {
@@ -49,8 +58,6 @@ describe('MCP tool list (token-cost guard)', () => {
 
   it('keeps runtime-exclusive network tools + lifecycle + tab mgmt', () => {
     for (const kept of [
-      'browse_subscribe',
-      'browse_network_body',
       'browse_quit',
       'browse_list_tabs',
       'browse_new_tab',

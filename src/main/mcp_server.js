@@ -222,11 +222,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return { content: [{ type: 'text', text: JSON.stringify(result) }] };
     }
 
-    case 'browse_network_body': {
-      const result = await wsClient.call('ui.network_body', { url_pattern: args.url_pattern, tab: args.tab });
-      return { content: [{ type: 'text', text: JSON.stringify(result) }] };
-    }
-
     case 'browse_canvas': {
       const op = args.operation;
       if (op === 'list') {
@@ -264,11 +259,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
       throw new Error('browse_canvas: unknown operation ' + String(op));
-    }
-
-    case 'browse_subscribe': {
-      const result = await wsClient.call('ui.subscribe', { events: args.events || [] });
-      return { content: [{ type: 'text', text: JSON.stringify(result) }] };
     }
 
     case 'browse_quit': {

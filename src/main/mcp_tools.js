@@ -179,33 +179,6 @@ export const MCP_TOOLS = [
     }
   },
   {
-    name: 'browse_network_body',
-    description: 'Return the response body of a completed request whose URL contains the pattern (requires prior subscription).',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        url_pattern: { type: 'string', description: 'Substring to match in the request URL.' },
-        tab: { type: 'integer', description: 'Tab id (default: active tab).' }
-      },
-      required: ['url_pattern']
-    }
-  },
-  {
-    name: 'browse_subscribe',
-    description: 'Subscribe to page events (dom_change, network_response, captcha_appeared, message_appeared, js_error, state_changed). "*" for all.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        events: {
-          type: 'array',
-          items: { type: 'string' },
-          description: 'Event names to subscribe to.'
-        }
-      },
-      required: ['events']
-    }
-  },
-  {
     name: 'browse_quit',
     description: 'Gracefully shut down the AI Browser (releases resources).',
     inputSchema: { type: 'object', properties: {} }

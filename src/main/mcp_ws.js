@@ -3,7 +3,8 @@
 // incrementing ids routed through an id -> resolver map, so concurrent calls
 // on the same connection resolve to the correct response. Server-side event
 // notifications (broadcast with no jsonrpc id) are dropped: the MCP surface is
-// request/response, matching the pre-existing behavior of browse_subscribe
+// request/response only (server→client notifications are dropped here, which is
+// why live-push tools are not exposed over MCP — see below)
 // (enables CDP monitors + network-body cache; does not stream live events).
 //
 // #5: robust auto-reconnect — when the connection drops (Electron relaunch /
