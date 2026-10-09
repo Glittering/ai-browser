@@ -1310,14 +1310,8 @@ guard.track(child);
   await sleep(700);
   const contText = String(await ev("(function(){return document.getElementById('topicEditor').innerText;})()", chTab) || "");
   const keptBoth = contText.indexOf("今日天气") >= 0 && contText.indexOf("继续写正文") >= 0;
-  check("E-26 话题插入后继续输入正文 —— ui.act type 为「全量替换」语义，话题被清掉（边界事实）",
-    keptBoth === false, "act=" + JSON.stringify(contAct && contAct.result) + " text=" + JSON.stringify(contText));
-  if (!keptBoth) {
-    defect("P1", "E/富文本续写",
-      "ui.act type/setContent 走 _inputViaCdp(page_manager.js:773-781)，每次都先 selectAll + 受信 Delete "
-      + "清空再逐字键入 —— 语义是「整篇替换」而非「光标处追加」。因此'插入话题标签后继续输入正文'"
-      + "这类增量编辑会被整体覆盖。agent 要续写只能自己 evaluate 追加（E-27 验证可行）。");
-  }
+  check("E-26 话题插入后继续输入正文 —— type 为追加语义，话题与正文都在",
+    keptBoth === true, "act=" + JSON.stringify(contAct && contAct.result) + " text=" + JSON.stringify(contText));
   // 兜底：evaluate 追加
   await clearInto(chTab, "topicEditor");
   await sleep(300);

@@ -425,7 +425,19 @@ class PageManager {
         // innerHTML="" 只对顶层元素生效；OOPIF 子帧元素 querySelector 命中不到，
         // clear 会静默落空。路由到这里后 OOPIF 走 _clearInFrame(execCommand
         // selectAll+delete)，顶层走 _selectAllFallback+受信 Delete，均带校验。
-        const r = await this._inputViaCdp(view, target, action === 'clear' ? '' : (params.text || ''), tid);
+        // 语义分工（此前 type 与 setContent 完全等价，都是整篇替换 —— 插入话题
+        // 标签后再输入正文会把标签清掉，无法续写）：
+        //   type       = 在光标处追加（默认末尾），不碰已有内容
+        //   setContent = 整篇替换（全选 → 删除 → 输入）
+        //   clear      = 全选删除
+        // 想重填一个输入框请显式 setContent（或先 clear 再 type）。
+        const r = await this._inputViaCdp(
+          view,
+          target,
+          action === 'clear' ? '' : (params.text || ''),
+          tid,
+          { replace: action !== 'type', at: params.at || 'end' }
+        );
         if (r) return r;
       } catch (e) { /* fall through to preload */ }
     } else if (action === 'upload') {
@@ -831,7 +843,7 @@ class PageManager {
   // 携带 text），等价真实键盘输入，编辑器会应用当前行内样式（加粗/斜体）；
   // Input.insertText 是 IME 插入路径，会丢失行内样式。
   // 不识别编辑器框架；失败返回错误，由 agent 重读重试。
-  async _inputViaCdp(view, aiId, text, tabId) {
+  async _inputViaCdp(view, aiId, text, tabId, opts = {}) {
     if (!this._canCdp(view)) return null;
     const owning = /^axf-/.test(aiId) ? await this._owningFrame(view, aiId) : null;
     const inFrame = !!owning;
@@ -904,20 +916,59 @@ class PageManager {
     // 删除(受信 Delete 前是 DOM-Range 选区,部分富文本编辑器不把这些选区同步进自身
     // EditorState,Delete 落空→clear 无效),改为在所属帧内 execCommand selectAll+delete,
     // 走编辑器原生选区/删除链路,B站 read-editor 验证可被清到空。顶层路径行为不变。
-    const cleared = inFrame
-      ? await this._clearInFrame(owning, aiId)
-      : await (async () => {
-          await this._selectAllFallback(view, aiId, tabId, null);
-          await new Promise((r) => setTimeout(r, 120)); // 等选区同步进框架状态
-          await this._cdpKey(send, { key: 'Delete', code: 'Delete', vk: 46, mod: 0 });
-          await new Promise((r) => setTimeout(r, 80)); // 等删除后的空状态提交
-          return true;
-        })();
-    if (!cleared && text) {
-      // 清空失败但目标非空：先不空转，仍尝试继续键入（若编辑器未清空，键入会拼接而非替换）。
-      await this._cdpKey(send, { key: 'Delete', code: 'Delete', vk: 46, mod: 0 });
+    // 追加模式（type）：不清空，只把光标放到指定位置 —— 这样"插入话题标签后
+    // 继续写正文"才成立。at: 'end' | 'start' | 'cursor'（cursor 表示不干预）。
+    const replace = opts.replace !== false;
+    if (!replace) {
+      const at = opts.at === 'start' || opts.at === 'cursor' ? opts.at : 'end';
+      if (at !== 'cursor') {
+        await run(
+          `var el=document.querySelector('[data-ai-id=' + ${JSON.stringify(String(aiId))} + ']');if(!el)return false;` +
+          `var ed=el;if(ed.querySelector){var inner=ed.querySelector('[contenteditable=true],input,textarea');if(inner)ed=inner;}` +
+          `if(ed.tagName==='INPUT'||ed.tagName==='TEXTAREA'){var L=(ed.value||'').length;` +
+          `var p=(${JSON.stringify(at)}==='start')?0:L;try{ed.setSelectionRange(p,p);}catch(e){}return true;}` +
+          `if(ed.contentEditable!=='true')return false;` +
+          `try{var r=document.createRange();r.selectNodeContents(ed);` +
+          `r.collapse(${JSON.stringify(at)}==='start');` +
+          `var s=window.getSelection();s.removeAllRanges();s.addRange(r);return true;}catch(e){return false;}`
+        );
+        await new Promise((r) => setTimeout(r, 80)); // 等光标位置同步进编辑器状态
+      }
+    } else {
+      const cleared = inFrame
+        ? await this._clearInFrame(owning, aiId)
+        : await (async () => {
+            await this._selectAllFallback(view, aiId, tabId, null);
+            await new Promise((r) => setTimeout(r, 120)); // 等选区同步进框架状态
+            await this._cdpKey(send, { key: 'Delete', code: 'Delete', vk: 46, mod: 0 });
+            await new Promise((r) => setTimeout(r, 80)); // 等删除后的空状态提交
+            return true;
+          })();
+      if (!cleared && text) {
+        // 清空失败但目标非空：先不空转，仍尝试继续键入（若编辑器未清空，键入会拼接而非替换）。
+        await this._cdpKey(send, { key: 'Delete', code: 'Delete', vk: 46, mod: 0 });
+      }
+      if (!text) {
+        // selectAll + 受信 Delete 对**多块内容**可能清不干净。此前每段都被
+        // type 整篇替换掉所以没暴露；type 改为追加语义后编辑器会累积多段，
+        // 实测残留 "第一段<div>第二段</div><h2>第三段</h2>"。因此清完校验一次，
+        // 仍有文本就换编辑器原生 selectAll+delete 再清一遍。
+        const left = await run(
+          `var el=document.querySelector('[data-ai-id=' + ${JSON.stringify(String(aiId))} + ']');if(!el)return 0;` +
+          `var ed=el;if(ed.querySelector){var inner=ed.querySelector('[contenteditable=true],input,textarea');if(inner)ed=inner;}` +
+          `return String((ed.innerText!=null?ed.innerText:ed.value)||'').trim().length;`
+        );
+        if (left > 0) {
+          await run(
+            `var el=document.querySelector('[data-ai-id=' + ${JSON.stringify(String(aiId))} + ']');if(!el)return false;` +
+            `var ed=el;if(ed.querySelector){var inner=ed.querySelector('[contenteditable=true],input,textarea');if(inner)ed=inner;}` +
+            `try{ed.focus();document.execCommand('selectAll');document.execCommand('delete');}catch(e){}return true;`
+          );
+          await new Promise((r) => setTimeout(r, 150)); // 等编辑器状态提交
+        }
+        await stripEmptyShells();
+      }
     }
-    if (!text) await stripEmptyShells();
     const paras = String(text == null ? '' : text).split('\n');
     // 段落内容快照：用来判断"这一下 Enter 到底有没有生效"。
     const snap = () => run(

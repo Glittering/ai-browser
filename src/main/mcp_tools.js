@@ -32,7 +32,7 @@ export const MCP_TOOLS = [
   },
   {
     name: 'browse_act',
-    description: 'Act on an element by data-ai-id: click, type, clear, select, focus, hover, scroll_to, upload, get_value (read a truncated node.value in full; read-only).',
+    description: 'Act on an element by data-ai-id. type = append at caret; setContent = replace all; clear = empty. Also click, focus, hover, scroll_to, upload, get_value (read-only).',
     inputSchema: {
       type: 'object',
       properties: {

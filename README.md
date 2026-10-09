@@ -109,7 +109,7 @@ small surface, since every tool schema is injected into your agent's context on 
 |---|---|
 | `browse_navigate` | Load a URL in the active (or given) tab. |
 | `browse_get_tree` | Read the page as a semantic tree + page context (modals, messages, stats). |
-| `browse_act` | `click` / `type` / `clear` / `focus` / `hover` / `scroll_to` / `upload` / `get_value` on a `data-ai-id`. |
+| `browse_act` | `click` / `type` / `setContent` / `clear` / `focus` / `hover` / `scroll_to` / `upload` / `get_value` on a `data-ai-id`. |
 | `browse_canvas` | Read `<canvas>` through captured draw calls: `list` / `read` / `configure` / `capture`. **Experimental — see the canvas section below.** |
 | `browse_evaluate` | Run a JS *expression* in page context (5000-char cap, Node identifiers rejected). |
 | `browse_scroll` | Scroll the page, or scroll an element into view. |
@@ -126,6 +126,11 @@ Notes that save round-trips:
 - `browse_get_tree` accepts `subset: "interactive"` to drop layout-only branches, `mode: "diff"` to
   return only nodes that appeared/disappeared since the last read, and `ax: true` to read through the
   accessibility layer (links then carry `url`).
+- **`type` appends; `setContent` replaces.** They used to be identical (both replaced the whole
+  content), which made incremental editing impossible — insert a Weibo-style topic tag and the next
+  `type` wiped it. Now `type` writes at the caret (`params.at`: `end` (default) / `start` /
+  `cursor`), so "insert a topic, then keep writing the body" works. To refill a field, use
+  `setContent` (or `clear` first).
 - `browse_act` also takes `action: "get_value"` — a **read-only** way to fetch an element's full text,
   which matters because `browse_get_tree` truncates long values at 200 characters (see below).
 - `browse_network` captures requests from the moment a tab opens, **including POST request bodies** —

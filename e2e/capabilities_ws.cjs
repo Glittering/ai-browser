@@ -175,6 +175,8 @@ guard.track(child);
   const domVal = (tab, id) => ev(`document.getElementById(${JSON.stringify(id)}).value`, tab);
   const domText = (tab, id) => ev(`document.getElementById(${JSON.stringify(id)}).innerText`, tab);
   const typeInto = (tab, id, text) => b.call("ui.act", { action: "type", target: id, params: { text }, tab });
+// type = 在光标处追加（默认末尾）；setContent = 整篇替换。语义分工见 README。
+const setContentInto = (tab, id, text) => b.call("ui.act", { action: "setContent", target: id, params: { text }, tab });
   const clearInto = (tab, id) => b.call("ui.act", { action: "clear", target: id, tab });
 
   // =======================================================================
@@ -192,12 +194,20 @@ guard.track(child);
   check("A-02 input[type=text] 英文写入 → 真实 DOM value 一致", (await domVal(capTab, "txt")) === EN, JSON.stringify(await domVal(capTab, "txt")));
 
   const CN = "你好世界";
-  await typeInto(capTab, "txt", CN);
+  await setContentInto(capTab, "txt", CN);
   await sleep(300);
   const a3 = await treeVal(capTab, "txt");
   check("A-03 input[type=text] 中文写入 → tree.value 读回", a3 === CN, JSON.stringify(a3));
   const a4 = await domVal(capTab, "txt");
   check("A-04 input[type=text] 中文写入 → 真实 DOM value 一致", a4 === CN, JSON.stringify(a4));
+  // type 是**追加**语义（不是替换）—— 这是"插入话题后继续写正文"能成立的前提
+  await typeInto(capTab, "txt", "-APPEND");
+  await sleep(300);
+  const a4b = await domVal(capTab, "txt");
+  check("A-04b ui.act type 为追加语义（保留原内容并在末尾续写）",
+    a4b === CN + "-APPEND", JSON.stringify(a4b));
+  await setContentInto(capTab, "txt", "");
+  await sleep(200);
 
   await clearInto(capTab, "txt");
   await sleep(300);
@@ -257,7 +267,7 @@ guard.track(child);
 
   const LONG_TEXT = Array.from({ length: 1000 }, (_, i) => "abcdefghijklmnopqrstuvwxyz"[i % 26]).join("");
   const tLong0 = Date.now();
-  await typeInto(capTab, "ta", LONG_TEXT);
+  await setContentInto(capTab, "ta", LONG_TEXT);
   await sleep(500);
   console.log("  [timing] 1000 字符逐字符键入耗时 " + (Date.now() - tLong0) + "ms");
   const a15 = String(await domVal(capTab, "ta") || "");
