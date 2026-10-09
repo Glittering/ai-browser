@@ -161,6 +161,24 @@ export const MCP_TOOLS = [
     }
   },
   {
+    name: 'browse_canvas',
+    description: 'Read <canvas> through captured draw calls (not pixels): list canvases, read texts/regions, configure, or capture a PNG fallback. 2D canvas text comes from fillText, so no OCR needed; WebGL is opaque.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        operation: { type: 'string', enum: ['list', 'read', 'configure', 'capture'], description: 'Operation.' },
+        tab: { type: 'integer', description: 'Tab id (default: active tab).' },
+        canvas_id: { type: 'string', description: 'read/capture: id from list.' },
+        view: { type: 'string', enum: ['summary', 'calls'], description: 'read: summary (default) or raw draw calls.' },
+        since_seq: { type: 'integer', description: 'read: cursor from pagination.next_seq.' },
+        limit: { type: 'integer', description: 'read: page size (default 200, max 1000).' },
+        mode: { type: 'string', enum: ['off', 'semantic', 'trace'], description: 'configure: recording mode.' },
+        clear: { type: 'boolean', description: 'configure: drop retained calls.' }
+      },
+      required: ['operation']
+    }
+  },
+  {
     name: 'browse_network_body',
     description: 'Return the response body of a completed request whose URL contains the pattern (requires prior subscription).',
     inputSchema: {

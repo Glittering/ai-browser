@@ -5,9 +5,14 @@ import { ipcMain, BrowserView } from 'electron';
 import { config } from '../shared/config.js';
 import axExtractor from './axExtractor.js';
 import { NetworkMonitor, MAX_POST_DATA_SIZE } from './network_monitor.js';
+import { CanvasMonitor, isCanvasHookEnabled } from './canvas_monitor.js';
+import { buildCanvasHookSource } from './canvas_hook_source.js';
 import valueContract from '../shared/value_contract.cjs';
 
 const { expandValueFetchTree } = valueContract;
+
+// canvas 绘制调用记录：默认开。关闭开关 AI_BROWSER_CANVAS_HOOK=0。
+const CANVAS_BRIDGE_KEY = '__aiCanvasBridge';
 
 // 网络抓包默认开：只在有订阅时才启用会导致首屏/导航阶段的请求全丢（POST body、
 // 请求头都拿不到）。关闭开关：AI_BROWSER_NETWORK_CAPTURE=0。
@@ -27,6 +32,8 @@ class PageManager {
     this._axDiffCache = new Map();  // tabId -> lite interactive snapshot (get_tree {mode:'diff'})
     this._revertTimers = new Map(); // tabId -> 挂起的 ui.peek 自动回撤定时器（新 peek 会取消它）
     this.networkMonitor = new NetworkMonitor({}, { captureEnabled: NETWORK_CAPTURE_DEFAULT });
+    this.canvasMonitor = new CanvasMonitor();
+    this._canvasBindings = new Map(); // bindingName -> tabId（hook 回传时据此归 tab）
     this._setupIPC();
   }
 
@@ -1071,11 +1078,26 @@ class PageManager {
       return { action: 'deny' };
     });
 
-    if (url) {
-      view.webContents.loadURL(url);
-    }
     // setActive handles addBrowserView + layout — don't add twice
     this.setActive(tabId);
+
+    // canvas 绘制记录必须在**首个真实导航之前**装好，否则页面早画完了什么都录不到。
+    // 但它又必须在 setActive 之后：BrowserView 还没被加进窗口时，debugger 通道
+    // 不响应（实测 Runtime.enable 直接挂死）。
+    // newTab 仍同步返回 tabId（调用方依赖），导航推迟到 hook 装完；安装失败或超时
+    // 也照常导航 —— 绝不能因为要录 canvas 就把 tab 卡死。
+    // hook 关闭时（当前默认）走原来的同步导航：把导航推迟成异步会引入时序抖动
+    // （实测 richtext 偶发 110/111），这个代价不值得为一个未验证通过的功能付。
+    if (isCanvasHookEnabled(process.env.AI_BROWSER_CANVAS_HOOK)) {
+      if (url) {
+        const navigate = () => { try { view.webContents.loadURL(url); } catch (e) {} };
+        this._ensureCanvasHook(tabId, view).then(navigate, navigate);
+      } else {
+        this._ensureCanvasHook(tabId, view).catch(() => false);
+      }
+    } else if (url) {
+      view.webContents.loadURL(url);
+    }
 
     // Force repaint after load — BrowserView content can be loaded but not
     // painted by the compositor. Remove + re-add forces a full repaint.
@@ -1248,6 +1270,163 @@ class PageManager {
   _runtimeSubscribers = new Set(); // sessionIds currently using js_error events
 
   // Attach the shared per-tab debugger if needed and enable a CDP domain.
+  // ---- canvas 绘制调用记录 ----
+  //
+  // 必须在首个真实导航**之前**注入：canvas 是有状态的立即模式 API，页面加载时
+  // 就把内容画完了，之后再注入什么都录不到。
+  //
+  // 两个关键点：
+  // 1. Page.addScriptToEvaluateOnNewDocument **不传 worldName** 才进页面 main world。
+  //    contextIsolation:true 下 preload 活在 isolated world，改自己 world 的原型
+  //    截不到页面代码的调用。
+  // 2. 用 Runtime.addBinding 安装上报通道（binding 名每 tab 随机，避免跨 tab 串台），
+  //    回传在 CDP 的 Runtime.bindingCalled 里收取。
+  async _ensureCanvasHook(tabId, view) {
+    if (!isCanvasHookEnabled(process.env.AI_BROWSER_CANVAS_HOOK)) {
+      this.canvasMonitor.markHook(tabId, false, ['canvas hook disabled via AI_BROWSER_CANVAS_HOOK']);
+      return false;
+    }
+    // 验证阶段的等待要短：新 tab 上 evaluate 也可能不返回，不能因此把导航卡住。
+    const timedOut = new Promise((r) => setTimeout(() => r(null), 3000));
+    try {
+      // 只借用 _ensureCdp 做 attach（它同时会发一次 Page.enable，不 await）。
+      // 这里**不再**预发 Runtime.enable：重复发送会让后面 await 的那一条
+      // 拿不到响应而挂死（实测）。域启用统一交给下面的 step() 显式 await。
+      this._ensureCdp(tabId, view, 'Page');
+      const dbg = view && view.webContents && view.webContents.debugger;
+      if (!dbg || typeof dbg.isAttached !== 'function' || !dbg.isAttached()) {
+        this.canvasMonitor.markHook(tabId, false, ['cdp debugger not attached']);
+        return false;
+      }
+      const bindingName = `__aiCanvasReport_${tabId}_${Math.random().toString(36).slice(2, 8)}`;
+      const source = buildCanvasHookSource({
+        bindingName,
+        bridgeKey: CANVAS_BRIDGE_KEY,
+        mode: 'semantic',
+      });
+
+      // ⚠️ 实测结论：在**刚创建的 BrowserView** 上，await dbg.sendCommand('Runtime.enable')
+      // 永远不返回（试过 20 秒、8 次重试，全部挂死），而同样"发了不等"的
+      // Network.enable 却是生效的。也就是说：命令能送达，但响应在这个阶段回不来。
+      // 因此这里一律 **fire-and-forget**，改用 Runtime.evaluate 去**验证**是否真的装上。
+      const fire = (method, params) => {
+        try {
+          const p = dbg.sendCommand(method, params);
+          if (p && typeof p.catch === 'function') p.catch(() => {});
+        } catch (e) { /* 单次失败不影响后续 */ }
+      };
+      fire('Runtime.enable', {});
+      fire('Page.enable', {});
+      fire('Runtime.addBinding', { name: bindingName });
+      // 对**后续**导航生效（这才是拿到完整绘制历史的正路）
+      fire('Page.addScriptToEvaluateOnNewDocument', { source });
+      // 对**已经加载过**的当前页面生效（补上首屏没抓到的那部分）
+      fire('Runtime.evaluate', { expression: source, awaitPromise: false });
+
+      this._canvasBindings.set(bindingName, tabId);
+
+      // 验证：evaluate 的响应在页面存活后是能拿到的
+      const probeExpr = `typeof window[${JSON.stringify(CANVAS_BRIDGE_KEY)}]`;
+      const verdict = await Promise.race([
+        (async () => {
+          try {
+            const r = await dbg.sendCommand('Runtime.evaluate', {
+              expression: probeExpr, returnByValue: true,
+            });
+            const v = r && r.result && r.result.value;
+            return v === 'object';
+          } catch (e) {
+            return false;
+          }
+        })(),
+        timedOut,
+      ]);
+      const ok = verdict === true;
+      this.canvasMonitor.markHook(
+        tabId,
+        ok,
+        ok ? [] : ['hook 命令已发出但页面内未生效（可能需要重载页面才能注入）']
+      );
+      return ok;
+    } catch (e) {
+      this.canvasMonitor.markHook(tabId, false, [`canvas hook install failed: ${(e && e.message) || e}`]);
+      return false;
+    }
+  }
+
+  _canvasTab(tabId) {
+    return tabId !== undefined ? tabId : this.activeTab;
+  }
+
+  canvasList(tabId) {
+    return this.canvasMonitor.list(this._canvasTab(tabId));
+  }
+
+  canvasRead(tabId, opts = {}) {
+    return this.canvasMonitor.read(this._canvasTab(tabId), opts || {});
+  }
+
+  async canvasConfigure(tabId, opts = {}) {
+    const tid = this._canvasTab(tabId);
+    const mode = this.canvasMonitor.setMode(tid, opts.mode);
+    if (opts.clear) this.canvasMonitor.clear(tid);
+    const view = this._getView(tid);
+    if (view) {
+      await this._ensureCanvasHook(tid, view);
+      // 只有调用方显式要求才重载：hook 对"安装之前已经画完"的内容无能为力，
+      // 重载是唯一能拿到完整绘制历史的办法 —— 但它会丢掉用户当前状态，
+      // 所以绝不默认做。
+      if (opts.reload === true) {
+        try { view.webContents.reload(); } catch (e) {}
+      }
+    }
+    const st = this.canvasMonitor.list(tid);
+    return {
+      mode,
+      hook_installed: st.hook_installed,
+      // hook 只对安装之后的绘制生效；安装前已经画完的内容拿不回来。
+      effective: 'immediate_future_calls',
+      past_content_recovered: false,
+      reload_required_for_complete_history: !st.hook_installed,
+      retention: st.retention,
+      warnings: st.warnings,
+    };
+  }
+
+  // 截图兜底：只在语义层读不懂（WebGL/纯像素）时由调用方显式触发。
+  // 默认关闭语义由调用方控制；这里只提供能力并明确警告它会消耗视觉 token。
+  async canvasCapture(tabId, canvasId) {
+    const tid = this._canvasTab(tabId);
+    const view = this._getView(tid);
+    if (!view) return null;
+    const dbg = view.webContents && view.webContents.debugger;
+    if (!dbg || typeof dbg.isAttached !== 'function' || !dbg.isAttached()) return null;
+    const rect = await this.evaluate(
+      `(function(id){var els=document.querySelectorAll('canvas');` +
+      `for(var i=0;i<els.length;i++){var e=els[i];` +
+      `if(e.__aiCanvasId===id||e.id===id){var r=e.getBoundingClientRect();` +
+      `return {x:Math.round(r.x),y:Math.round(r.y),width:Math.round(r.width),height:Math.round(r.height)};}}` +
+      `return null;})(${JSON.stringify(String(canvasId || ''))})`,
+      tid
+    );
+    if (!rect || !rect.width || !rect.height) return null;
+    try {
+      const res = await dbg.sendCommand('Page.captureScreenshot', {
+        format: 'png',
+        clip: { x: rect.x, y: rect.y, width: rect.width, height: rect.height, scale: 1 },
+      });
+      return {
+        mime_type: 'image/png',
+        data_base64: (res && res.data) || null,
+        width: rect.width,
+        height: rect.height,
+        warning: 'visual fallback; consumes caller visual tokens',
+      };
+    } catch (e) {
+      return null;
+    }
+  }
+
   _ensureCdp(tabId, view, domain) {
     try {
       const wc = view.webContents;
@@ -1345,6 +1524,16 @@ class PageManager {
     // network_monitor；旧的网络事件推送行为保持不变。
     if (typeof method === 'string' && method.indexOf('Network.') === 0) {
       this._onNetworkCdpMessage(tabId, method, params);
+      return;
+    }
+    if (method === 'Runtime.bindingCalled') {
+      // canvas hook 的上报通道。binding 名每 tab 随机，据此把载荷归到正确的 tab。
+      const owner = this._canvasBindings.get(params && params.name);
+      if (owner !== undefined && params && typeof params.payload === 'string') {
+        try {
+          this.canvasMonitor.ingest(owner, JSON.parse(params.payload));
+        } catch (e) { /* 坏载荷不该影响页面，也不该冒到上层 */ }
+      }
       return;
     }
     if (method === 'Runtime.exceptionThrown') {

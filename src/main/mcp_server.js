@@ -227,6 +227,45 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return { content: [{ type: 'text', text: JSON.stringify(result) }] };
     }
 
+    case 'browse_canvas': {
+      const op = args.operation;
+      if (op === 'list') {
+        const result = await wsClient.call('ui.canvas_list', { tab: args.tab });
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      }
+      if (op === 'read') {
+        const result = await wsClient.call('ui.canvas_read', {
+          tab: args.tab,
+          canvas_id: args.canvas_id,
+          view: args.view,
+          since_seq: args.since_seq,
+          limit: args.limit,
+        });
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      }
+      if (op === 'configure') {
+        const result = await wsClient.call('ui.canvas_configure', {
+          tab: args.tab, mode: args.mode, clear: args.clear,
+        });
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      }
+      if (op === 'capture') {
+        // 视觉兜底：会消耗调用方的视觉 token，因此只在语义层读不懂时用。
+        const result = await wsClient.call('ui.canvas_capture', { tab: args.tab, canvas_id: args.canvas_id });
+        const data = result && result.data_base64;
+        if (!data) {
+          return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+        }
+        return {
+          content: [
+            { type: 'text', text: JSON.stringify({ ...result, data_base64: undefined }) },
+            { type: 'image', data, mimeType: result.mime_type || 'image/png' },
+          ],
+        };
+      }
+      throw new Error('browse_canvas: unknown operation ' + String(op));
+    }
+
     case 'browse_subscribe': {
       const result = await wsClient.call('ui.subscribe', { events: args.events || [] });
       return { content: [{ type: 'text', text: JSON.stringify(result) }] };

@@ -4,16 +4,25 @@ import { MCP_TOOLS } from '../src/main/mcp_tools.js';
 describe('MCP tool list (token-cost guard)', () => {
   const names = MCP_TOOLS.map((t) => t.name);
 
-  it('keeps exactly 14 tools', () => {
-    // 13 + browse_network（网络抓包聚合工具）。browse_subscribe /
-    // browse_network_body 在本主版本保留兼容，下一主版本换出后回到 13。
-    expect(MCP_TOOLS).toHaveLength(14);
+  it('keeps exactly 15 tools', () => {
+    // 13 + browse_network（网络抓包聚合）+ browse_canvas（canvas 绘制记录聚合）。
+    // browse_subscribe / browse_network_body 在本主版本保留兼容，下一主版本
+    // 换出后回到 13。工具数每增加 1 都会抬高每轮上下文成本，因此这个数字
+    // 必须是**有意**变更，改这里就要说明理由。
+    expect(MCP_TOOLS).toHaveLength(15);
   });
 
   it('exposes browse_network and nothing else new', () => {
     expect(names).toContain('browse_network');
     const op = MCP_TOOLS.find((t) => t.name === 'browse_network');
     expect(op.inputSchema.properties.operation.enum).toEqual(['list', 'get', 'clear', 'configure']);
+    expect(op.inputSchema.required).toEqual(['operation']);
+  });
+
+  it('exposes browse_canvas with list/read/configure/capture', () => {
+    expect(names).toContain('browse_canvas');
+    const op = MCP_TOOLS.find((t) => t.name === 'browse_canvas');
+    expect(op.inputSchema.properties.operation.enum).toEqual(['list', 'read', 'configure', 'capture']);
     expect(op.inputSchema.required).toEqual(['operation']);
   });
 

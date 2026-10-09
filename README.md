@@ -102,14 +102,14 @@ or any system prompt; it teaches the tool loop, the token-saving params, and whe
 
 ## The MCP tools
 
-Source of truth: [`src/main/mcp_tools.js`](src/main/mcp_tools.js). There are 14 today;
-`browse_canvas` is landing next, bringing it to 15.
+Source of truth: [`src/main/mcp_tools.js`](src/main/mcp_tools.js). There are 15.
 
 | Tool | One line |
 |---|---|
 | `browse_navigate` | Load a URL in the active (or given) tab. |
 | `browse_get_tree` | Read the page as a semantic tree + page context (modals, messages, stats). |
-| `browse_act` | `click` / `type` / `clear` / `focus` / `hover` / `scroll_to` / `upload` on a `data-ai-id`. |
+| `browse_act` | `click` / `type` / `clear` / `focus` / `hover` / `scroll_to` / `upload` / `get_value` on a `data-ai-id`. |
+| `browse_canvas` | Read `<canvas>` through captured draw calls: `list` / `read` / `configure` / `capture`. **Experimental — see the canvas section below.** |
 | `browse_evaluate` | Run a JS *expression* in page context (5000-char cap, Node identifiers rejected). |
 | `browse_scroll` | Scroll the page, or scroll an element into view. |
 | `browse_wait` | Poll until `button_enabled` / `modal_appeared` / `text_contains` / `url_contains`. |
@@ -338,7 +338,7 @@ npm run capabilities # text fields, canvas, page source, network, DOM editing �
 npm run richtext     # rich-text editors, nested menus, forms, errors, tags, upload — 111 checks
 npm run network      # request log, POST bodies, headers, pagination, redaction — 41 checks
 npm run value        # value truncation contract + read-only get_value — 15 checks
-npm run canvas       # canvas draw-call capture — see below
+npm run canvas       # canvas draw-call capture — EXPERIMENTAL, see below
 npm run realsites    # navigate/read/act against a matrix of real sites
 ```
 
@@ -382,6 +382,27 @@ the page through `ui.evaluate`.
 
 **`npm run network`** — that a POST can be captured with its full request body, that headers are
 redacted by default, and that bodies paginate instead of being silently truncated.
+
+### Canvas: implemented, but not yet working end-to-end
+
+The semantic tree still reports a `<canvas>` as `role: canvas` and nothing more. The new
+`browse_canvas` path is meant to fix that properly — **not by taking a screenshot, but by
+recording the draw calls themselves.** A canvas is drawn by code, so the code already knows what
+it drew: `fillText` hands us the literal string, so text inside a canvas needs no OCR at all.
+That is the right shape for this project.
+
+**It does not work yet.** The recorder is injected into the page's main world via
+`Page.addScriptToEvaluateOnNewDocument` (with no `worldName` — under `contextIsolation` the
+preload's isolated world cannot intercept page calls). In testing, the CDP `Runtime` / `Page`
+commands never take effect on a `BrowserView` in this Electron build, so the hook never lands in
+the page. Canvas capture is therefore **off by default** and needs an explicit
+`AI_BROWSER_CANVAS_HOOK=1`; `npm run canvas` reports the hook as inactive rather than pretending
+it captured anything.
+
+Two things are true regardless: WebGL canvases will never yield business meaning (vertices,
+textures and shaders are not reversible, and text is usually a glyph atlas), so they must stay
+marked `opaque`. And `capture` is a deliberate visual fallback for exactly that case — off by
+default, explicitly invoked, and it costs *your* agent's vision tokens.
 
 ### Boundaries worth knowing before you rely on them
 

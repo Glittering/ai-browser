@@ -131,6 +131,39 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
             send({ jsonrpc: '2.0', id, result: { ok: true } });
             break;
           }
+          // === ui.canvas_* — canvas 绘制调用记录（语义层，非像素） ===
+          case 'ui.canvas_configure': {
+            // canvasConfigure 是 async（可能触发 hook 安装与按要求的重载），必须 await
+            const result = await pageManager.canvasConfigure(tabId, {
+              mode: params.mode,
+              clear: params.clear === true,
+              reload: params.reload === true,
+            });
+            send({ jsonrpc: '2.0', id, result });
+            break;
+          }
+          case 'ui.canvas_list': {
+            const result = pageManager.canvasList(tabId);
+            send({ jsonrpc: '2.0', id, result });
+            break;
+          }
+          case 'ui.canvas_read': {
+            const result = pageManager.canvasRead(tabId, {
+              canvasId: params.canvas_id,
+              view: params.view,
+              sinceSeq: params.since_seq,
+              limit: params.limit,
+            });
+            send({ jsonrpc: '2.0', id, result });
+            break;
+          }
+          case 'ui.canvas_capture': {
+            // 视觉兜底：默认不该被调用。只在语义层读不懂（WebGL / 纯像素 canvas）
+            // 时由调用方显式触发；会消耗调用方的视觉 token。
+            const result = await pageManager.canvasCapture(tabId, params.canvas_id);
+            send({ jsonrpc: '2.0', id, result: result || { error: 'canvas not found or capture failed' } });
+            break;
+          }
           case 'ui.get_focused': {
             const result = await pageManager.getFocused(tabId);
             send({ jsonrpc: '2.0', id, result });
