@@ -1089,11 +1089,13 @@ class PageManager {
     // hook 关闭时（当前默认）走原来的同步导航：把导航推迟成异步会引入时序抖动
     // （实测 richtext 偶发 110/111），这个代价不值得为一个未验证通过的功能付。
     if (isCanvasHookEnabled(process.env.AI_BROWSER_CANVAS_HOOK)) {
+      // CDP 的 await 命令在页面加载**之后**才可用（刚创建的 tab 上会挂死），
+      // 所以装 hook 的时机放在首次加载完成。代价是首屏已经画完的内容拿不回来
+      // （configure({reload:true}) 可以补齐）。
+      const install = () => { this._ensureCanvasHook(tabId, view).catch(() => false); };
+      view.webContents.once('did-finish-load', install);
       if (url) {
-        const navigate = () => { try { view.webContents.loadURL(url); } catch (e) {} };
-        this._ensureCanvasHook(tabId, view).then(navigate, navigate);
-      } else {
-        this._ensureCanvasHook(tabId, view).catch(() => false);
+        view.webContents.loadURL(url);
       }
     } else if (url) {
       view.webContents.loadURL(url);
@@ -1286,12 +1288,9 @@ class PageManager {
       this.canvasMonitor.markHook(tabId, false, ['canvas hook disabled via AI_BROWSER_CANVAS_HOOK']);
       return false;
     }
-    // 验证阶段的等待要短：新 tab 上 evaluate 也可能不返回，不能因此把导航卡住。
-    const timedOut = new Promise((r) => setTimeout(() => r(null), 3000));
+    const DEBUG = process.env.AI_BROWSER_CANVAS_DEBUG === '1';
+    const log = (...a) => { if (DEBUG) console.error('[canvas-hook]', ...a); };
     try {
-      // 只借用 _ensureCdp 做 attach（它同时会发一次 Page.enable，不 await）。
-      // 这里**不再**预发 Runtime.enable：重复发送会让后面 await 的那一条
-      // 拿不到响应而挂死（实测）。域启用统一交给下面的 step() 显式 await。
       this._ensureCdp(tabId, view, 'Page');
       const dbg = view && view.webContents && view.webContents.debugger;
       if (!dbg || typeof dbg.isAttached !== 'function' || !dbg.isAttached()) {
@@ -1309,43 +1308,66 @@ class PageManager {
       // 永远不返回（试过 20 秒、8 次重试，全部挂死），而同样"发了不等"的
       // Network.enable 却是生效的。也就是说：命令能送达，但响应在这个阶段回不来。
       // 因此这里一律 **fire-and-forget**，改用 Runtime.evaluate 去**验证**是否真的装上。
-      const fire = (method, params) => {
+      // await 的 CDP 命令在**页面加载之后**是可用的（network 的 getResponseBody
+      // 就是证据），但在刚创建的 tab 上会挂死。因此本方法只在加载完成后被调用，
+      // 这里一律 await，并把每一步的失败原因打出来便于定位。
+      const step = async (label, method, params, ms = 4000) => {
+        let timer = null;
+        const t = new Promise((_, rej) => {
+          timer = setTimeout(() => rej(new Error(label + ' timeout ' + ms + 'ms')), ms);
+        });
         try {
-          const p = dbg.sendCommand(method, params);
-          if (p && typeof p.catch === 'function') p.catch(() => {});
-        } catch (e) { /* 单次失败不影响后续 */ }
+          return await Promise.race([dbg.sendCommand(method, params), t]);
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
       };
-      fire('Runtime.enable', {});
-      fire('Page.enable', {});
-      fire('Runtime.addBinding', { name: bindingName });
+      const tryStep = async (label, method, params, ms) => {
+        try {
+          await step(label, method, params, ms);
+          log(label, 'ok');
+          return true;
+        } catch (e) {
+          log(label, 'FAIL', (e && e.message) || e);
+          return false;
+        }
+      };
+
+      await tryStep('Runtime.enable', 'Runtime.enable', {}, 4000);
+      await tryStep('Page.enable', 'Page.enable', {}, 4000);
+      await tryStep('Runtime.addBinding', 'Runtime.addBinding', { name: bindingName }, 4000);
       // 对**后续**导航生效（这才是拿到完整绘制历史的正路）
-      fire('Page.addScriptToEvaluateOnNewDocument', { source });
-      // 对**已经加载过**的当前页面生效（补上首屏没抓到的那部分）
-      fire('Runtime.evaluate', { expression: source, awaitPromise: false });
+      await tryStep('Page.addScriptToEvaluateOnNewDocument', 'Page.addScriptToEvaluateOnNewDocument', { source }, 4000);
+
+      // 对**已经加载过**的当前页面直接注入，并抓运行时异常（脚本是否真跑起来）
+      try {
+        const r = await step('Runtime.evaluate', 'Runtime.evaluate',
+          { expression: source, returnByValue: true, awaitPromise: false }, 6000);
+        const ed = r && r.exceptionDetails;
+        if (ed) log('hook 脚本运行时异常:', JSON.stringify(ed).slice(0, 800));
+        else log('Runtime.evaluate(注入当前页) ok');
+      } catch (e) {
+        log('Runtime.evaluate FAIL', (e && e.message) || e);
+      }
 
       this._canvasBindings.set(bindingName, tabId);
 
-      // 验证：evaluate 的响应在页面存活后是能拿到的
-      const probeExpr = `typeof window[${JSON.stringify(CANVAS_BRIDGE_KEY)}]`;
-      const verdict = await Promise.race([
-        (async () => {
-          try {
-            const r = await dbg.sendCommand('Runtime.evaluate', {
-              expression: probeExpr, returnByValue: true,
-            });
-            const v = r && r.result && r.result.value;
-            return v === 'object';
-          } catch (e) {
-            return false;
-          }
-        })(),
-        timedOut,
-      ]);
-      const ok = verdict === true;
+      let ok = false;
+      try {
+        const r = await step('probe', 'Runtime.evaluate', {
+          expression: `typeof window[${JSON.stringify(CANVAS_BRIDGE_KEY)}]`,
+          returnByValue: true,
+        }, 4000);
+        const v = r && r.result && r.result.value;
+        log('probe typeof bridge =', v);
+        ok = v === 'object';
+      } catch (e) {
+        log('probe FAIL', (e && e.message) || e);
+      }
       this.canvasMonitor.markHook(
         tabId,
         ok,
-        ok ? [] : ['hook 命令已发出但页面内未生效（可能需要重载页面才能注入）']
+        ok ? [] : ['hook 命令已执行但页面内未生效（见 AI_BROWSER_CANVAS_DEBUG=1 日志）']
       );
       return ok;
     } catch (e) {

@@ -90,12 +90,14 @@ const check = (name, cond, detail) => {
 };
 const note = (text) => console.log(`  NOTE | ${text}`);
 
-async function spawnElectron(port, extraEnv) {
+async function spawnElectron(port, extraEnv, removeKeys) {
   const electronPath = require("electron");
   const childEnv = { ...process.env, AI_BROWSER_PORT: String(port) };
   delete childEnv.ELECTRON_RUN_AS_NODE;
   if (!childEnv.AI_BROWSER_USER_DATA) childEnv.AI_BROWSER_USER_DATA = `/tmp/ai-browser-e2e-${port}`;
   Object.assign(childEnv, extraEnv || {});
+  // 显式移除：用于真正测"默认值"，而不是继承当前进程里已设置的开关
+  for (const k of removeKeys || []) delete childEnv[k];
   const child = spawn(electronPath, ["."], {
     cwd: ROOT, stdio: "ignore", detached: true, env: childEnv,
   });
@@ -223,15 +225,15 @@ async function main() {
 
   // 7) 总开关：默认不注入，必须显式 AI_BROWSER_CANVAS_HOOK=1
   const offPort = WS_PORT + 1;
-  console.log("\n[总开关：默认关闭]");
-  await spawnElectron(offPort, {});
+  console.log("\n[总开关：AI_BROWSER_CANVAS_HOOK=0 时关闭]");
+  await spawnElectron(offPort, { AI_BROWSER_CANVAS_HOOK: "0" });
   const b2 = new Browser(offPort);
   try {
     await b2.ready();
     await b2.call("ui.new_tab", { url: HOST + "/canvas" });
     await sleep(2000);
     const l2 = await b2.call("ui.canvas_list", {});
-    check("C-13 默认不注入 hook（需显式 AI_BROWSER_CANVAS_HOOK=1）",
+    check("C-13 AI_BROWSER_CANVAS_HOOK=0 时不注入 hook",
       !!(l2 && l2.result && l2.result.hook_installed === false),
       JSON.stringify(l2 && l2.result && l2.result.warnings));
   } finally {

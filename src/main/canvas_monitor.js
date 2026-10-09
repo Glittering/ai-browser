@@ -11,6 +11,9 @@ const MAX_CALLS_PER_TAB = 5000;
 const MAX_BYTES_PER_TAB = 4 * 1024 * 1024;
 
 // kind → 可读性。2D 能给语义；WebGL 拿不到业务语义，必须诚实标记。
+// 出现这些 kind 就说明这个 canvas 走的是 2D 上下文
+const r2dKinds = new Set(['text', 'rect', 'clear', 'image', 'path', 'pixel']);
+
 function readabilityFor(kind) {
   if (kind === '2d') return 'semantic';
   if (kind === 'webgl' || kind === 'webgl2') return 'opaque';
@@ -95,8 +98,13 @@ export class CanvasMonitor {
         cv = { id: canvasId, kind: 'unknown', firstSeq: st.seq + 1, lastSeq: st.seq + 1, calls: 0 };
         st.canvases.set(canvasId, cv);
       }
+      // kind 推断：优先认 getContext 记录；但那条不一定录到（实测首帧就可能没有），
+      // 因此再从调用本身反推 —— 出现过 2D 绘制类调用就一定是 2D canvas。
       if (rec.m === 'getContext' && (rec.k === '2d' || rec.k === 'webgl' || rec.k === 'webgl2')) {
         cv.kind = rec.k;
+      } else if (cv.kind === 'unknown') {
+        if (r2dKinds.has(rec.k)) cv.kind = '2d';
+        else if (rec.k === 'gl' || (typeof rec.m === 'string' && rec.m.indexOf('gl') === 0)) cv.kind = 'webgl';
       }
       cv.lastSeq = st.seq + 1;
       cv.calls += 1;
@@ -246,15 +254,16 @@ export class CanvasMonitor {
 }
 
 /**
- * 环境变量开关。**当前默认是关闭的**：canvas hook 的注入尚未在真实浏览器里验证
- * 通过（Runtime/Page 域的命令在 BrowserView 上不生效，见 canvas_hook_source.js
- * 与 page_manager._ensureCanvasHook 的注释），因此必须显式
- * AI_BROWSER_CANVAS_HOOK=1 才启用，避免给每个新标签页都挂上一段无用的等待。
+ * 环境变量开关，默认**开启**。关闭：AI_BROWSER_CANVAS_HOOK=0（或 off/false/no）。
+ *
+ * 注意：hook 只能在页面首次加载**完成之后**安装（CDP 的 await 命令在刚创建的
+ * tab 上会挂死），所以首屏已经画完的内容拿不回来 —— 需要完整历史就用
+ * ui.canvas_configure({ reload: true })。
  */
 export function isCanvasHookEnabled(envValue) {
-  if (typeof envValue !== 'string') return false;
+  if (typeof envValue !== 'string') return true;
   const v = envValue.trim().toLowerCase();
-  return v === '1' || v === 'on' || v === 'true' || v === 'yes';
+  return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
 }
 
 export default CanvasMonitor;

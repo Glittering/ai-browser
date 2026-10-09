@@ -338,7 +338,7 @@ npm run capabilities # text fields, canvas, page source, network, DOM editing �
 npm run richtext     # rich-text editors, nested menus, forms, errors, tags, upload — 111 checks
 npm run network      # request log, POST bodies, headers, pagination, redaction — 41 checks
 npm run value        # value truncation contract + read-only get_value — 15 checks
-npm run canvas       # canvas draw-call capture — EXPERIMENTAL, see below
+npm run canvas       # canvas draw-call capture — 13 checks
 npm run realsites    # navigate/read/act against a matrix of real sites
 ```
 
@@ -383,26 +383,44 @@ the page through `ui.evaluate`.
 **`npm run network`** — that a POST can be captured with its full request body, that headers are
 redacted by default, and that bodies paginate instead of being silently truncated.
 
-### Canvas: implemented, but not yet working end-to-end
+### Canvas: read through draw calls, not pixels
 
-The semantic tree still reports a `<canvas>` as `role: canvas` and nothing more. The new
-`browse_canvas` path is meant to fix that properly — **not by taking a screenshot, but by
-recording the draw calls themselves.** A canvas is drawn by code, so the code already knows what
-it drew: `fillText` hands us the literal string, so text inside a canvas needs no OCR at all.
-That is the right shape for this project.
+The semantic tree reports a `<canvas>` as `role: canvas` and nothing more — no text, no pixels.
+`browse_canvas` fixes that **without taking a screenshot**: a recorder is injected into the
+page's main world and wraps the Canvas API, capturing the draw calls themselves.
 
-**It does not work yet.** The recorder is injected into the page's main world via
-`Page.addScriptToEvaluateOnNewDocument` (with no `worldName` — under `contextIsolation` the
-preload's isolated world cannot intercept page calls). In testing, the CDP `Runtime` / `Page`
-commands never take effect on a `BrowserView` in this Electron build, so the hook never lands in
-the page. Canvas capture is therefore **off by default** and needs an explicit
-`AI_BROWSER_CANVAS_HOOK=1`; `npm run canvas` reports the hook as inactive rather than pretending
-it captured anything.
+The point is that a canvas is drawn by code, so the code already knows what it drew. `fillText`
+hands us the literal string — **text inside a canvas needs no OCR**:
 
-Two things are true regardless: WebGL canvases will never yield business meaning (vertices,
-textures and shaders are not reversible, and text is usually a glyph atlas), so they must stay
-marked `opaque`. And `capture` is a deliberate visual fallback for exactly that case — off by
-default, explicitly invoked, and it costs *your* agent's vision tokens.
+```jsonc
+// browse_canvas(operation: "read", canvas_id: "canvas:nav-…:frame-main:1")
+{
+  "kind": "2d", "readability": "semantic",
+  "texts": [
+    { "seq": 2, "method": "fillText", "text": "确认支付",
+      "bounds_canvas": { "x": 20, "y": 40, "width": 120, "height": 30 },
+      "style": { "font": "20px sans-serif", "fill_style": "#000000" } }
+  ],
+  "regions": [ { "seq": 3, "kind": "rect", "method": "fillRect", "bounds_canvas": {…} } ]
+}
+```
+
+The recorder is a **tee**, never a takeover: it calls the native API first
+(`Reflect.apply(original, …)`) and only then records, inside its own `try/catch`. A recording
+failure can never change a return value, an exception, `this`, or draw order.
+
+Two limits you should know:
+
+- **The hook installs after a page's first load**, so anything drawn during that initial load is
+  not recoverable. `browse_canvas(operation: "configure", reload: true)` reloads with the hook in
+  place and gives you the complete history. (Root cause: awaited CDP commands hang on a
+  freshly-created tab in Electron, so installation has to wait for `did-finish-load`.)
+- **WebGL is opaque.** Vertices, textures and shaders are not reversible to business meaning, and
+  text is usually a glyph atlas. Such canvases are marked `opaque` rather than guessed at. For
+  that case only, `operation: "capture"` returns a PNG of the canvas region — off by default,
+  explicitly invoked, and it costs *your* agent's vision tokens.
+
+Disable entirely with `AI_BROWSER_CANVAS_HOOK=0`.
 
 ### Boundaries worth knowing before you rely on them
 
