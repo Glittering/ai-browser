@@ -223,6 +223,16 @@ export const MCP_TOOLS = [
     }
   },
   {
+    name: 'browse_repaint',
+    description: "Force the compositor to redraw a tab's BrowserView when the window shows a stale page; returns repaint_count so the repaint is provable.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tab: { type: 'integer', description: 'Tab id (default: active tab).' }
+      }
+    }
+  },
+  {
     name: 'browse_quit',
     description: 'Gracefully shut down the AI Browser (releases resources).',
     inputSchema: { type: 'object', properties: {} }

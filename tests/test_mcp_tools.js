@@ -4,7 +4,7 @@ import { MCP_TOOLS } from '../src/main/mcp_tools.js';
 describe('MCP tool list (token-cost guard)', () => {
   const names = MCP_TOOLS.map((t) => t.name);
 
-  it('keeps exactly 15 tools', () => {
+  it('keeps exactly 16 tools', () => {
     // browse_subscribe 与 browse_network_body 已换出：
     // - browse_subscribe：MCP 路径收不到 server→client 通知（mcp_ws.js 丢弃无 id
     //   的推送），订阅对它毫无作用；且网络采集已改为默认开启，它"启动采集"的
@@ -20,7 +20,13 @@ describe('MCP tool list (token-cost guard)', () => {
     //   + browse_capabilities：把"这一页该怎么操作"从几小时的手工探查变成一次
     //     调用。已在两类截然不同的真实页面上验证结论与手工排查一致。
     // 两者都是**减少** agent 的往返与出错面，总 token 成本是下降的。
-    expect(MCP_TOOLS).toHaveLength(15);
+    //
+    // 15 → 16（有意变更）：
+    //   + browse_repaint："窗口显示的是旧画面"这个故障**没有任何可观测状态**
+    //     （DOM 树和 evaluate 早就报新页面了，只有屏幕是旧的），所以 agent 唯一
+    //     的手段就是显式要求重绘。此前它只在 raw WS 上暴露，而 MCP 是 agent 的
+    //     主通路 —— 恰好是这个功能最需要的地方够不着。描述压到 139 字符。
+    expect(MCP_TOOLS).toHaveLength(16);
   });
 
   it('新增的两个工具都保持精简描述（护栏：描述长度是每轮都要付的成本）', () => {
@@ -36,6 +42,14 @@ describe('MCP tool list (token-cost guard)', () => {
     const t = MCP_TOOLS.find((x) => x.name === 'browse_diff');
     expect(t.inputSchema.properties.operation.enum).toEqual(['snapshot', 'diff']);
     expect(t.inputSchema.required).toEqual(['operation']);
+  });
+
+  it('exposes browse_repaint (the "window shows a stale page" fallback)', () => {
+    const t = MCP_TOOLS.find((x) => x.name === 'browse_repaint');
+    expect(t, 'browse_repaint must exist').toBeTruthy();
+    // optional tab → no required fields
+    expect(t.inputSchema.required).toBeUndefined();
+    expect(t.inputSchema.properties.tab.type).toBe('integer');
   });
 
   it('换出的两个工具不再出现在 MCP 清单里', () => {

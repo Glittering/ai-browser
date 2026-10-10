@@ -311,6 +311,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return { content: [{ type: 'text', text: JSON.stringify(result) }] };
     }
 
+    case 'browse_repaint': {
+      // "The window shows a stale page" has no observable state to detect (the
+      // DOM tree and evaluate already report the NEW page while the screen shows
+      // the OLD one), so the agent's only handle on it is an explicit request.
+      // Until now this was reachable over the raw WS only, which left MCP-only
+      // agents — the common case — with no fallback for the exact symptom this
+      // was built for.
+      const result = await wsClient.call('ui.repaint', { tab: args.tab });
+      return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+    }
+
     case 'browse_quit': {
       // Fire and forget — the WS server closes before we'd get the response.
       try { await wsClient.call('ui.quit', {}); } catch (e) {}
