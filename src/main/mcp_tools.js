@@ -194,6 +194,35 @@ export const MCP_TOOLS = [
     }
   },
   {
+    name: 'browse_diff',
+    description: 'Prove an action changed the page: snapshot a baseline, then diff to get added/removed/changed paths with before/after values. Success is not evidence.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        operation: { type: 'string', enum: ['snapshot', 'diff'], description: 'Operation.' },
+        js: { type: 'string', description: 'JSON-serializable expression to capture. Omit for a site-agnostic DOM summary (role/label/value/disabled/size per element).' },
+        label: { type: 'string', description: 'snapshot: a note for your own bookkeeping.' },
+        snapshot: { type: 'string', description: 'diff: the id returned by snapshot.' },
+        rearm: { type: 'boolean', description: 'diff: make the current state the new baseline, so you can loop "assert no change" over many steps.' },
+        forget: { type: 'boolean', description: 'diff: drop the stored baseline when done.' },
+        tab: { type: 'integer', description: 'Tab id (default: active tab).' }
+      },
+      required: ['operation']
+    }
+  },
+  {
+    name: 'browse_capabilities',
+    description: 'Probe what a page affords and which route to take: DOM vs canvas, same-origin iframes, app objects on window, JSON endpoints, plus a recommended plan with evidence.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        include_network: { type: 'boolean', description: 'Include observed JSON-ish endpoints (default true).' },
+        network_limit: { type: 'integer', description: 'How many captured requests to scan.' },
+        tab: { type: 'integer', description: 'Tab id (default: active tab).' }
+      }
+    }
+  },
+  {
     name: 'browse_quit',
     description: 'Gracefully shut down the AI Browser (releases resources).',
     inputSchema: { type: 'object', properties: {} }

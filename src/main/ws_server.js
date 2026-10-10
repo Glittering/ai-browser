@@ -81,6 +81,45 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
             send({ jsonrpc: '2.0', id, result: { ok } });
             break;
           }
+          case 'ui.repaint': {
+            // Force the compositor to redraw a tab's BrowserView. Needed because
+            // "the window shows a stale page" has NO observable state to detect:
+            // the DOM tree / evaluate already report the NEW page while the
+            // screen shows the OLD one. So the agent's only handle on it is an
+            // explicit "this window looks wrong, redraw it".
+            const r = pageManager.repaint(tabId);
+            send({ jsonrpc: '2.0', id, result: r });
+            break;
+          }
+          case 'ui.snapshot': {
+            const r = await pageManager.snapshot({ js: params.js, label: params.label, tab: tabId });
+            send({ jsonrpc: '2.0', id, result: r });
+            break;
+          }
+          case 'ui.diff': {
+            const r = await pageManager.diff({
+              snapshot: params.snapshot,
+              js: params.js,
+              rearm: params.rearm,
+              forget: params.forget,
+              tab: tabId,
+            });
+            send({ jsonrpc: '2.0', id, result: r });
+            break;
+          }
+          case 'ui.capabilities': {
+            // "How should I operate THIS page?" — one call answers it: is the
+            // graph DOM or canvas, is the body in an iframe, does the app hang a
+            // model off window, which JSON endpoints exist, and therefore
+            // whether to go structured-data / semantic-tree / pointer-gestures.
+            const r = await pageManager.capabilities({
+              tab: tabId,
+              include_network: params.include_network,
+              network_limit: params.network_limit,
+            });
+            send({ jsonrpc: '2.0', id, result: r });
+            break;
+          }
           case 'ui.evaluate': {
             const js = String(params.js ?? '');
             // Guard rails (shared single source) — enforce length + reject

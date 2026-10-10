@@ -286,6 +286,31 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       throw new Error('browse_canvas: unknown operation ' + String(op));
     }
 
+    case 'browse_diff': {
+      const op = args.operation;
+      if (op === 'snapshot') {
+        const result = await wsClient.call('ui.snapshot', {
+          tab: args.tab, js: args.js, label: args.label,
+        });
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      }
+      if (op === 'diff') {
+        const result = await wsClient.call('ui.diff', {
+          tab: args.tab, snapshot: args.snapshot, js: args.js,
+          rearm: args.rearm, forget: args.forget,
+        });
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      }
+      throw new Error('browse_diff: unknown operation ' + String(op));
+    }
+
+    case 'browse_capabilities': {
+      const result = await wsClient.call('ui.capabilities', {
+        tab: args.tab, include_network: args.include_network, network_limit: args.network_limit,
+      });
+      return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+    }
+
     case 'browse_quit': {
       // Fire and forget — the WS server closes before we'd get the response.
       try { await wsClient.call('ui.quit', {}); } catch (e) {}

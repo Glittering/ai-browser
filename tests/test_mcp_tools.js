@@ -4,15 +4,38 @@ import { MCP_TOOLS } from '../src/main/mcp_tools.js';
 describe('MCP tool list (token-cost guard)', () => {
   const names = MCP_TOOLS.map((t) => t.name);
 
-  it('keeps exactly 13 tools', () => {
+  it('keeps exactly 15 tools', () => {
     // browse_subscribe 与 browse_network_body 已换出：
     // - browse_subscribe：MCP 路径收不到 server→client 通知（mcp_ws.js 丢弃无 id
     //   的推送），订阅对它毫无作用；且网络采集已改为默认开启，它"启动采集"的
     //   副作用也不再需要。
     // - browse_network_body：被 browse_network 严格超集替代。
-    // 换出后回到 13。工具数每增加 1 都会抬高每轮上下文成本，因此这个数字
-    // 必须是**有意**变更，改这里就要说明理由。
-    expect(MCP_TOOLS).toHaveLength(13);
+    //
+    // 13 → 15（有意变更，理由如下）。工具数每增加 1 都会抬高每轮上下文成本，
+    // 因此这个数字必须是**有意**变更。
+    //   + browse_diff：把"动作 → 回读 → 比对"变成一次调用。这是本项目的硬规矩
+    //     （success ≠ 做成了），而此前每次都要手写站点专属的比对 JS —— 实测
+    //     因此两次量错了对象（拿 serialize() 字节数当指纹、拿视口变化当数据变化），
+    //     得出过自信的假结论。少写一次比对逻辑，就少一次谎报的机会。
+    //   + browse_capabilities：把"这一页该怎么操作"从几小时的手工探查变成一次
+    //     调用。已在两类截然不同的真实页面上验证结论与手工排查一致。
+    // 两者都是**减少** agent 的往返与出错面，总 token 成本是下降的。
+    expect(MCP_TOOLS).toHaveLength(15);
+  });
+
+  it('新增的两个工具都保持精简描述（护栏：描述长度是每轮都要付的成本）', () => {
+    for (const name of ['browse_diff', 'browse_capabilities']) {
+      const t = MCP_TOOLS.find((x) => x.name === name);
+      expect(t, name + ' must exist').toBeTruthy();
+      expect(t.description.length).toBeLessThan(200);
+      expect(t.inputSchema.type).toBe('object');
+    }
+  });
+
+  it('browse_diff 走 operation 风格（与 browse_network / browse_canvas 一致，不新增工具位）', () => {
+    const t = MCP_TOOLS.find((x) => x.name === 'browse_diff');
+    expect(t.inputSchema.properties.operation.enum).toEqual(['snapshot', 'diff']);
+    expect(t.inputSchema.required).toEqual(['operation']);
   });
 
   it('换出的两个工具不再出现在 MCP 清单里', () => {
