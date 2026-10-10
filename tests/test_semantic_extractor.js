@@ -168,6 +168,94 @@ describe('extractTree()', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// ai-id 稳定性（AI-ID）
+//
+// agent 的典型用法是**先 get_tree 拿 id、再按 id 操作**，而页面在这中间自更新
+// （画布增删节点、列表插入一行）是常态。旧实现用"每次抽取都归零"的计数器按遍历
+// 顺序编号，于是最前面插入一个元素就会把后面**所有**元素重新编号 —— 旧 id 指向
+// 另一个元素，操作照常报 success 却打在了别的东西上。这几条钉住修复。
+// ---------------------------------------------------------------------------
+describe('data-ai-id 的稳定性', () => {
+  // 取"没有原生 id"的元素 —— 只有它们才走自动编号那条路
+  const groupIds = () => {
+    const out = {};
+    document.querySelectorAll('[role="group"]').forEach((el) => {
+      out[el.getAttribute('aria-label')] = el.getAttribute('data-ai-id');
+    });
+    return out;
+  };
+
+  it('AI-ID-001: 抽取两次（DOM 未变）id 完全一致', () => {
+    document.documentElement.innerHTML =
+      '<div id="host">' +
+      '<div role="group" aria-label="g0"><button>b0</button></div>' +
+      '<div role="group" aria-label="g1"><button>b1</button></div>' +
+      '</div>';
+    extractTree();
+    const a = groupIds();
+    extractTree();
+    const b = groupIds();
+    expect(a).toEqual(b);
+    expect(a['g0']).toBeTruthy();
+  });
+
+  it('AI-ID-002: 在前面插入新元素后，已有元素的 id 不得漂移', () => {
+    document.documentElement.innerHTML =
+      '<div id="host">' +
+      '<div role="group" aria-label="g0"><button>b0</button></div>' +
+      '<div role="group" aria-label="g1"><button>b1</button></div>' +
+      '<div role="group" aria-label="g2"><button>b2</button></div>' +
+      '</div>';
+    extractTree();
+    const before = groupIds();
+
+    // 页面自更新：最前面插入一个新分组 —— 旧实现会让 g0/g1/g2 全部换号
+    const fresh = document.createElement('div');
+    fresh.setAttribute('role', 'group');
+    fresh.setAttribute('aria-label', 'gnew');
+    fresh.innerHTML = '<button>bnew</button>';
+    const host = document.getElementById('host');
+    host.insertBefore(fresh, host.firstElementChild);
+
+    extractTree();
+    const after = groupIds();
+    for (const k of Object.keys(before)) {
+      expect(`${k}=${after[k]}`).toBe(`${k}=${before[k]}`);
+    }
+    // 新元素要拿到一个**不同于**所有已有 id 的新号
+    expect(after['gnew']).toBeTruthy();
+    expect(Object.values(before)).not.toContain(after['gnew']);
+  });
+
+  it('AI-ID-003: 同一页面上生成的 id 互不重号（含跨抽取新增的元素）', () => {
+    document.documentElement.innerHTML =
+      '<div id="host">' +
+      '<div role="group" aria-label="h0"><button>c0</button></div>' +
+      '<div role="group" aria-label="h1"><button>c1</button></div>' +
+      '</div>';
+    extractTree();
+    extractTree(); // 再抽一次，序号不得回退
+    const host = document.getElementById('host');
+    const extra = document.createElement('div');
+    extra.setAttribute('role', 'group');
+    extra.setAttribute('aria-label', 'h2');
+    extra.innerHTML = '<button>c2</button>';
+    host.appendChild(extra);
+    extractTree();
+
+    const ids = Array.from(document.querySelectorAll('[data-ai-id]')).map((e) => e.getAttribute('data-ai-id'));
+    expect(ids.length).toBeGreaterThan(0);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it('AI-ID-004: 原生 id 优先于自动编号（原有语义不变）', () => {
+    document.documentElement.innerHTML = '<button id="native-btn">N</button>';
+    extractTree();
+    expect(document.getElementById('native-btn').getAttribute('data-ai-id')).toBe('native-btn');
+  });
+});
+
 // Helper: recursive find by id
 function findById(tree, id) {
   if (tree.id === id) return tree;

@@ -10,6 +10,10 @@ var sensitiveInputKind = valueContract.sensitiveInputKind;
 // 1. EXTRACT TREE — DOM → semantic tree with bounds + states
 // ============================================================
 
+// 自动编号的序号。**故意放在模块级**：每次抽取都归零会让"新旧元素拿到同一个 id"
+// （旧元素沿用自身 data-ai-id，新元素却可能生成出同名的号），所以它只增不减。
+var AI_ID_SEQ = 0;
+
 function extractTree() {
   var seen = new WeakSet();
   var counter = 0;
@@ -271,8 +275,17 @@ function extractTree() {
     var editorType = detectEditorType(el);
     var editorBlocks = editorType ? extractEditorBlocks(el) : null;
 
-    // Assign ref ID — use native id, fallback to generated
-    var aiId = nativeId || "e:" + el.tagName.toLowerCase() + "-" + (counter++);
+    // Assign ref ID — use native id, fallback to generated.
+    //
+    // ai-id 必须跨"读树 → 操作"稳定。agent 的典型用法是先 get_tree 拿 id、再按 id
+    // 操作，而页面在这中间自更新（画布增删节点、列表插入一行）是常态。
+    // 旧实现用**每次抽取都归零**的 counter 按遍历顺序编号：在最前面插入 1 个元素，
+    // 后面**所有**元素都被重新编号，旧 id 就指向了另一个元素 —— 操作照常返回
+    // success，却打在了别的东西上（静默错打；实测插入 1 个元素后 4/4 元素 id 全变）。
+    // 修法两条：① 元素已有 data-ai-id 就沿用，id 不再随遍历顺序变化；
+    //          ② 新元素用模块级只增不减的序号，保证生成出来的 id 不重号。
+    var existingAiId = el.getAttribute("data-ai-id");
+    var aiId = nativeId || existingAiId || "e:" + el.tagName.toLowerCase() + "-" + (AI_ID_SEQ++);
     el.setAttribute("data-ai-id", aiId);
 
     var states = [];
