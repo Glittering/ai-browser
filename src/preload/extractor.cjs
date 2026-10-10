@@ -749,7 +749,7 @@ function extractPageContext() {
       if (!fet) continue;
       var fid = fieldOf(feEls[fei]);
       if (!fid) continue;
-      var fkey = fid + " " + fet;
+      var fkey = fid + "\u0000" + fet;
       if (seenFieldErr[fkey]) continue;
       seenFieldErr[fkey] = 1;
       fieldErrors.push({ field: fid, text: fet });

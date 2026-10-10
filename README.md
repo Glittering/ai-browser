@@ -10,7 +10,7 @@
   <img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue.svg">
   <img alt="Electron" src="https://img.shields.io/badge/built%20with-Electron%2033-9cf">
   <img alt="Platforms" src="https://img.shields.io/badge/platforms-macOS%20%E2%80%A2%20Linux-blueviolet">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-286%20unit%20%2B%20356%20e2e-2ea043">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-310%20unit%20%2B%20356%20e2e-2ea043">
   <img alt="MCP" src="https://img.shields.io/badge/spec-MCP%20(stdio)-f5b23b">
 </p>
 
@@ -102,7 +102,7 @@ or any system prompt; it teaches the tool loop, the token-saving params, and whe
 
 ## The MCP tools
 
-Source of truth: [`src/main/mcp_tools.js`](src/main/mcp_tools.js). There are 15 — a deliberately
+Source of truth: [`src/main/mcp_tools.js`](src/main/mcp_tools.js). There are 16 — a deliberately
 small surface, since every tool schema is injected into your agent's context on every turn.
 
 | Tool | One line |
@@ -112,6 +112,7 @@ small surface, since every tool schema is injected into your agent's context on 
 | `browse_act` | `click` / `type` (append at caret) / `setContent` (replace all) / `clear` / `focus` / `hover` / `scroll_to` / `upload` / `get_value` (read-only) / `drag` / `press` / `wheel` on a `data-ai-id`. |
 | `browse_diff` | `snapshot` a baseline, then `diff` to get added / removed / changed paths with before/after values. **This is how you prove an action did anything.** |
 | `browse_capabilities` | Probe what a page affords and which route to take on it (see below). |
+| `browse_repaint` | Force the compositor to redraw the tab when the window shows a stale page; returns `repaint_count`. |
 | `browse_canvas` | Read `<canvas>` through captured draw calls: `list` / `read` / `configure` / `capture`. **Experimental — see the canvas section below.** |
 | `browse_evaluate` | Run a JS *expression* in page context (5000-char cap, Node identifiers rejected). |
 | `browse_scroll` | Scroll the page, or scroll an element into view. |
@@ -305,7 +306,7 @@ MCP is a thin stdio adapter. Anything MCP can do is reachable directly over JSON
 | `ui.navigate` | Load a URL (`params.url`, optional `tab`) | `browse_navigate` |
 | `ui.snapshot` / `ui.diff` | Capture a baseline (`params.js`, optional `label`) and diff against it (`params.snapshot`, `rearm`, `forget`) | `browse_diff` |
 | `ui.capabilities` | Probe the page: tree histogram, canvas, iframes, app globals, endpoints, recommended route | `browse_capabilities` |
-| `ui.repaint` | Force the compositor to redraw a tab; returns `repaint_count` so a repaint is provable | — (WS only) |
+| `ui.repaint` | Force the compositor to redraw a tab; returns `repaint_count` so a repaint is provable | `browse_repaint` |
 | `ui.evaluate` | Run JS in page context, same guard as MCP | `browse_evaluate` |
 | `ui.scroll` | Scroll page or element (`direction`, `amount`, `target`). **Document scrolling only** — for canvas apps use `ui.act{action:'wheel'}`. | `browse_scroll` |
 | `ui.wait` | Poll until a condition or timeout | `browse_wait` |
@@ -356,7 +357,7 @@ Error codes follow JSON-RPC: `-32700` parse error, `-32601` unknown method, `-32
 ## How it works
 
 ```
-   agent ── MCP stdio (13 browse_*) ──┐
+   agent ── MCP stdio (16 browse_*) ──┐
    agent ── WS JSON-RPC :9223 (ui.*) ─┤
                                       ▼
  ┌──────────────────────────────────────────────────┐
@@ -481,7 +482,7 @@ AI_BROWSER_USER_DATA=~/.ai-browser-work npm start
 ## Test & dev
 
 ```bash
-npm test             # vitest — 286 tests across 23 files
+npm test             # vitest — 310 tests across 24 files
 npm run smoke        # Electron contract layer, offline fixture      — 31 checks
 npm run capabilities # text fields, canvas, page source, network, DOM editing — 54 checks
 npm run richtext     # rich-text editors, nested menus, forms, errors, tags, upload — 111 checks

@@ -1,5 +1,6 @@
 // tests/test_protocol.js — Unit tests for shared/protocol.js
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
 import {
   createRequest,
   createResponse,
@@ -104,6 +105,16 @@ describe('VALID_METHODS', () => {
     expect(VALID_METHODS).toContain('ui.subscribe');
     expect(VALID_METHODS).toContain('ui.unsubscribe');
     expect(VALID_METHODS).toContain('ui.navigate');
+  });
+
+  it('PR-01: 必须与 ws_server 实际分发的 ui.* 方法**完全一致**', () => {
+    // 这份清单曾经只列了 7 个方法，而服务端实际有 28 个 —— 一个机器可读的契约
+    // 说谎，比没有契约更糟：照它写代码的人会以为大部分 API 不存在。所以这里从
+    // ws_server.js 的 `case 'ui.x':` 反推出真集，任何一边漂移都会让测试红。
+    const src = readFileSync(new URL('../src/main/ws_server.js', import.meta.url), 'utf8');
+    const served = [...src.matchAll(/case '((?:ui)\.[a-z_]+)':/g)].map((m) => m[1]);
+    expect(served.length).toBeGreaterThan(20); // 反推本身失效时要红，而不是"两条空集相等"
+    expect([...VALID_METHODS].sort()).toEqual([...new Set(served)].sort());
   });
 });
 

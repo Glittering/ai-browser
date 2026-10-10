@@ -47,16 +47,44 @@ export function parseMessage(msg) {
 }
 
 /**
- * Valid method names supported by AI Browser
+ * Every ui.* method the WebSocket server actually dispatches.
+ *
+ * This list had drifted badly: it named 7 methods while the server served 28,
+ * so anyone reading it would conclude most of the API did not exist. A
+ * machine-readable contract that lies is worse than no contract — so
+ * `tests/test_protocol.js` now derives the real set from the `case 'ui.x':`
+ * labels in `src/main/ws_server.js` and fails if the two diverge. Add a method
+ * to the server and this list must follow, or the suite breaks.
  */
 export const VALID_METHODS = [
   'ui.get_tree',
   'ui.act',
+  'ui.navigate',
+  'ui.repaint',
+  'ui.snapshot',
+  'ui.diff',
+  'ui.capabilities',
+  'ui.evaluate',
   'ui.subscribe',
   'ui.unsubscribe',
-  'ui.navigate',
   'ui.get_focused',
-  'ui.evaluate',
+  'ui.peek',
+  'ui.wait',
+  'ui.scroll',
+  'ui.new_tab',
+  'ui.close_tab',
+  'ui.list_tabs',
+  'ui.set_active_tab',
+  'ui.canvas_configure',
+  'ui.canvas_list',
+  'ui.canvas_read',
+  'ui.canvas_capture',
+  'ui.network_list',
+  'ui.network_get',
+  'ui.network_clear',
+  'ui.network_configure',
+  'ui.network_body',
+  'ui.quit',
 ];
 
 /**

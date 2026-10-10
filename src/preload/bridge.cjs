@@ -1,4 +1,4 @@
-// preload/bridge.js — AI Browser entry (CommonJS, loaded by Electron preload)
+// preload/bridge.cjs — AI Browser entry (CommonJS, loaded by Electron preload)
 // v6.9, split into modules: extractor.cjs / actions.cjs / watcher.cjs
 // Responsible only for: IPC wiring + module orchestration.
 // Requires local .cjs modules — the tab BrowserView MUST set sandbox:false
