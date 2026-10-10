@@ -7,6 +7,8 @@ import axExtractor from './axExtractor.js';
 import { NetworkMonitor, MAX_POST_DATA_SIZE } from './network_monitor.js';
 import { CanvasMonitor, isCanvasHookEnabled } from './canvas_monitor.js';
 import { buildCanvasHookSource } from './canvas_hook_source.js';
+import { diffValues, previewOf, safeByteLength, DEFAULT_SNAPSHOT_JS, DIFF_MAX_ENTRIES } from './snapshot_diff.js';
+import { probeCapabilities } from './capability_probe.js';
 import valueContract from '../shared/value_contract.cjs';
 
 const { expandValueFetchTree } = valueContract;
@@ -106,6 +108,9 @@ class PageManager {
     this._openedTabs = new Map();   // sourceTabId -> { id, url } (new tab opened by window.open)
     this._axDiffCache = new Map();  // tabId -> lite interactive snapshot (get_tree {mode:'diff'})
     this._revertTimers = new Map(); // tabId -> 挂起的 ui.peek 自动回撤定时器（新 peek 会取消它）
+    this._repaintTimers = new Map();// tabId -> 正在排队/已调度的重绘（合并同一批导航事件）
+    this._snapshots = new Map();    // snapshotId -> { tabId, js, value, at }（ui.snapshot 存基线）
+    this._snapshotSeq = 0;
     this.networkMonitor = new NetworkMonitor({}, { captureEnabled: NETWORK_CAPTURE_DEFAULT });
     this.canvasMonitor = new CanvasMonitor();
     this._canvasBindings = new Map(); // bindingName -> tabId（hook 回传时据此归 tab）
@@ -196,6 +201,115 @@ class PageManager {
     return this.tabs.get(tabId);
   }
 
+  // ==================================================================
+  // Snapshot / Diff — make "act → read back → compare" a one-liner
+  // ==================================================================
+  //
+  // Why this exists: the project's hard rule is that a write is only proven by
+  // reading state back and comparing. Doing that by hand meant rewriting bespoke
+  // comparison JS on every site (node counts, widget values, positions, edge
+  // lists…), which is exactly where mistakes creep in — this session I twice
+  // measured the wrong thing (serialized byte length, viewport deltas) and got
+  // a confident false reading.
+  //
+  // Contract, deliberately narrow:
+  //   ui.snapshot {js?, label?} → evaluate js (default: a site-agnostic
+  //                                structural DOM summary), store, return id.
+  //   ui.diff {snapshot, js?}   → re-evaluate and return a STRUCTURED diff:
+  //                                added / removed / changed, each with a JSON
+  //                                path and both values, so "it changed" is
+  //                                provable rather than asserted.
+
+  /**
+   * Collect a snapshot value. `js` must be a JSON-serializable expression.
+   * When omitted we use a structural DOM summary (role/label/value per element
+   * at a stable path) — the most broadly useful default, needing no per-site
+   * knowledge, which is the whole point of having a default.
+   */
+  async _collectSnapshot(js, tabId) {
+    const tid = tabId !== undefined && tabId !== null ? tabId : this.activeTab;
+    const view = this._getView(tid);
+    if (!view) return { error: 'no-such-tab', tab: tid };
+    const expr = js && String(js).trim() ? String(js) : DEFAULT_SNAPSHOT_JS;
+    let value;
+    try {
+      value = await this.evaluate(expr, tid);
+    } catch (e) {
+      return { error: 'evaluate-failed: ' + (e && e.message ? e.message : String(e)), tab: tid };
+    }
+    if (value && typeof value === 'object' && value.__error) {
+      return { error: 'snapshot-expression-threw: ' + value.__error, tab: tid };
+    }
+    return { tab: tid, value };
+  }
+
+  async snapshot(params = {}) {
+    const tid = params.tab !== undefined && params.tab !== null ? params.tab : this.activeTab;
+    const r = await this._collectSnapshot(params.js, tid);
+    if (r.error) return { ok: false, error: r.error, tab: r.tab };
+    const id = 'snap-' + (++this._snapshotSeq);
+    const entry = { tab: tid, js: params.js || null, value: r.value, at: new Date().toISOString() };
+    this._snapshots.set(id, entry);
+    return {
+      ok: true,
+      snapshot: id,
+      tab: tid,
+      at: entry.at,
+      label: params.label || null,
+      bytes: safeByteLength(r.value),
+      // Short preview so the caller can confirm it snapshotted what they meant,
+      // without a second round-trip.
+      preview: previewOf(r.value),
+    };
+  }
+
+  async diff(params = {}) {
+    const id = params.snapshot;
+    if (!id) return { ok: false, error: 'missing-snapshot', hint: 'call ui.snapshot first, pass its id here' };
+    const base = this._snapshots.get(id);
+    if (!base) return { ok: false, error: 'unknown-snapshot', snapshot: id };
+    // A snapshot is bound to the tab it came from: diffing across tabs would
+    // compare unrelated pages and report a wall of spurious changes.
+    const tid = params.tab !== undefined && params.tab !== null ? params.tab : base.tab;
+    if (tid !== base.tab) {
+      return { ok: false, error: 'tab-mismatch', snapshot: id, snapshot_tab: base.tab, requested_tab: tid };
+    }
+    const now = await this._collectSnapshot(params.js || base.js, tid);
+    if (now.error) return { ok: false, error: now.error, tab: tid };
+
+    const d = diffValues(base.value, now.value);
+    const result = {
+      ok: true,
+      snapshot: id,
+      tab: tid,
+      changed: d.hasChanges,
+      // An explicit verdict so callers never have to infer "nothing happened"
+      // from an array they might have built wrong.
+      verdict: d.hasChanges ? 'changed' : 'unchanged',
+      counts: { added: d.added.length, removed: d.removed.length, changed: d.changed.length },
+      added: d.added,
+      removed: d.removed,
+      changed_paths: d.changed,
+      truncation: d.dropped ? { limit: DIFF_MAX_ENTRIES, dropped: d.dropped } : null,
+    };
+    // Chaining: re-arm the baseline so a caller can loop "assert no change"
+    // over many steps without re-snapshotting each time.
+    if (params.rearm) {
+      this._snapshots.set(id, { ...base, value: now.value, at: new Date().toISOString() });
+      result.rearmed = true;
+    }
+    if (params.forget) { this._snapshots.delete(id); result.forgotten = true; }
+    return result;
+  }
+
+  /**
+   * Probe what this page affords, and which route an agent should take.
+   * Thin wrapper so the WS/MCP layers don't need to know the implementation.
+   */
+  async capabilities(opts = {}) {
+    return probeCapabilities(this, opts);
+  }
+
   _sendToView(tabId, channel, payload) {
     const view = this._getView(tabId);
     if (!view) return false;
@@ -208,7 +322,11 @@ class PageManager {
     const view = this._getView(tid);
     if (!view) return false;
     this._axDiffCache.delete(tid); // fresh page → drop stale incremental snapshot
+    // loadURL resolves at did-finish-load, which is exactly when the old
+    // pixels may still be on screen — repaint here as well as from the event
+    // hooks, so a programmatic navigate never depends on hook timing.
     await view.webContents.loadURL(url);
+    this.repaint(tid);
     return true;
   }
 
@@ -1354,6 +1472,22 @@ class PageManager {
       `var e=document.activeElement;return (e&&(e.innerText||e.value||''))||'';`
     );
     if (norm(curText) === norm(text)) {
+      // "目标就是当前内容" 与 "目标本来就是空的" 必须区分开。
+      // 后者几乎总是调用方的错误：ui.act 的 WS 契约把动作参数放在 params.params
+      // 里（params.params.text），照着 MCP 的扁平形状写成 params.text 就会静默
+      // 变成空文本 —— 而空字段恰好命中下面的短路，于是**什么都没打却报
+      // success / method=cdp-input-unchanged**。这正是本项目最忌讳的谎报。
+      // 实测就是这样被发现的：调用回执"成功"，输入框却仍是空的。
+      if (!text) {
+        return {
+          success: false,
+          error: 'type called with empty text — nothing was typed. '
+            + 'Over WS the action params go in params.params (e.g. {action:"type", target:"<id>", params:{text:"..."}}), '
+            + 'not at the top level. Use action:"clear" to empty a field.',
+          method: 'cdp-input-empty-text',
+          chars: 0,
+        };
+      }
       return { success: true, method: 'cdp-input-unchanged', changes: 0, chars: 0 };
     }
     const dbg = view.webContents.debugger;
@@ -1603,24 +1737,136 @@ class PageManager {
 
     // Force repaint after load — BrowserView content can be loaded but not
     // painted by the compositor. Remove + re-add forces a full repaint.
+    //
+    // Hook every navigation signal, not just the two load events. Reported
+    // symptom: page HAS navigated to the new view (agent reads the new DOM /
+    // canvas through the tree and evaluate) but the window keeps showing the
+    // previous one until you click tabs back and forth — clicking a tab is
+    // exactly what calls removeBrowserView + addBrowserView + setBounds, i.e.
+    // it is the only thing that forces the compositor to repaint.
+    //
+    //   did-navigate-in-page — SPA route changes (history.pushState / hash).
+    //     Fires on every router push, which is how canvas-style apps swap views.
+    //   did-frame-finish-load — a sub-frame finished loading. ComfyUI-style
+    //     editors boot inside an iframe long after the top document finished,
+    //     so did-finish-load has already fired and repainted an empty shell.
+    //   did-navigate — any cross-document navigation, including programmatic
+    //     location.href assignment the app does on its own.
     if (url) {
-      view.webContents.on('dom-ready', () => {
-        self._forceRepaint(view);
-      });
-      view.webContents.on('did-finish-load', () => {
-        self._forceRepaint(view);
-      });
+      const repaint = () => { self._scheduleRepaint(tabId); };
+      view.webContents.on('dom-ready', repaint);
+      view.webContents.on('did-finish-load', repaint);
+      view.webContents.on('did-navigate', repaint);
+      view.webContents.on('did-navigate-in-page', repaint);
+      view.webContents.on('did-frame-finish-load', repaint);
+    } else {
+      // No URL at construction time (new_tab with no url, then navigate):
+      // register the same hooks now, or the later navigate() would never
+      // repaint — which was one of the paths that showed a stale view.
+      this._attachRepaintHooks(tabId, view);
     }
     return tabId;
   }
 
+  /**
+   * Attach compositor-repaint hooks to a tab's webContents.
+   * Idempotent per tab: re-registering would schedule redundant remove/add
+   * cycles, so a WeakSet of hooked views guards it.
+   */
+  _attachRepaintHooks(tabId, view) {
+    if (!view || !view.webContents || view.webContents.isDestroyed()) return;
+    if (!this._repaintHooked) this._repaintHooked = new WeakSet();
+    if (this._repaintHooked.has(view)) return;
+    this._repaintHooked.add(view);
+    const repaint = () => { this._scheduleRepaint(tabId); };
+    view.webContents.on('dom-ready', repaint);
+    view.webContents.on('did-finish-load', repaint);
+    view.webContents.on('did-navigate', repaint);
+    view.webContents.on('did-navigate-in-page', repaint);
+    view.webContents.on('did-frame-finish-load', repaint);
+  }
+
+  /**
+   * Coalesce repaint requests. A single page load fires dom-ready +
+   * did-navigate + did-navigate-in-page + did-frame-finish-load within a few
+   * hundred ms; a load like ComfyUI's fires dozens of did-frame-finish-load.
+   * Without coalescing that is dozens of remove/add cycles — visible flicker
+   * and wasted compositing work. Debounce ~120ms: late enough to collapse the
+   * burst, early enough that the user sees the new view essentially at once.
+   */
+  _scheduleRepaint(tabId, delay = 120) {
+    const prev = this._repaintTimers.get(tabId);
+    if (prev) clearTimeout(prev);
+    const t = setTimeout(() => {
+      this._repaintTimers.delete(tabId);
+      const view = this._getView(tabId);
+      if (view) this._forceRepaint(view);
+    }, delay);
+    if (t && typeof t.unref === 'function') t.unref();
+    this._repaintTimers.set(tabId, t);
+  }
+
+  /**
+   * Remove + re-add the BrowserView to force the compositor to paint it.
+   * Safe for a non-active tab too: the view is re-added in the same position
+   * (only the active view is normally attached, so re-adding an inactive one
+   * would show it — guard by re-asserting the active view afterwards).
+   */
   _forceRepaint(view) {
-    // Remove and re-add the BrowserView to force the compositor to paint it.
+    const tabId = this._tabIdOfView(view);
+    const wasActive = tabId === this.activeTab;
     try {
       this.window.removeBrowserView(view);
       this.window.addBrowserView(view);
       this._layoutView(view);
-    } catch(e) {}
+    } catch(e) { return false; }
+    // Cumulative counter, reported by ui.repaint. Not just a debug aid: it is
+    // the only externally observable proof that a repaint actually happened.
+    // "The window looks stale" has no other symptom to check, and a caller
+    // cannot poll for it — polling calls repaint itself, which *consumes* the
+    // queued debounce timer and destroys the very evidence being looked for.
+    this._repaintCount = (this._repaintCount || 0) + 1;
+    // If we just re-added an inactive view it is now on top of the stack —
+    // put the real active view back so the user sees the tab they selected.
+    if (!wasActive) {
+      const active = this._getView(this.activeTab);
+      if (active) {
+        try {
+          this.window.removeBrowserView(view);
+          this.window.addBrowserView(active);
+          this._layoutView(active);
+        } catch(e) {}
+      }
+    }
+    return true;
+  }
+
+  _tabIdOfView(view) {
+    for (const [id, v] of this.tabs) if (v === view) return id;
+    return null;
+  }
+
+  /**
+   * Repaint on demand (ui.repaint). The "page shows stale content" case has
+   * no observable state to detect it from — the DOM and evaluate already report
+   * the NEW page while the compositor shows the OLD one — so the agent needs an
+   * explicit "I know this window looks wrong, redraw it" call rather than a
+   * heuristic.
+   */
+  repaint(tabId) {
+    const tid = tabId !== undefined && tabId !== null ? tabId : this.activeTab;
+    const view = this._getView(tid);
+    if (!view) return { ok: false, error: 'no-such-tab', tab: tid };
+    // Cancel any queued repaint so this one is the last word.
+    const pending = this._repaintTimers.get(tid);
+    // `was_pending` is how a caller tells whether the navigation hooks are
+    // alive: right after a navigation there is normally a queued repaint; once
+    // it has drained, there is none. It also tells the agent "you did not need
+    // to ask, the browser already scheduled one" — i.e. the window was stale
+    // for ~120ms and has since caught up on its own.
+    if (pending) { clearTimeout(pending); this._repaintTimers.delete(tid); }
+    const ok = this._forceRepaint(view);
+    return { ok, tab: tid, was_active: tid === this.activeTab, was_pending: !!pending, repaint_count: this._repaintCount || 0 };
   }
 
   closeTab(tabId) {

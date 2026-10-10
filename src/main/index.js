@@ -146,6 +146,29 @@ function createWindow() {
     pageManager._layoutAllViews(bounds);
   });
 
+  // === Window becoming visible again → force a compositor repaint ===
+  //
+  // The switches above keep renderers *running* while occluded, but they do
+  // not guarantee the *compositor* produces a fresh frame when the window comes
+  // back: macOS/Chromium can keep showing the last composited surface. The
+  // switches also only apply from process start, so they cannot fix a window
+  // that was hidden/occluded by other means.
+  //
+  // Why this matters here specifically: the product invariant is "never steal
+  // focus", so this window routinely sits behind the user's editor for minutes
+  // while the agent works. When the user finally looks at it, they may be
+  // looking at a stale frame. Repainting on show/restore/focus means the view
+  // catches up the moment it becomes visible — no clicking tabs required.
+  const repaintActive = () => { try { pageManager.repaint(pageManager.activeTab); } catch (e) {} };
+  mainWindow.on('show', repaintActive);
+  mainWindow.on('restore', repaintActive);
+  mainWindow.on('focus', repaintActive);
+  mainWindow.on('app-command-added', (_e, cmd) => {
+    // macOS window-management commands (zoom / minimize / fullscreen).
+    if (cmd === 'togglefullscreen' || cmd === 'zoom' || cmd === 'minimize') repaintActive();
+  });
+  mainWindow.on('browser-window-focus', repaintActive);
+
   // === Renderer crash handling — log only, don't kill the app ===
   // The main BrowserWindow has no real content (it hosts BrowserViews), so a
   // renderer-gone event here is usually a transient GPU/sandbox hiccup.
