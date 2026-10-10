@@ -7,7 +7,7 @@ import axExtractor from './axExtractor.js';
 import { NetworkMonitor, MAX_POST_DATA_SIZE } from './network_monitor.js';
 import { CanvasMonitor, isCanvasHookEnabled } from './canvas_monitor.js';
 import { buildCanvasHookSource } from './canvas_hook_source.js';
-import { diffValues, previewOf, safeByteLength, DEFAULT_SNAPSHOT_JS, DIFF_MAX_ENTRIES } from './snapshot_diff.js';
+import { diffValues, previewOf, safeByteLength, DEFAULT_SNAPSHOT_JS, DIFF_MAX_ENTRIES, evictOldest } from './snapshot_diff.js';
 import { probeCapabilities } from './capability_probe.js';
 import valueContract from '../shared/value_contract.cjs';
 
@@ -250,6 +250,7 @@ class PageManager {
     const id = 'snap-' + (++this._snapshotSeq);
     const entry = { tab: tid, js: params.js || null, value: r.value, at: new Date().toISOString() };
     this._snapshots.set(id, entry);
+    this._evictSnapshots();
     return {
       ok: true,
       snapshot: id,
@@ -299,7 +300,28 @@ class PageManager {
       result.rearmed = true;
     }
     if (params.forget) { this._snapshots.delete(id); result.forgotten = true; }
+    // Touch: Map iteration order is insertion order, so re-inserting a used
+    // baseline moves it to the back and makes eviction least-recently-USED
+    // rather than least-recently-created. A baseline an agent keeps diffing
+    // must not be evicted while an untouched one taken later survives.
+    if (!result.forgotten && this._snapshots.has(id)) {
+      const cur = this._snapshots.get(id);
+      this._snapshots.delete(id);
+      this._snapshots.set(id, cur);
+    }
     return result;
+  }
+
+  /**
+   * Bound the snapshot store. Until this existed, nothing but an explicit
+   * `forget` ever removed a baseline: a long agent session accumulated every
+   * snapshot it had ever taken, each holding a full page snapshot (the default
+   * one carries the whole page's text — hundreds of KB on a real page).
+   * Eviction is least-recently-used, because diff() re-inserts a baseline it
+   * touches.
+   */
+  _evictSnapshots() {
+    return evictOldest(this._snapshots);
   }
 
   /**
@@ -1912,6 +1934,11 @@ class PageManager {
     // 释放该 tab 的抓包日志与 body 内存，避免关掉的 tab 继续占着配额。
     this.networkMonitor.clearBodyFetcher(tabId);
     this.networkMonitor.clear(tabId);
+    // 该 tab 上取的快照基线一并没有意义了：页面已经没了，之后拿它 diff 只会
+    // 得到一堵"全变了"；而留着它则会让整份快照值一直占着内存。
+    for (const [sid, s] of this._snapshots) {
+      if (s.tab === tabId) this._snapshots.delete(sid);
+    }
   }
 
   listTabs() {
@@ -2525,6 +2552,11 @@ class PageManager {
       try { pending.reject(new Error('PageManager closing')); } catch (e) {}
     }
     this._pendingRequests.clear();
+    // Same reasoning as closeTab: baselines and queued repaints belong to tabs
+    // that are about to stop existing.
+    this._snapshots.clear();
+    for (const t of this._repaintTimers.values()) clearTimeout(t);
+    this._repaintTimers.clear();
     for (const [id, view] of this.tabs) {
       if (view.webContents && !view.webContents.isDestroyed()) {
         view.webContents.close();

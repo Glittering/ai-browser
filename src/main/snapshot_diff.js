@@ -17,6 +17,31 @@
 
 export const DIFF_MAX_ENTRIES = 200;
 
+// Cap on how many snapshot baselines are kept alive at once.
+export const SNAPSHOT_MAX = 50;
+
+/**
+ * Drop oldest-inserted entries from a Map until it holds at most `max`.
+ *
+ * Map preserves insertion order and callers re-insert an entry when they use it,
+ * so this evicts least-recently-USED. Lives here rather than inline in
+ * page_manager because a bug in it would silently discard a baseline an agent
+ * still needs, and that surfaces much later as "unknown-snapshot" — far from
+ * the cause. Kept pure so it is unit-testable without booting Electron.
+ *
+ * @returns {number} how many entries were dropped
+ */
+export function evictOldest(map, max = SNAPSHOT_MAX) {
+  let dropped = 0;
+  while (map.size > max) {
+    const oldest = map.keys().next();
+    if (oldest.done) break;
+    map.delete(oldest.value);
+    dropped++;
+  }
+  return dropped;
+}
+
 /**
  * Deep structural diff of two JSON-ish values.
  * @returns {{changed:boolean, added:Array, removed:Array, changed:Array, dropped:number}}
@@ -167,14 +192,47 @@ export function safeByteLength(value) {
  * Default snapshot expression: a site-agnostic structural summary of the page.
  *
  * Why a DOM summary and not something cleverer: the point of a default is that
- * the caller needs NO per-site knowledge. It walks elements that carry meaning
- * (role/label/value/checked/placeholder) and records them by a positional path,
- * so a caller can diff "what the page offers" without writing any JS.
+ * the caller needs NO per-site knowledge. It walks the elements that carry
+ * meaning (role/label/value/checked/placeholder) and records them, so a caller
+ * can diff "what the page offers" without writing any JS.
  *
- * Runs through CDP Runtime.evaluate, so it is not subject to page CSP.
- * Wrapped in try/catch returning {__error} — a throwing snapshot must be
- * reportable, not silently empty (an empty snapshot would diff as "unchanged",
- * which is the most dangerous possible failure here).
+ * Runs through CDP Runtime.evaluate, so it is not subject to page CSP. Wrapped
+ * in try/catch returning {__error}: a throwing snapshot must be REPORTABLE, not
+ * silently empty — an empty snapshot diffs as "unchanged", which is the most
+ * dangerous possible failure for this tool.
+ *
+ * Three properties are non-negotiable, each written after a measured failure:
+ *
+ * 1. ELEMENT KEYS COME FROM IDENTITY, NEVER FROM POSITION.
+ *    The key used to be `tag#index`. Inserting one element at the top re-keyed
+ *    every element below it — measured, one insertion read as
+ *    `4 added + 3 removed + 3 changed` instead of `1 added`. Pages that prepend
+ *    a notification bar / list row / lazily-loaded item (i.e. most pages) buried
+ *    the real signal under a wall of noise. Keys are therefore derived from
+ *    id / name / placeholder / href, and only when several elements share an
+ *    identity does a second pass disambiguate — first by label (content, and
+ *    stable under insertion), finally by occurrence order for genuinely
+ *    interchangeable siblings. A unique identity is used as-is so that a label
+ *    change reads as `changed` rather than `removed + added`.
+ *
+ * 2. THE TEXT FALLBACK IS FINGERPRINTED OVER ITS WHOLE LENGTH.
+ *    The element walk only covers elements that carry meaning; plenty of pages
+ *    put their real state in a plain <div> (a status line, a result count, an
+ *    "idle"→"clicked" readout). Whole-page text is the fallback for that — but
+ *    truncating it to 4000 chars left a hole: a SAME-LENGTH change past char
+ *    4000 produced an identical `text` and an identical `textLen`, so the diff
+ *    said "unchanged" while the page had changed. Measured: flipping a <div>
+ *    from AAAA to BBBB beyond char 4000 → verdict=unchanged, while the same
+ *    flip inside the first 4000 chars was caught. `textHash` (whole text) closes
+ *    it; `textSegs` (capped per-chunk hashes) only localises WHERE it moved.
+ *
+ * 3. THE EXPRESSION STAYS LEAN.
+ *    It is shipped to the page on every snapshot, and `ui.evaluate` refuses
+ *    scripts over `EVAL_MAX_LENGTH` (5000) chars. The default is evaluated
+ *    internally rather than through that guard, so it would not be *rejected* —
+ *    but a default that no longer fits the documented eval contract is a trap
+ *    for whoever later routes it through the guarded path. Rationale lives in
+ *    this comment block, not inside the string; SD-031 pins the length.
  */
 export const DEFAULT_SNAPSHOT_JS = `(function(){
   try {
@@ -182,15 +240,13 @@ export const DEFAULT_SNAPSHOT_JS = `(function(){
     var all = document.querySelectorAll(
       'a,button,input,textarea,select,option,[role],[aria-label],[contenteditable="true"],canvas,img'
     );
-    var n = 0;
-    for (var i = 0; i < all.length && n < 1500; i++) {
+    var recs = [];
+    for (var i = 0; i < all.length && recs.length < 1500; i++) {
       var e = all[i];
       var r = e.getBoundingClientRect();
       var cs = null;
       try { cs = getComputedStyle(e); } catch (_) {}
       if (cs && (cs.display === 'none' || cs.visibility === 'hidden')) continue;
-      // Skip zero-size boxes: collapsed/hidden-by-layout nodes otherwise show up
-      // as phantom "removed/added" churn across diffs.
       if (r.width < 1 && r.height < 1 && e.tagName !== 'CANVAS') continue;
       var label = e.getAttribute('aria-label')
         || (e.labels && e.labels[0] && e.labels[0].textContent)
@@ -199,35 +255,46 @@ export const DEFAULT_SNAPSHOT_JS = `(function(){
       var val = null;
       if ('value' in e) { try { val = String(e.value).slice(0, 120); } catch (_) {} }
       else if ('checked' in e) { try { val = !!e.checked; } catch (_) {} }
-      var key = e.tagName.toLowerCase() + '#' + i + (e.id ? '#' + e.id : '');
-      out.nodes[key] = {
-        t: e.tagName.toLowerCase(),
-        r: (e.getAttribute('role') || ''),
+      var tag = e.tagName.toLowerCase();
+      recs.push({
+        tag: tag,
+        ident: e.id ? '#' + e.id
+          : (e.getAttribute('name') ? '[name=' + e.getAttribute('name') + ']' : '')
+          || (e.getAttribute('placeholder') ? '[ph=' + e.getAttribute('placeholder') + ']' : '')
+          || (tag === 'a' ? '[' + String(e.getAttribute('href') || '').slice(0, 60) + ']' : ''),
         l: String(label || '').slice(0, 80),
+        r: e.getAttribute('role') || '',
         v: val,
         d: e.disabled === true ? 1 : 0,
         w: Math.round(r.width),
         h: Math.round(r.height),
-      };
-      n++;
+      });
     }
-    out.count = n;
-    // Whole-page visible text, whitespace-normalised.
-    //
-    // Needed because the element walk above only covers elements that CARRY
-    // meaning (role / label / value / canvas / img). Plenty of real pages put
-    // their actual state in a plain <div> — a status line, a result count, a
-    // "idle"→"clicked" readout — and a semantic-element diff would report
-    // "unchanged" while the thing the user cares about had changed. Verified by
-    // construction: without this, clicking a button that rewrites a <div>
-    // produced verdict=unchanged.
+    var cnt = {}, used = {};
+    for (var b = 0; b < recs.length; b++) { var bo = recs[b].tag + recs[b].ident; cnt[bo] = (cnt[bo] || 0) + 1; }
+    for (var j = 0; j < recs.length; j++) {
+      var c = recs[j], t = c.tag + c.ident;
+      var cand = (cnt[t] > 1 && c.l) ? t + '~' + c.l.slice(0, 40) : t;
+      var key = cand, k = 1;
+      while (used[key]) { key = cand + '#' + k++; }
+      used[key] = 1;
+      out.nodes[key] = { t: c.tag, r: c.r, l: c.l, v: c.v, d: c.d, w: c.w, h: c.h };
+    }
+    out.count = recs.length;
     try {
       var txt = (document.body && (document.body.innerText || document.body.textContent)) || '';
-      // Collapse runs of whitespace so line wrapping / layout jitter does not
-      // read as a content change.
       txt = txt.replace(/\\s+/g, ' ').trim();
+      var h32 = function (s) {
+        var h = 5381;
+        for (var p = 0; p < s.length; p++) h = ((h << 5) + h + s.charCodeAt(p)) | 0;
+        return (h >>> 0).toString(36);
+      };
       out.text = txt.slice(0, 4000);
       out.textLen = txt.length;
+      out.textHash = h32(txt);
+      var SEG = 1024, segs = [];
+      for (var q = 0; q < 256 && q * SEG < txt.length; q++) segs.push(h32(txt.substr(q * SEG, SEG)));
+      out.textSegs = segs;
     } catch (_) {}
     return out;
   } catch (e) {

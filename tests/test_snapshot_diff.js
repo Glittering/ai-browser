@@ -6,7 +6,9 @@
 // case here is written to be falsifiable — including the negative controls that
 // prove the diff does NOT invent changes.
 import { describe, it, expect } from 'vitest';
-import { diffValues, previewOf, previewValue, safeByteLength, DEFAULT_SNAPSHOT_JS, DIFF_MAX_ENTRIES } from '../src/main/snapshot_diff.js';
+import { JSDOM } from 'jsdom';
+import { diffValues, previewOf, previewValue, safeByteLength, DEFAULT_SNAPSHOT_JS, DIFF_MAX_ENTRIES, evictOldest, SNAPSHOT_MAX } from '../src/main/snapshot_diff.js';
+import { EVAL_MAX_LENGTH } from '../src/shared/guards.js';
 
 const changedOf = (a, b) => diffValues(a, b).hasChanges;
 
@@ -192,8 +194,9 @@ describe('preview / 体积报告', () => {
 });
 
 describe('默认快照表达式', () => {
-  // vitest 的默认环境没有 DOM，所以这里只做**静态**检查：在真实页面里求值由
-  // e2e（tools/_oneoff/diff_capabilities_e2e.cjs 的 2-x 组）覆盖，那里有真浏览器。
+  // vitest 的默认环境没有 DOM，所以这里做**静态**检查；下面另有一个用 jsdom
+  // 真跑一遍表达式的分组（"默认快照 —— 行为"），因为静态检查永远发现不了
+  // "表达式能跑、但判据是错的"这类缺陷。
   it('SD-027: 是合法的 JS 表达式（能被 Function 构造，不抛语法错）', () => {
     expect(() => new Function('return ' + DEFAULT_SNAPSHOT_JS)).not.toThrow();
   });
@@ -218,5 +221,154 @@ describe('默认快照表达式', () => {
     // "点按钮把 idle 改成 clicked" 判成了 unchanged。文本兜底不可省。
     expect(DEFAULT_SNAPSHOT_JS).toContain('innerText');
     expect(DEFAULT_SNAPSHOT_JS).toMatch(/querySelectorAll\(\s*'a,button/);
+  });
+
+  it('SD-031: 表达式必须短于 ui.evaluate 的 5000 字符守门', () => {
+    // 这个默认表达式每次快照都要发进页面。它目前走内部求值、不经过
+    // evaluateGuardError，所以超长不会被**拒**——但一个超出已文档化 eval 契约的
+    // 默认值，是留给"以后有人把它接到守门路径上"的陷阱。注释写在字符串外面，
+    // 就是为了让它保持精简。
+    expect(DEFAULT_SNAPSHOT_JS.length).toBeLessThan(EVAL_MAX_LENGTH);
+  });
+});
+
+describe('快照基线回收', () => {
+  // 此前除显式 forget 外没有任何东西删除快照：长会话会把取过的每个基线都留着，
+  // 而默认快照含整页文本。淘汰写错会把 agent 还要用的基线悄悄丢掉，且症状远在
+  // 别处（"unknown-snapshot"），所以这一组必须存在。
+  const fill = (n) => { const m = new Map(); for (let i = 0; i < n; i++) m.set('s' + i, i); return m; };
+
+  it('SD-039: 未超上限时不丢任何东西', () => {
+    const m = fill(SNAPSHOT_MAX);
+    expect(evictOldest(m)).toBe(0);
+    expect(m.size).toBe(SNAPSHOT_MAX);
+  });
+
+  it('SD-040: 超上限时按插入顺序从最旧的开始丢', () => {
+    const m = fill(SNAPSHOT_MAX + 3);
+    expect(evictOldest(m)).toBe(3);
+    expect(m.size).toBe(SNAPSHOT_MAX);
+    expect(m.has('s0')).toBe(false);
+    expect(m.has('s2')).toBe(false);
+    expect(m.has('s3')).toBe(true);          // 刚好活下来
+    expect(m.has('s' + (SNAPSHOT_MAX + 2))).toBe(true);
+  });
+
+  it('SD-041: 重新 set 一个已存在的 key 会让它变成"最近使用"（LRU 而非 FIFO）', () => {
+    const m = fill(SNAPSHOT_MAX);
+    // 使用 s0（Map 上先删后加 = 移到队尾），再压入一个新基线
+    const v = m.get('s0');
+    m.delete('s0'); m.set('s0', v);
+    m.set('fresh', 1);
+    evictOldest(m);
+    expect(m.has('s0')).toBe(true);          // 刚用过 → 留下
+    expect(m.has('s1')).toBe(false);         // 反而它成了最旧的
+  });
+
+  it('SD-042: 空 map 与上限 0 都不炸', () => {
+    expect(evictOldest(new Map())).toBe(0);
+    expect(evictOldest(fill(5), 0)).toBe(5);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 行为回归 —— 用 jsdom 真跑一遍 DEFAULT_SNAPSHOT_JS。
+//
+// 这一组存在的理由：上面全是静态/纯函数断言，它们能证明"函数没写错"，但证明
+// 不了"表达式在真 DOM 上量到的是对的东西"。下面两条缺陷**都不崩、也不报错**，
+// 只是让每一次验证假绿或淹在噪声里 —— 正是最需要被钉住的那一类。
+// ---------------------------------------------------------------------------
+
+/**
+ * Run DEFAULT_SNAPSHOT_JS against a real (jsdom) DOM.
+ * jsdom has no layout engine: every getBoundingClientRect() is 0x0, which the
+ * expression's zero-size filter would skip for every element — so we stub a
+ * non-zero box, otherwise these tests would silently assert on an empty
+ * snapshot and pass for the wrong reason.
+ */
+function snapshotOfHtml(html) {
+  const dom = new JSDOM(`<!DOCTYPE html><html><body>${html}</body></html>`, { pretendToBeVisual: true });
+  const win = dom.window;
+  win.Element.prototype.getBoundingClientRect = function () {
+    return { x: 0, y: 0, width: 100, height: 20, top: 0, left: 0, right: 100, bottom: 20 };
+  };
+  const fn = new Function('window', 'document', 'location', 'getComputedStyle', 'return ' + DEFAULT_SNAPSHOT_JS);
+  const value = fn(win, win.document, win.location, win.getComputedStyle.bind(win));
+  dom.window.close();
+  return value;
+}
+
+describe('默认快照 —— 行为（jsdom）', () => {
+  it('SD-032: 元素 key 不随位置漂移 —— 顶部插入 1 个元素只报 1 条 added', () => {
+    // 旧实现用 `tag#index` 做 key：顶部插入一个元素，下面每个元素的 key 全部
+    // 右移。实测 1 次插入被报成 `4 added + 3 removed + 3 changed`（7 条噪声），
+    // 真正的信号被埋掉 —— 而"插入一个通知条/列表行/懒加载项"是绝大多数页面
+    // 都会做的事。
+    const before = snapshotOfHtml(
+      '<div id="status">idle</div><button id="a">Alpha</button><button id="b">Beta</button><button id="c">Gamma</button>'
+    );
+    const after = snapshotOfHtml(
+      '<button id="new">Injected</button><div id="status">idle</div><button id="a">Alpha</button><button id="b">Beta</button><button id="c">Gamma</button>'
+    );
+    const d = diffValues(before, after);
+    expect(d.added.map((a) => a.path)).toEqual(['nodes.button#new']);
+    expect(d.removed).toEqual([]);
+    // 没有任何**元素**被报成"变了"；剩下的 changed 只该是整页文本/计数这类
+    // 确实变了的东西。
+    expect(d.changed.filter((c) => c.path.startsWith('nodes'))).toEqual([]);
+  });
+
+  it('SD-033: 无 id 的同标签兄弟也不漂移（靠 label 去重）', () => {
+    const before = snapshotOfHtml('<button>Alpha</button><button>Beta</button><button>Gamma</button>');
+    const after = snapshotOfHtml('<button>Injected</button><button>Alpha</button><button>Beta</button><button>Gamma</button>');
+    const d = diffValues(before, after);
+    expect(d.added.map((a) => a.path)).toEqual(['nodes.button~Injected']);
+    expect(d.removed).toEqual([]);
+    expect(d.changed.filter((c) => c.path.startsWith('nodes'))).toEqual([]);
+  });
+
+  it('SD-034: 唯一身份的元素的文案变化报 changed，而不是 removed + added', () => {
+    // key 取身份（这里 id=go）而非文案，所以按钮文案 Start→Stop 是**内容**变化，
+    // 应该读到 `changed`。若 key 里混进了文案，就会被读成"按钮被换掉了"。
+    const before = snapshotOfHtml('<button id="go">Start</button>');
+    const after = snapshotOfHtml('<button id="go">Stop</button>');
+    const d = diffValues(before, after);
+    expect(d.added).toEqual([]);
+    expect(d.removed).toEqual([]);
+    expect(d.changed.some((c) => c.path === 'nodes.button#go.l')).toBe(true);
+  });
+
+  it('SD-035: 完全相同的两个无标识元素必须拿到两个不同的 key（不许静默合并）', () => {
+    // 合并的后果是"其中一个变了却不报" —— 又一次假绿。
+    const v = snapshotOfHtml('<button>Same</button><button>Same</button>');
+    expect(Object.keys(v.nodes)).toHaveLength(2);
+  });
+
+  it('SD-036: 4000 字符之后的等长变化必须被检出（text 假绿的回归）', () => {
+    // 旧实现只截前 4000 字符 + 记 textLen：等长变化落在 4000 之后时两者都不变，
+    // 于是"changed"被报成"unchanged"。整页文本是这个工具对普通 <div> 的唯一
+    // 观测手段，所以这是纯粹的假绿。
+    const filler = 'x'.repeat(4200);
+    const before = snapshotOfHtml(`<p>${filler}</p><div id="out">AAAA</div>`);
+    const after = snapshotOfHtml(`<p>${filler}</p><div id="out">BBBB</div>`);
+    expect(diffValues(before, after).hasChanges).toBe(true);
+  });
+
+  it('SD-037: 对照组 —— 同一处变化放在前 4000 字符内同样被检出', () => {
+    // 阳性对照：证明"观测手段本身有效"，否则 SD-036 绿了也不能说明什么。
+    const filler = 'x'.repeat(4200);
+    const before = snapshotOfHtml(`<div id="out">AAAA</div><p>${filler}</p>`);
+    const after = snapshotOfHtml(`<div id="out">BBBB</div><p>${filler}</p>`);
+    expect(diffValues(before, after).hasChanges).toBe(true);
+  });
+
+  it('SD-038: 阴性对照 —— 同一份页面反复快照必须判 unchanged', () => {
+    // 新增的 key 派生与分段指纹都不许自己造出噪声，否则每次 diff 都"有变化"，
+    // 这个工具就废了。
+    const html = '<div id="s">idle</div><button id="a">Alpha</button><input placeholder="q"><a href="/x">link</a>';
+    const a = snapshotOfHtml(html);
+    for (let i = 0; i < 20; i++) {
+      expect(diffValues(a, snapshotOfHtml(html)).hasChanges).toBe(false);
+    }
   });
 });
