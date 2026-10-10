@@ -51,17 +51,22 @@ const INTERACT_PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>I
               background: #fef9c3; border: 1px solid #ca8a04; cursor: grab; }
   #cover    { position: absolute; left: 240px; top: 440px; width: 120px; height: 60px;
               background: rgba(0,0,0,0.06); }
+  #panbox   { position: absolute; left: 200px; top: 540px; width: 160px; height: 80px;
+              background: #fae8ff; border: 1px solid #a21caf; cursor: grab; }
 </style>
 </head><body>
 <div id="dragbox" role="group" aria-label="draggable box"><div id="handle" class="handle" data-handlepos="right"></div></div>
 <div id="dropzone" role="group" aria-label="drop zone">DROPZONE<div id="fakehandle" class="handle" data-handlepos="right" style="position:absolute;right:0;top:50%;width:16px;height:32px;pointer-events:none;opacity:0"></div></div>
 <div id="covered" role="group" aria-label="covered box">COVERED</div>
 <div id="cover" role="group" aria-label="overlay">OVERLAY</div>
+<div id="panbox" role="group" aria-label="middle-drag pan box">PANBYMIDDLE</div>
 <button id="victim">DELETE-ME</button>
 <div id="keylog">none</div>
 <div id="wheellog">none</div>
 <script>
-  window.__log = { down: [], move: [], up: [], drops: [], keys: [], anyDown: [], wheels: [] };
+  window.__log = { down: [], move: [], up: [], drops: [], keys: [], anyDown: [], wheels: [], panDown: [], panUp: [] };
+  // 右键拖是画布类应用常见的"平移"绑定；Electron 里右键会弹原生菜单，先挡掉。
+  document.addEventListener('contextmenu', function (e) { e.preventDefault(); });
   // 滚轮：ui.scroll 只是 window.scrollBy，对画布类应用无效；画布靠 wheel 事件缩放平移。
   // 这里记录真的收到了 wheel，以及修饰键（画布缩放通常是 ctrl+wheel）。
   window.addEventListener('wheel', function (e) {
@@ -101,6 +106,27 @@ const INTERACT_PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>I
   }
   makeDraggable(document.getElementById('dragbox'));
   makeDraggable(document.getElementById('covered'));
+
+  // #panbox 只在**中键/右键**按下时平移 —— 画布类应用的常见绑定（左键留给框选）。
+  // 它是 drag.button 的阳性对照：左键拖它必须纹丝不动，否则"键选对了"无从证明。
+  (function () {
+    var el = document.getElementById('panbox'), ref = null, btn = null;
+    el.addEventListener('pointerdown', function (e) {
+      if (e.button !== 1 && e.button !== 2) return;
+      btn = e.button; ref = { x: e.clientX, y: e.clientY };
+      window.__log.panDown.push([e.button, e.clientX, e.clientY]);
+      try { el.setPointerCapture(e.pointerId); } catch (err) {}
+    });
+    window.addEventListener('pointermove', function (e) {
+      if (ref === null || btn === null || e.buttons === 0) return;
+      el.style.transform = 'translate(' + (e.clientX - ref.x) + 'px,' + (e.clientY - ref.y) + 'px)';
+    });
+    window.addEventListener('pointerup', function (e) {
+      if (btn === null) return;
+      window.__log.panUp.push([e.button]);
+      ref = null; btn = null;
+    });
+  })();
 
   window.addEventListener('keydown', function (e) {
     window.__log.keys.push([e.key, e.code, !!(e.metaKey || e.ctrlKey), e.shiftKey]);
@@ -306,6 +332,55 @@ async function main() {
   check("D-16 不可命中的装饰性 handle 不被误报为连接点（如实降级为 edge）",
     !!(r && r.drag_from && r.drag_from.via === "edge"),
     JSON.stringify(r && r.drag_from));
+
+  // D-17..D-20 拖拽按键。画布类应用常把"平移"绑在中键/右键上（左键留给框选），
+  // 只支持左键的拖拽在真实画布上就只剩"框选"一种结果。阳性对照是 #panbox：
+  // 它只认中键/右键，左键拖它必须不动。
+  const panId = await aiId("panbox");
+  const resetPan = () => ev("(function(){document.getElementById('panbox').style.transform='';return true;})()", tab);
+
+  const pan0 = await rectOf("panbox", tab);
+  const lgP0 = await logOf(tab);
+  r = (await b.call("ui.act", { action: "drag", target: panId, tab, params: { dx: 60, dy: 20, button: "middle" } })).result;
+  await sleep(400);
+  let lgP = await logOf(tab);
+  const pan1 = await rectOf("panbox", tab);
+  check("D-17 drag button:'middle' 派发的是中键（页面收到 button===1）",
+    !!(r && r.success === true && r.button === "middle") &&
+      (lgP.panDown || []).length - (lgP0.panDown || []).length === 1 &&
+      lgP.panDown[lgP.panDown.length - 1][0] === 1,
+    JSON.stringify({ actButton: r && r.button, got: lgP.panDown[lgP.panDown.length - 1] }));
+  check("D-18 中键拖拽真的平移了只认中键的容器，且位移精确",
+    pan1[0] - pan0[0] === 60 && pan1[1] - pan0[1] === 20,
+    `${JSON.stringify(pan0)} -> ${JSON.stringify(pan1)} 期望 (+60,+20)`);
+
+  // D-19 对照组：同一个容器换左键拖，必须纹丝不动。
+  // 没有这一条，D-17/D-18 就不能排除"容器其实对任何键都平移"。
+  await resetPan();
+  await sleep(200);
+  const panA = await rectOf("panbox", tab);
+  r = (await b.call("ui.act", { action: "drag", target: panId, tab, params: { dx: 60, dy: 20 } })).result;
+  await sleep(400);
+  const panB = await rectOf("panbox", tab);
+  check("D-19 对照：同一容器用左键拖纹丝不动（默认不误发中键）",
+    !!(r && r.success === true) && panB[0] === panA[0] && panB[1] === panA[1],
+    `${JSON.stringify(panA)} -> ${JSON.stringify(panB)}（应不变）`);
+
+  await resetPan();
+  await sleep(200);
+  const panC = await rectOf("panbox", tab);
+  const lgP2 = await logOf(tab);
+  r = (await b.call("ui.act", { action: "drag", target: panId, tab, params: { dx: 30, dy: 10, button: "right" } })).result;
+  await sleep(400);
+  lgP = await logOf(tab);
+  const panD = await rectOf("panbox", tab);
+  check("D-20 drag button:'right' 派发的是右键（页面收到 button===2）并生效",
+    !!(r && r.success === true && r.button === "right") &&
+      (lgP.panDown || []).length - (lgP2.panDown || []).length === 1 &&
+      lgP.panDown[lgP.panDown.length - 1][0] === 2 &&
+      panD[0] - panC[0] === 30 && panD[1] - panC[1] === 10,
+    JSON.stringify({ actButton: r && r.button, got: lgP.panDown[lgP.panDown.length - 1], move: [panD[0] - panC[0], panD[1] - panC[1]] }));
+  note("D-17..D-20 意义：真实画布上「中键/右键拖=平移、左键拖=框选」，没有按键就无法驱动平移");
 
   // ---- W. 受信滚轮（画布缩放/平移的唯一通路）-----------------------------
   console.log("\n[W 受信滚轮]");

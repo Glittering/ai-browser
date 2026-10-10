@@ -149,6 +149,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             : undefined,
           to_anchor: args.to_anchor,
           hold: args.hold,
+          button: args.button,
           // press：单个键或按键序列
           key: args.key,
           keys: args.keys,

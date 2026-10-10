@@ -1112,6 +1112,10 @@ class PageManager {
 
     const dbg = view.webContents.debugger;
     const send = (m, p) => dbg.sendCommand(m, p);
+    // 按键：画布类应用常把平移绑在中键/右键拖上（左键留给框选），所以要能选按键。
+    const btnParam = String(params.button || 'left').toLowerCase();
+    const btn = btnParam === 'middle' ? 'middle' : btnParam === 'right' ? 'right' : 'left';
+    const downButtons = btn === 'middle' ? 4 : btn === 'right' ? 2 : 1;
     const steps = Math.min(60, Math.max(2, Number(params.steps) || 14));
     const total = Math.min(5000, Math.max(60, Number(params.duration_ms) || 420));
     const per = Math.max(4, Math.round(total / steps));
@@ -1127,24 +1131,24 @@ class PageManager {
     // 同坐标先 move 一次：让页面进入 hover 态（部分实现只在 hover 后才可拖）。
     await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: from.x, y: from.y, modifiers: mod });
     await new Promise((r) => setTimeout(r, 30));
-    await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: from.x, y: from.y, button: 'left', buttons: 1, clickCount: 1, modifiers: mod });
+    await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: from.x, y: from.y, button: btn, buttons: downButtons, clickCount: 1, modifiers: mod });
     // 按下后必须在**同一点**再补一次 mouseMoved：拖拽实现普遍以"按下后的第一个
     // mousemove"为位移基准点，若直接进位移循环，这一步的偏移会被吃掉 —— 实测
     // 请求 (-180,150) 只走到 (-167,139)，恰好是 13/14，稳定复现。
-    await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: from.x, y: from.y, button: 'left', buttons: 1, modifiers: mod });
+    await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: from.x, y: from.y, button: btn, buttons: downButtons, modifiers: mod });
     await new Promise((r) => setTimeout(r, Math.max(20, per)));
     // 中间位移是拖拽的本质：没有它，mousePressed/mouseReleased 同坐标就只是"点击"。
     for (let i = 1; i <= steps; i++) {
       const t = i / steps;
       const x = Math.round(from.x + (to.x - from.x) * t);
       const y = Math.round(from.y + (to.y - from.y) * t);
-      await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'left', buttons: 1, modifiers: mod });
+      await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: btn, buttons: downButtons, modifiers: mod });
       await new Promise((r) => setTimeout(r, per));
     }
     // 收尾再补一次终点位置并等一拍再释放：实测「最后一步 mouseMoved 会被紧跟着的
     // mouseReleased 吃掉」，位移会稳定少 1/steps（14 步时实测 -180,150 只走了
     // -167,139 = 13/14）。多补一次终点让落点精确。
-    await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: to.x, y: to.y, button: 'left', buttons: 1, modifiers: mod });
+    await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: to.x, y: to.y, button: btn, buttons: downButtons, modifiers: mod });
     await new Promise((r) => setTimeout(r, Math.max(30, per)));
     // 终点"停稳"：再补几个亚像素级的微动。高缩放的画布上连接点只有 1–3 像素，
     // 一次到点未必被框架的命中判定捕捉到（实测 8.3% 缩放的 React Flow 画布上
@@ -1152,15 +1156,16 @@ class PageManager {
     const settle = Number(params.settle_moves) >= 0 ? Number(params.settle_moves) : 3;
     for (let k = 0; k < settle; k++) {
       const jx = to.x + (k % 2 === 0 ? 1 : -1);
-      await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: jx, y: to.y, button: 'left', buttons: 1, modifiers: mod });
+      await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: jx, y: to.y, button: btn, buttons: downButtons, modifiers: mod });
       await new Promise((r) => setTimeout(r, Math.max(12, Math.round(per / 3))));
     }
-    await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: to.x, y: to.y, button: 'left', buttons: 1, modifiers: mod });
+    await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: to.x, y: to.y, button: btn, buttons: downButtons, modifiers: mod });
     await new Promise((r) => setTimeout(r, Math.max(20, Math.round(per / 2))));
-    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: to.x, y: to.y, button: 'left', buttons: 0, clickCount: 1, modifiers: mod });
+    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: to.x, y: to.y, button: btn, buttons: 0, clickCount: 1, modifiers: mod });
     return {
       success: true,
       dragged_via: 'cdp-drag',
+      button: btn,
       target: aiId,
       drag_from: from,
       drag_to: to,

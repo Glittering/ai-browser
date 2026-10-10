@@ -55,6 +55,7 @@ export const MCP_TOOLS = [
         from_anchor: { type: 'string', enum: ['center', 'left', 'right', 'top', 'bottom'], description: 'drag: which point of target to grab; a side prefers that node\'s connection handle (default center).' },
         to_anchor: { type: 'string', enum: ['center', 'left', 'right', 'top', 'bottom'], description: 'drag: which point of to_target to drop on.' },
         hold: { type: 'array', items: { type: 'string' }, description: 'drag: modifier keys held during the drag (e.g. ["Shift"]).' },
+        button: { type: 'string', enum: ['left', 'middle', 'right'], description: 'drag: mouse button (default left). Canvas apps often pan on middle/right drag.' },
         key: { type: 'string', description: 'press: a key name such as Delete, Escape, ArrowRight, Enter, or a combo like "Meta+a".' },
         delta_x: { type: 'number', description: 'wheel: horizontal scroll amount (positive scrolls right).' },
         delta_y: { type: 'number', description: 'wheel: vertical scroll amount. Negative scrolls up / zooms out; add hold:["Control"] for canvas zoom.' },
