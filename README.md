@@ -10,12 +10,12 @@
   <img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue.svg">
   <img alt="Electron" src="https://img.shields.io/badge/built%20with-Electron%2033-9cf">
   <img alt="Platforms" src="https://img.shields.io/badge/platforms-macOS%20%E2%80%A2%20Linux-blueviolet">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-239%20unit%20%2B%20324%20e2e-2ea043">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-286%20unit%20%2B%20356%20e2e-2ea043">
   <img alt="MCP" src="https://img.shields.io/badge/spec-MCP%20(stdio)-f5b23b">
 </p>
 
 **What it is.** An Electron app that exposes its tabs over two equivalent interfaces — an MCP server
-(13 `browse_*` tools) and a raw WebSocket JSON-RPC API (`ws://localhost:9223`, methods `ui.*`). Your
+(15 `browse_*` tools) and a raw WebSocket JSON-RPC API (`ws://localhost:9223`, methods `ui.*`). Your
 agent navigates, reads a structured semantic tree (`role` / `label` / `value` / `states` / `actions`),
 and clicks or types by `data-ai-id`. There is no screenshot step and no OCR: `src/` contains no
 capture call at all.
@@ -102,7 +102,7 @@ or any system prompt; it teaches the tool loop, the token-saving params, and whe
 
 ## The MCP tools
 
-Source of truth: [`src/main/mcp_tools.js`](src/main/mcp_tools.js). There are 13 — a deliberately
+Source of truth: [`src/main/mcp_tools.js`](src/main/mcp_tools.js). There are 15 — a deliberately
 small surface, since every tool schema is injected into your agent's context on every turn.
 
 | Tool | One line |
@@ -110,6 +110,8 @@ small surface, since every tool schema is injected into your agent's context on 
 | `browse_navigate` | Load a URL in the active (or given) tab. |
 | `browse_get_tree` | Read the page as a semantic tree + page context (modals, messages, stats). |
 | `browse_act` | `click` / `type` (append at caret) / `setContent` (replace all) / `clear` / `focus` / `hover` / `scroll_to` / `upload` / `get_value` (read-only) / `drag` / `press` / `wheel` on a `data-ai-id`. |
+| `browse_diff` | `snapshot` a baseline, then `diff` to get added / removed / changed paths with before/after values. **This is how you prove an action did anything.** |
+| `browse_capabilities` | Probe what a page affords and which route to take on it (see below). |
 | `browse_canvas` | Read `<canvas>` through captured draw calls: `list` / `read` / `configure` / `capture`. **Experimental — see the canvas section below.** |
 | `browse_evaluate` | Run a JS *expression* in page context (5000-char cap, Node identifiers rejected). |
 | `browse_scroll` | Scroll the page, or scroll an element into view. |
@@ -120,6 +122,53 @@ small surface, since every tool schema is injected into your agent's context on 
 | `browse_set_active_tab` | Switch which tab subsequent calls act on. |
 | `browse_network` | Chrome-DevTools-style network inspection: `list` (filter by method / URL / status / type), `get` (request + response headers and bodies), `clear`, `configure`. |
 | `browse_quit` | Shut the whole browser down and release the process. |
+
+### Prove it happened: `browse_diff`
+
+A tool reporting `success` is **not** evidence that anything changed — the browser will happily
+tell you a click landed on an element that ignored it, a drag completed when the app snapped the
+node somewhere else entirely, or a keystroke went into a field that then cleared itself. Every
+write should be wrapped in a snapshot/diff pair:
+
+```js
+const base = await browse_diff({ operation: "snapshot", js: "app.graph.serialize()" });
+await browse_act({ action: "click", target: "e:button-25" });
+const d = await browse_diff({ operation: "diff", snapshot: base.snapshot });
+// d.verdict === "changed"
+// d.changed_paths → [{ path: "nodes[7].widgets.steps", from: 20, to: 21, reason: "value" }]
+```
+
+- `verdict` is an explicit `"changed"` / `"unchanged"`, so "nothing happened" is never inferred from
+  an empty array you might have built wrong.
+- Every entry carries a `path` plus **both** values, so you can check *why* it changed.
+- Arrays are compared **element-wise by index**, not as sets: a moved node reads as changed entries,
+  never as "one removed + one added" (which would look like two events instead of one reorder).
+- Float noise is tolerated (`201354.48743718592` vs `...1859` is *not* a change), but a real 22-unit
+  coordinate shift is.
+- Omit `js` for a **site-agnostic DOM snapshot** — role / label / value / disabled / size per
+  element plus the page's visible text. No per-site JS required, and plain `<div>` status text
+  changes are caught.
+- `rearm: true` moves the baseline forward for the *next* diff, so you can loop "assert nothing
+  changed" across many steps; `forget: true` drops it.
+- A throwing expression, a missing id, or a cross-tab comparison all return an explicit error.
+  They never degrade into an empty snapshot, which would make every subsequent diff report
+  "unchanged" — the one failure mode that turns all verification into false green.
+
+### Which route on this page? `browse_capabilities`
+
+Before improvising on an unfamiliar site, ask. One call reports the semantic-tree size and its
+role/action histogram, canvas count, same-origin iframes and their internal size, objects the app
+hangs off `window` (auto-detected by shape: `has .graph` / `._nodes` / `getState` / `serialize`),
+the JSON endpoints it has already called, and a **recommended route with the evidence for it**:
+
+- `L1_structured_data` — the app exposes its own model; read and write the whole graph as JSON.
+- `L2_semantic_tree` — enough elements to find targets by role/label and drive them by `data-ai-id`.
+- `L3_pointer_gestures` — only for what has no structured path (drag a node, draw a connection,
+  wheel pan/zoom). Always follow with `browse_diff`.
+
+It also flags traps explicitly: "the body is in a same-origin iframe" or "there are 7 canvases but
+only 17 semantic elements — stop trying to hit canvas-drawn items with coordinates and go find the
+data model instead".
 
 Notes that save round-trips:
 
@@ -254,6 +303,9 @@ MCP is a thin stdio adapter. Anything MCP can do is reachable directly over JSON
 | `ui.get_tree` | Semantic tree (+ context). Params: `focusedOnly`, `ax`, `subset`, `mode`, `tab` | `browse_get_tree` |
 | `ui.act` | `params.action` + `params.target`; per-action args nested under `params.params` | `browse_act` |
 | `ui.navigate` | Load a URL (`params.url`, optional `tab`) | `browse_navigate` |
+| `ui.snapshot` / `ui.diff` | Capture a baseline (`params.js`, optional `label`) and diff against it (`params.snapshot`, `rearm`, `forget`) | `browse_diff` |
+| `ui.capabilities` | Probe the page: tree histogram, canvas, iframes, app globals, endpoints, recommended route | `browse_capabilities` |
+| `ui.repaint` | Force the compositor to redraw a tab; returns `repaint_count` so a repaint is provable | — (WS only) |
 | `ui.evaluate` | Run JS in page context, same guard as MCP | `browse_evaluate` |
 | `ui.scroll` | Scroll page or element (`direction`, `amount`, `target`). **Document scrolling only** — for canvas apps use `ui.act{action:'wheel'}`. | `browse_scroll` |
 | `ui.wait` | Poll until a condition or timeout | `browse_wait` |
@@ -365,6 +417,26 @@ node examples/read-page.mjs
 
 ## Troubleshooting
 
+**The page updated but the window still shows the old one.** This used to require clicking tabs
+back and forth, because the only thing that forced the compositor to redraw a `BrowserView` was
+`setActiveTab` doing `removeBrowserView` + `addBrowserView` + `setBounds` — navigation never did it.
+Now every navigation signal triggers it: `did-navigate`, `did-navigate-in-page` (SPA route changes
+fire no load event at all), `did-frame-finish-load` (a canvas editor inside an iframe boots long
+after the top document finished), plus window `show` / `restore` / `focus` — which matters here
+because this window is designed never to steal your focus, so it sits behind your editor for
+minutes at a time. If it still looks stale, `ui.repaint` forces it on demand and returns
+`repaint_count` so you can confirm a repaint actually happened.
+
+**An action reported success but nothing changed.** Two causes worth knowing:
+
+- Over raw WS, `ui.act` nests its per-action arguments under `params.params` — `{action:"type",
+  target:"<id>", params:{text:"…"}}`. Flattening it to `{text:"…"}` passes an empty string, which
+  used to hit the idempotent short-circuit and report `success` with nothing typed. It now returns
+  an explicit error instead.
+- Sometimes the action genuinely did nothing (an overlay ate the click, the app reverted the
+  change). That is what `browse_diff` is for — wrap the write in a snapshot/diff pair rather than
+  trusting the return value.
+
 **The app restarts itself.** Electron's NetworkService can wedge as a whole: the port still listens,
 every navigation fails with `ERR_FAILED`, and `curl` works fine. A watchdog probes from the main
 process every 30s; after 5 consecutive failed sweeps it broadcasts `network_wedged` and relaunches
@@ -409,7 +481,7 @@ AI_BROWSER_USER_DATA=~/.ai-browser-work npm start
 ## Test & dev
 
 ```bash
-npm test             # vitest — 239 tests across 22 files (234 passing, 5 skipped)
+npm test             # vitest — 286 tests across 23 files
 npm run smoke        # Electron contract layer, offline fixture      — 31 checks
 npm run capabilities # text fields, canvas, page source, network, DOM editing — 54 checks
 npm run richtext     # rich-text editors, nested menus, forms, errors, tags, upload — 111 checks
@@ -417,7 +489,8 @@ npm run network      # request log, POST bodies, headers, pagination, redaction 
 npm run value        # value truncation contract + read-only get_value — 15 checks
 npm run canvas       # canvas draw-call capture — 13 checks
 npm run focus        # no focus stealing + full capability while backgrounded — 32 checks
-npm run interact     # trusted drag / key press / wheel (pointer gestures) — 27 checks
+npm run interact     # trusted drag / key press / wheel (pointer gestures) — 31 checks
+npm run view         # viewport repaint + snapshot/diff verification — 28 checks
 npm run realsites    # navigate/read/act against a matrix of real sites
 ```
 
@@ -438,6 +511,22 @@ would otherwise hold the port and the single-instance lock, and you would find `
 to launch with *"another AI Browser instance is already running"*.
 
 ### What each capability suite proved
+
+**`npm run view`** — the suite for the two things that quietly produce false confidence.
+
+*Viewport.* A `BrowserView` can be fully loaded and still show stale pixels, and the only thing
+that forced a repaint was switching tabs — which is exactly why "click the tabs a few times" used to
+fix it. It now fires on every navigation signal and on window `show`/`restore`/`focus`. The suite
+proves it from the **cumulative repaint counter**, not from a screenshot: a screenshot needs eyes, a
+counter falsifies. It also proves the debounce doesn't self-trigger (a repaint loop would flicker
+forever) and that repainting changes no page data.
+
+*Verification.* `ui.diff` is only useful if it is right in both directions, so each assertion comes
+in pairs: a real change **must** be reported *and* an unchanged page **must not** be. The negative
+controls are the point — a diff that invented changes, or a snapshot that quietly became empty on
+error (making every later diff report "unchanged"), would turn all verification into false green.
+The suite also pins the failure mode where a mistyped parameter layer made `type` report success
+without typing anything.
 
 **`npm run richtext`** — the deepest suite. Rich-text editors and formatting, two- and three-level
 nested menus, required vs optional fields (native `required`, `aria-required`, red asterisks),
