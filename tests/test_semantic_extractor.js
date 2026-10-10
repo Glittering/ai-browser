@@ -290,3 +290,65 @@ function flattenTree(tree) {
   }
   return results;
 }
+// ---------------------------------------------------------------------------
+// 同源 iframe（IFRAME）
+//
+// 真实场景：ComfyUI 这类编辑器把主体装在**同源 iframe** 里，外层只是一个壳。
+// 修复前这类页面在语义树里等于全瞎 —— iframe 里 2024 个元素（106 个按钮 / 42 个输入框）
+// 一个都进不了树。根因有两处，都必须钉住：
+//   ① `process()` 里 iframe 的递归写在 `isSemantic()` 判定**之后**，而 iframe 本身不带
+//      语义（无 role/无 label），永远走不到那段递归；
+//   ② `isSemantic()` 用 `el instanceof HTMLElement`，HTMLElement 是**顶层 window**的构造
+//      函数，iframe 里的元素属于 iframe 自己的 window —— 跨文档 instanceof 恒为 false。
+// ---------------------------------------------------------------------------
+describe('同源 iframe 的内容必须进语义树', () => {
+  const build = () => {
+    document.documentElement.innerHTML = '<body><button id="topbtn">TOP</button><iframe id="fr"></iframe></body>';
+    const ifr = document.getElementById('fr');
+    // jsdom 里同步写入，避免 srcdoc 异步加载带来的时序干扰
+    ifr.contentDocument.open();
+    ifr.contentDocument.write(
+      '<button id="inbtn">INNER</button><input id="inp" placeholder="PIN"><div><button id="deep">DEEP</button></div>'
+    );
+    ifr.contentDocument.close();
+    return extractTree();
+  };
+
+  it('IFRAME-001: iframe 内部的按钮出现在语义树里', () => {
+    const flat = flattenTree(build());
+    const inner = flat.find((n) => n.id === 'inbtn');
+    expect(inner).toBeDefined();
+    expect(inner.role).toBe('button');
+    expect(inner.label).toBe('INNER');
+  });
+
+  it('IFRAME-002: 深层嵌套的元素也要带出来（不是只取一层）', () => {
+    const flat = flattenTree(build());
+    expect(flat.find((n) => n.id === 'deep')).toBeDefined();
+  });
+
+  it('IFRAME-003: iframe 内的输入框带上可操作语义', () => {
+    const flat = flattenTree(build());
+    const inp = flat.find((n) => n.id === 'inp');
+    expect(inp).toBeDefined();
+    expect(inp.role).toBe('textbox');
+    expect((inp.actions || []).length).toBeGreaterThan(0);
+  });
+
+  it('IFRAME-004: 每个新元素都拿到 data-ai-id（否则 ui.act 定位不到）', () => {
+    const flat = flattenTree(build());
+    for (const id of ['inbtn', 'inp', 'deep']) {
+      const el = document.getElementById('fr').contentDocument.getElementById(id);
+      expect(el.getAttribute('data-ai-id')).toBeTruthy();
+      const node = flat.find((n) => n.id === el.getAttribute('data-ai-id'));
+      expect(node).toBeDefined();
+    }
+  });
+
+  it('IFRAME-005: 对照——顶层元素不受影响（修 iframe 不能把主文档弄坏）', () => {
+    const flat = flattenTree(build());
+    const top = flat.find((n) => n.id === 'topbtn');
+    expect(top).toBeDefined();
+    expect(top.label).toBe('TOP');
+  });
+});

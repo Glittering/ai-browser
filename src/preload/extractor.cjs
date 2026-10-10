@@ -19,11 +19,32 @@ function extractTree() {
   var counter = 0;
   var VERSION_TAG = "v6.9";
 
+  // 元素自己所在的 window。跨文档时必须用它：
+  // `el instanceof HTMLElement` 里 HTMLElement 是**顶层 window**的构造函数，
+  // 而同源 iframe 里的元素属于 iframe 自己的 window —— instanceof 恒为 false，
+  // 于是 iframe 里每个元素都被当成"不是 HTML 元素"丢掉。
+  // 实测：ComfyUI 编辑器装在同源 iframe 里（2024 个元素 / 106 个按钮 / 42 个输入框），
+  // 修复前语义树里一个都看不见。
+  function winOf(el) {
+    try {
+      var d = el && el.ownerDocument;
+      var w = d && d.defaultView;
+      return w || window;
+    } catch (e) { return window; }
+  }
+  function isHtmlElement(el) {
+    if (!el || typeof el !== "object") return false;
+    var w = winOf(el);
+    try { return el instanceof w.HTMLElement; } catch (e) {
+      return !!(el.tagName && typeof el.getAttribute === "function");
+    }
+  }
+
   function isHidden(el) {
-    if (!(el instanceof HTMLElement)) return true;
+    if (!isHtmlElement(el)) return true;
     var tag = el.tagName.toLowerCase();
     if (tag === "dialog") return false;
-    var style = window.getComputedStyle(el);
+    var style = winOf(el).getComputedStyle(el);
     if (style.display === "none") return true;
     if (style.visibility === "hidden") return true;
     if (el.hasAttribute("aria-hidden") && el.getAttribute("aria-hidden") === "true") return true;
@@ -32,7 +53,7 @@ function extractTree() {
     while (p && p !== document.body) {
       if (p.hidden === true) return true;
       if (p.hasAttribute("aria-hidden") && p.getAttribute("aria-hidden") === "true") return true;
-      var ps = window.getComputedStyle(p);
+      var ps = winOf(p).getComputedStyle(p);
       if (ps.display === "none") return true;
       p = p.parentElement;
     }
@@ -40,7 +61,7 @@ function extractTree() {
   }
 
   function isPureLayout(el) {
-    if (!(el instanceof HTMLElement)) return false;
+    if (!isHtmlElement(el)) return false;
     var tag = el.tagName.toLowerCase();
     if (tag !== "div" && tag !== "span") return false;
     if (el.contentEditable === "true" || el.getAttribute("contenteditable") === "true") return false;
@@ -68,7 +89,7 @@ function extractTree() {
   ];
 
   function isSemantic(el) {
-    if (!(el instanceof HTMLElement)) return false;
+    if (!isHtmlElement(el)) return false;
     if (el === document.body || el === document.documentElement) return true;
     if (isHidden(el)) return false;
     var tag = el.tagName.toLowerCase();
@@ -248,6 +269,25 @@ function extractTree() {
     seen.add(el);
     if (!el.isConnected) return null;
     var tag = el.tagName.toLowerCase();
+    // 同源 iframe 必须**在 isSemantic 判定之前**处理：iframe 自己不带语义（无 role/无 label），
+    // 若放在后面，会被下面"非语义元素只递归子节点"的分支吞掉，iframe 里的内容一个都进不了树。
+    // 实测：ComfyUI 编辑器装在同源 iframe 里，里面有 2024 个元素（106 个按钮 / 42 个输入框），
+    // 修复前语义树只有 17 个元素、可操作面 6 个 click，agent 根本看不见编辑器。
+    if (tag === "iframe") {
+      try {
+        var ifrDoc = el.contentDocument || (el.contentWindow && el.contentWindow.document);
+        if (ifrDoc && ifrDoc.body) {
+          var sub = process(ifrDoc.body);
+          var subKids = Array.isArray(sub) ? sub : (sub ? [sub] : []);
+          return {
+            id: "iframe-" + (el.id || counter++),
+            role: "iframe_body",
+            label: el.title || el.name || "iframe content",
+            children: subKids
+          };
+        }
+      } catch (e) { /* cross-origin：读不到就算了，交给后面的兜底 */ }
+    }
     if (!isSemantic(el)) {
       var elChildren = el.children;
       if (elChildren && elChildren.length > 0) {
@@ -346,16 +386,7 @@ function extractTree() {
     var elChildren = el.children;
     var childNodes = [];
 
-    // Recurse into same-origin iframes
-    if (tag === "iframe") {
-      try {
-        var iframeDoc = el.contentDocument || el.contentWindow.document;
-        if (iframeDoc && iframeDoc.body) {
-          var iframeBody = process(iframeDoc.body);
-          if (iframeBody) childNodes.push({ id: "iframe-" + (el.id || counter), role: "iframe_body", label: (el.title || el.name || "iframe content"), children: iframeBody.children || [iframeBody] });
-        }
-      } catch(e) { /* cross-origin */ }
-    }
+    // 同源 iframe 的递归已在 process() 开头完成（必须在 isSemantic 之前），此处不再重复。
 
     if (elChildren && elChildren.length) {
       for (var ci = 0; ci < elChildren.length; ci++) {
@@ -382,6 +413,9 @@ function extractTree() {
     var iframeText = "";
     try {
       var ifrDoc = ifr.contentDocument || ifr.contentWindow.document;
+      // 已由 process() 处理过的同源 iframe 直接跳过。否则会再发一个 iframe-text-N /
+      // iframe-empty-N 空壳节点，看起来像"这里有个 iframe 但里面是空的"，反而误导调用方。
+      if (ifrDoc && ifrDoc.body && seen.has(ifrDoc.body)) continue;
       if (ifrDoc && ifrDoc.body) {
         iframeText = (ifrDoc.body.innerText || "").slice(0, 200);
         // Use a fresh sub-process for iframe body
