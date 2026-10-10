@@ -639,7 +639,7 @@ class PageManager {
   // 在所属帧内用同一逻辑。无 url 传参/找不到返回 clean error。
   async _resolveClickByUrl(view, target, url, tabId) {
     if (!view || !url) return { success: false, error: 'no url provided' };
-    const owning = /^axf-/.test(target) ? await this._owningFrame(view, target) : null;
+    const owning = await this._owningFrameFor(view, target, tabId);
     const expr = `(function(url){
         var best=null,bestScore=-1;
         var als=document.querySelectorAll('a[href]');
@@ -792,6 +792,24 @@ class PageManager {
     await inputCmd('Input.dispatchKeyEvent', { ...base, type: 'keyUp' });
   }
 
+  // 解析某个 data-ai-id 属于哪个帧。**不能只认 axf- 前缀**：
+  // DOM 抽取器会给同源 iframe 里的元素也写上普通的 data-ai-id（写在 iframe 自己的
+  // document 上），这些 id 在顶层 document 里查不到 —— 实测 ComfyUI 的工具栏按钮
+  // （节点库 / Zoom In / Fit View）就是这样，ui.act 一直报 "Target not found"。
+  // 所以这里先看顶层，找不到再逐个帧找。返回 null 表示就在主帧里。
+  async _owningFrameFor(view, aiId, tabId) {
+    if (!aiId) return null;
+    if (/^axf-/.test(aiId)) return await this._owningFrame(view, aiId);
+    try {
+      const inTop = await this.evaluate(
+        `!!document.querySelector('[data-ai-id="${aiId}"]')`,
+        tabId
+      );
+      if (inTop) return null;
+    } catch (e) { /* 顶层查询失败就继续找帧 */ }
+    return await this._owningFrame(view, aiId);
+  }
+
   // Locate the frame that owns a sub-frame handle (`axf-{frameSeq}-{idx}`).
   // Returns the WebFrameMain, or null when the handle lives in the main frame
   // (or is unlocatable) — callers fall back to the top-frame path.
@@ -813,24 +831,34 @@ class PageManager {
   // OOPIF coordinate translation: sub-frame getBoundingClientRect is relative to
   // the iframe's own layout viewport; add the hosting <iframe> element's top-left
   // (top document) to get browser-viewport coordinates for Input.dispatchMouseEvent.
-  async _frameOffset(view, frame, tabId) {
+  // 找到承载某个子帧的 <iframe> 元素，顺便判断它是否**同源**（同源通常意味着进程内，
+  // 坐标 + CDP 真实鼠标事件可用；跨进程 OOPIF 则只能用帧内原生 .click()）。
+  async _hostIframe(view, frame, tabId) {
     try {
       const path = await frame.executeJavaScript('(location.pathname||"")');
-      const base = await this.evaluate(
+      const info = await this.evaluate(
         `(function(path){
            var best=null;
            Array.prototype.forEach.call(document.querySelectorAll('iframe'),function(f){
              var r=f.getBoundingClientRect();
              if(r.width<4||r.height<4)return;
              var s=f.src||'';
-             var match = (f.name&&f.name.length) ? (path.indexOf((f.name||''))===0) : (s.indexOf(path)>0);
-             if(match){ best={x:r.left,y:r.top}; }
+             var match = (f.name&&f.name.length) ? (path.indexOf((f.name||''))===0) : (s.indexOf(path)>=0);
+             if(!match) return;
+             var sameOrigin=false;
+             try { sameOrigin = !!(f.contentDocument && f.contentDocument.body); } catch(e) { sameOrigin=false; }
+             best={x:Math.round(r.left),y:Math.round(r.top),sameOrigin:sameOrigin};
            });
            return best;
          })(${JSON.stringify(path)})`,
         tabId);
-      return base;
+      return info;
     } catch (e) { return null; }
+  }
+
+  async _frameOffset(view, frame, tabId) {
+    const info = await this._hostIframe(view, frame, tabId);
+    return info ? { x: info.x, y: info.y } : null;
   }
 
   // 受信鼠标事件：先把元素滚入视口（屏外元素直接 dispatchMouseEvent 时坐标落在
@@ -839,24 +867,34 @@ class PageManager {
   // OOPIF 目标：定位在所属 frame 内执行，坐标 + frame 偏移换算到顶层视口。
   async _cdpPointerTarget(view, action, aiId, tabId) {
     if (!this._canCdp(view)) return null;
-    const owning = /^axf-/.test(aiId) ? await this._owningFrame(view, aiId) : null;
+    const owning = await this._owningFrameFor(view, aiId, tabId);
     const inFrame = !!owning;
-    // OOPIF click 走所属帧原生 click：CDP 坐标鼠标(帧局部中心+iframe 偏移)对跨进程
-    // 子帧的命中/路由不稳（实测报告成功却未触发），原生 .click() 贴合编辑器 React
-    // click 语义，已验证可装载正文编辑器。hover 仍走 CDP mousemove(视口坐标)。
+    // 帧内 click 的两种走法，必须分开：
+    //   · **同源（进程内）子帧** → 走下面的坐标 + CDP 真实鼠标事件。
+    //     实测 ComfyUI 工具栏的 Zoom In 只监听 mousedown/pointerdown，帧内原生
+    //     el.click() 完全不生效（而 Fit View 只监听 click，el.click() 才生效）——
+    //     合成事件覆盖不了全部按钮，真实鼠标事件才能。
+    //   · **跨进程 OOPIF** → 沿用帧内原生 .click()：CDP 坐标对跨进程子帧的命中/路由
+    //     不稳（实测报告成功却未触发），原生 .click() 贴合编辑器 React click 语义。
     if (inFrame && action === 'click') {
       try {
     // 抢焦点会打断人正在做的事（agent 干活时人几乎不能用电脑）。
     // 策略见 _focusWindow：默认只保证窗口可见，不把它拽到最前、不抢焦点。
     this._focusWindow(view);
       } catch (e) {}
-      try {
-        const ok = await owning.executeJavaScript(
-          `(function(){var el=document.querySelector('[data-ai-id="${aiId}"]');if(!el)return false;` +
-          `el.scrollIntoView({block:'center',inline:'center',behavior:'instant'});` +
-          `el.focus();el.click();return true;})()`);
-        return ok ? 'oopif-click' : null;
-      } catch (e) { return null; }
+      let host = null;
+      try { host = await this._hostIframe(view, owning, tabId); } catch (e) { host = null; }
+      if (host && host.sameOrigin) {
+        // 落到这里，走与 hover 相同的坐标路径（真实 mousemove/press/release）
+      } else {
+        try {
+          const ok = await owning.executeJavaScript(
+            `(function(){var el=document.querySelector('[data-ai-id="${aiId}"]');if(!el)return false;` +
+            `el.scrollIntoView({block:'center',inline:'center',behavior:'instant'});` +
+            `el.focus();el.click();return true;})()`);
+          return ok ? 'oopif-click' : null;
+        } catch (e) { return null; }
+      }
     }
     // 定位 → 滚入视口居中 → 返回滚动后的中心点（frame 内局部坐标）。
     const center = inFrame
@@ -920,7 +958,7 @@ class PageManager {
   //   params.keys   修饰键（画布缩放通常要 Control）
   async _cdpWheel(view, aiId, params, tabId) {
     if (!this._canCdp(view)) return null;
-    const owning = /^axf-/.test(aiId) ? await this._owningFrame(view, aiId) : null;
+    const owning = await this._owningFrameFor(view, aiId, tabId);
     const run = async (body) => {
       const fn = `(function(){${body}})()`;
       return owning ? owning.executeJavaScript(fn) : this.evaluate(fn, tabId);
@@ -987,7 +1025,7 @@ class PageManager {
   //   params.keys               拖拽期间按住的修饰键（如 ['Shift'] 轴向锁定）
   async _cdpDrag(view, aiId, params, tabId) {
     if (!this._canCdp(view)) return null;
-    const owning = /^axf-/.test(aiId) ? await this._owningFrame(view, aiId) : null;
+    const owning = await this._owningFrameFor(view, aiId, tabId);
     const run = async (body) => {
       const fn = `(function(){${body}})()`;
       return owning ? owning.executeJavaScript(fn) : this.evaluate(fn, tabId);
@@ -1188,7 +1226,7 @@ class PageManager {
   // 当前焦点（多数画布应用的快捷键挂在 document/window 上，先点一下画布即可）。
   async _cdpPress(view, aiId, params, tabId) {
     if (!this._canCdp(view)) return null;
-    const owning = /^axf-/.test(aiId) ? await this._owningFrame(view, aiId) : null;
+    const owning = await this._owningFrameFor(view, aiId, tabId);
     const run = async (body) => {
       const fn = `(function(){${body}})()`;
       return owning ? owning.executeJavaScript(fn) : this.evaluate(fn, tabId);
@@ -1257,7 +1295,7 @@ class PageManager {
   // 不识别编辑器框架；失败返回错误，由 agent 重读重试。
   async _inputViaCdp(view, aiId, text, tabId, opts = {}) {
     if (!this._canCdp(view)) return null;
-    const owning = /^axf-/.test(aiId) ? await this._owningFrame(view, aiId) : null;
+    const owning = await this._owningFrameFor(view, aiId, tabId);
     const inFrame = !!owning;
     // Run a JS snippet either in the owning frame (OOPIF) or the top frame.
     const run = async (jsBody) => {
