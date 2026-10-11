@@ -9,7 +9,7 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const runnerPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'e2e', 'realsites', 'runner.cjs');
-const { titleReadable, countNodes, analyzeSite, SITES } = require(runnerPath);
+const { titleReadable, countNodes, analyzeSite, formatSummary, SITES } = require(runnerPath);
 
 describe('realsites runner pure logic', () => {
   describe('titleReadable (F1)', () => {
@@ -64,6 +64,51 @@ describe('realsites runner pure logic', () => {
           expect(s.minText, `${s.name} minText`).toBeGreaterThanOrEqual(300);
         }
       }
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // 诚实口径：两个数字必须分开印，且**被墙挡住不算内容成功**。
+  // 这条之所以要有测试：报告很容易在重构里退化成"一个漂亮的百分比"，
+  // 而把 login_wall/antibot 混进内容成功率就是在给自己贴金。
+  // -------------------------------------------------------------------------
+  describe('formatSummary（诚实口径）', () => {
+    const s = {
+      total: 10, behaviorOk: 9, behaviorFail: 1,
+      contentOk: 7, walled: 2,
+      contentRate: 0.7, behaviorRate: 0.9,
+      byKind: { node: 7, login_wall: 1, antibot: 1, error: 1 },
+      runs: 2, ranAt: '2026-10-11T00:00:00.000Z',
+    };
+
+    it('R-RUN-8: 分别印出行为正确率与内容成功率，不合成单一分数', () => {
+      const t = formatSummary(s);
+      expect(t).toContain('行为正确率');
+      expect(t).toContain('内容成功率');
+      expect(t).toContain('9/10');
+      expect(t).toContain('70.0%');
+      expect(t).toContain('90.0%');
+    });
+
+    it('R-RUN-9: 被墙挡住不计入内容成功 —— 内容成功率只数 node', () => {
+      const t = formatSummary(s);
+      expect(t).toMatch(/被墙挡住\s+2/);
+      // 内容成功 7 ≠ 行为成功 9；若两者被混成 9/10 这条会红
+      expect(s.contentOk).not.toBe(s.behaviorOk);
+    });
+
+    it('R-RUN-10: 必须带语料规模 / 跑数 / 时间 —— 否则百分比不可复核', () => {
+      const t = formatSummary(s);
+      expect(t).toContain('10 站');
+      expect(t).toContain('2 跑');
+      expect(t).toContain('2026-10-11T00:00:00.000Z');
+    });
+
+    it('R-RUN-11: 空输入不炸（total=0 时比率给 n/a，不给 NaN）', () => {
+      const t = formatSummary({ total: 0, behaviorOk: 0, behaviorFail: 0, contentOk: 0, walled: 0, contentRate: null, behaviorRate: null, byKind: {}, runs: 1, ranAt: 'x' });
+      expect(t).toContain('n/a');
+      expect(t).not.toContain('NaN');
+      expect(formatSummary(null)).toBe('');
     });
   });
 });

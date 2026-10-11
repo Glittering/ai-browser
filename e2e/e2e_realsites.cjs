@@ -8,7 +8,7 @@
 const path = require('node:path');
 const net = require('node:net');
 const { spawn } = require('node:child_process');
-const { runContract, SITES } = require('./realsites/runner.cjs');
+const { runContract, formatSummary, SITES } = require('./realsites/runner.cjs');
 const flows = require('./realsites/flows.cjs');
 const { Browser } = require(path.join(__dirname, '..', 'tools/browser.cjs'));
 
@@ -89,7 +89,9 @@ async function main() {
 
   // ==== 1) 矩阵三件套 ====
   section(`矩阵三件套（${SITES.length} 站 · runs=${runs}）`);
-  const { PASS, FAIL } = await runContract(SITES, { runs, port: WS_PORT });
+  const { PASS, FAIL, summary } = await runContract(SITES, { runs, port: WS_PORT });
+  // 印两个数字（行为正确率 / 内容成功率），不合成单一分数 —— 见 runner.cjs 的注释。
+  console.log(formatSummary(summary));
 
   // ==== 2) 专项流程（默认全部；可用 --flow 过滤）。F2: 专项失败计入 flowFail → 影响退出码。
   let flowFail = 0;

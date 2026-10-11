@@ -140,6 +140,7 @@ async function runContract(sites = SITES, opts = {}) {
   const only = opts.only || null;
   const b = new Browser(opts.port || 9223);
   let PASS = 0, FAIL = 0;
+  const byKind = {};   // kind -> 计数（本次最后一次判定）
   try {
     await b.ready();
     for (const site of sites) {
@@ -153,16 +154,69 @@ async function runContract(sites = SITES, opts = {}) {
       }
       if (final.ok) PASS++;
       else FAIL++;
+      byKind[final.kind] = (byKind[final.kind] || 0) + 1;
       const tag = final.ok ? 'PASS' : 'FAIL';
       console.log(`  ${tag} | ${site.name} [${site.bucket}] — ${final.kind}${final.title ? (' title=' + String(final.title).slice(0, 40)) : ''}${final.note ? ' ' + final.note : ''}`);
     }
   } finally {
     try { b.close(); } catch {}
   }
-  return { PASS, FAIL };
+
+  // ==========================================================================
+  // 诚实口径：**两个不同的数字，不能合成一个**。
+  //
+  // PASS/total 是"浏览器行为是否符合预期"——被登录墙/反爬挡住且**正确探到**也算 PASS，
+  // 因为那说明探测逻辑是对的。但把它算进"内容成功率"就是在给自己贴金：
+  // 墙挡住 = 我们没有把内容读出来。所以内容成功率只数 kind==='node'。
+  // 这两个数字必须分开印，且带上语料、时间、跑数 —— 否则任何百分比都不可复核。
+  // ==========================================================================
+  const total = PASS + FAIL;
+  const contentOk = byKind.node || 0;
+  const walled = (byKind.login_wall || 0) + (byKind.antibot || 0);
+  const summary = {
+    total,
+    behaviorOk: PASS,
+    behaviorFail: FAIL,
+    contentOk,
+    walled,
+    contentRate: total ? +(contentOk / total).toFixed(4) : null,
+    behaviorRate: total ? +(PASS / total).toFixed(4) : null,
+    byKind,
+    runs,
+    ranAt: new Date().toISOString(),
+  };
+  return { PASS, FAIL, total, contentOk, walled, byKind, summary };
 }
 
-module.exports = { runContract, analyzeSite, countNodes, titleReadable, SITES };
+module.exports = { runContract, analyzeSite, countNodes, titleReadable, formatSummary, SITES };
+
+/**
+ * 把 runContract 的诚实口径印成人能复核的一段。刻意**不合成单一分数**：
+ * 行为正确率与内容成功率必须分开看（见 runContract 里的注释）。
+ */
+function formatSummary(s) {
+  if (!s) return '';
+  const pct = (x) => (x === null || x === undefined ? 'n/a' : (x * 100).toFixed(1) + '%');
+  const kindLines = Object.entries(s.byKind || {})
+    .sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => `      ${String(k).padEnd(12)} ${v}`)
+    .join('\n');
+  return [
+    '',
+    '  ── 本次结果（两个数字，分开看）───────────────────────',
+    `    行为正确率  ${s.behaviorOk}/${s.total}  ${pct(s.behaviorRate)}   浏览器行为是否符合预期（含"正确探到登录墙/反爬"）`,
+    `    内容成功率  ${s.contentOk}/${s.total}  ${pct(s.contentRate)}   真的把内容读出来了（只数 kind=node）`,
+    `    被墙挡住    ${s.walled}（login_wall + antibot）—— 不计入内容成功率`,
+    '',
+    '    判定分布：',
+    kindLines,
+    '',
+    `    语料 ${s.total} 站 · 每站最多 ${s.runs} 跑（任一跑成功即算通过） · ${s.ranAt}`,
+    '    口径：真实公网、真实动态加载；登录墙/反爬**按探测正确记 PASS**，但不算内容成功。',
+    '  ─────────────────────────────────────────────────',
+    '',
+  ].join('\n');
+}
 
 // 支持直接运行：node e2e/realsites/runner.cjs [--runs 2] [--only 名称]
 if (require.main === module) {
@@ -170,8 +224,9 @@ if (require.main === module) {
   const runsArg = args.find((a) => a.startsWith('--runs='));
   const onlyArg = args.includes('--only') ? args[args.indexOf('--only') + 1] : null;
   const runs = runsArg ? Number(runsArg.split('=')[1]) : 1;
-  runContract(SITES, { runs, only: onlyArg }).then(({ PASS, FAIL }) => {
-    console.log(`\n==== realsites runner PASS=${PASS} FAIL=${FAIL} ====`);
+  runContract(SITES, { runs, only: onlyArg }).then(({ PASS, FAIL, summary }) => {
+    console.log(formatSummary(summary));
+    console.log(`==== realsites runner PASS=${PASS} FAIL=${FAIL} ====`);
     process.exit(FAIL ? 1 : 0);
   }).catch((e) => { console.error('runner error:', e.message); process.exit(2); });
 }
