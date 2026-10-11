@@ -10,7 +10,7 @@
   <img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue.svg">
   <img alt="Electron" src="https://img.shields.io/badge/built%20with-Electron%2033-9cf">
   <img alt="Platforms" src="https://img.shields.io/badge/platforms-macOS%20%E2%80%A2%20Linux-blueviolet">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-310%20unit%20%2B%20356%20e2e-2ea043">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-316%20unit%20%2B%20356%20e2e-2ea043">
   <img alt="MCP" src="https://img.shields.io/badge/spec-MCP%20(stdio)-f5b23b">
 </p>
 
@@ -377,10 +377,20 @@ Error codes follow JSON-RPC: `-32700` parse error, `-32601` unknown method, `-32
 ```
 
 **Reading.** Each node in the returned tree carries a `data-ai-id` — the element's own DOM `id` when it
-has one, otherwise a generated `e:tag-N` that is only good for the read it came from. Alongside it come
-`role`, `label`, `value`, `states`, and `actions`, plus a `context` block — open modals, transient
+has one, otherwise a generated `e:tag-N`. Ids are **stable across reads**: an element that already
+carries one keeps it, and generated ids come from a monotonic counter, so inserting an element above
+others does not renumber them. (It used to: a stale id then silently resolved to a *different* element,
+and the act reported success while hitting the wrong thing.) They reset on navigation. Alongside the id
+come `role`, `label`, `value`, `states`, and `actions`, plus a `context` block — open modals, transient
 messages, required-field hints, coarse stats. Two read paths exist: the default preload extractor, and
 the accessibility layer behind `ax: true` (which additionally gives links their `url`).
+
+The first read of a page annotates elements with `data-ai-id`; that is the one write a *read* performs,
+and it is what makes later acts resolvable. **Repeat reads write nothing.** An attribute is only set
+when its value actually changes, because real Chromium delivers a `MutationObserver` record even when
+you set an attribute to the value it already holds — measured at 4001 records per read on a
+4000-element page before this guard existed. A read that spams the page's own observers is a read that
+perturbs the thing it is measuring.
 
 **Writing.** Actions are **trusted browser input**, not synthesized JS. The main process drives the
 page over the Chrome DevTools Protocol — `Input.dispatchMouseEvent` for clicks, and per-character
@@ -482,7 +492,7 @@ AI_BROWSER_USER_DATA=~/.ai-browser-work npm start
 ## Test & dev
 
 ```bash
-npm test             # vitest — 310 tests across 24 files
+npm test             # vitest — 316 tests across 24 files
 npm run smoke        # Electron contract layer, offline fixture      — 31 checks
 npm run capabilities # text fields, canvas, page source, network, DOM editing — 54 checks
 npm run richtext     # rich-text editors, nested menus, forms, errors, tags, upload — 111 checks
@@ -610,9 +620,18 @@ Disable entirely with `AI_BROWSER_CANVAS_HOOK=0`.
   editors, maps and charts. Use `ui.act{action:'wheel'}` there.
 
 `npm run realsites` is table-driven from `e2e/realsites/sites.cjs`, currently 17 sites across 8 buckets
-(search, finance, media, dev, ecommerce, spa, editor, marketplace). Sites that require login or
-answer with an anti-bot wall are counted as passing when the login wall / bot wall is detected rather
-than bypassed, so this asserts "the browser reaches and reads them", not "the flows succeed".
+(search, finance, media, dev, ecommerce, spa, editor, marketplace). The run prints **two numbers, and
+deliberately never blends them into one**:
+
+- **行为正确率 / behaviour rate** — did the browser behave as expected? Sites that require login or
+  answer with an anti-bot wall count as passing *when the wall is correctly detected*, because that
+  means the detection works.
+- **内容成功率 / content rate** — did we actually read the content? This counts **only** sites where
+  the tree came back above the site's `minNodes`; a wall is not content.
+
+Reporting a single "success %" would let a correctly-detected login wall inflate the content number.
+The run also prints the corpus size, runs-per-site, run count and timestamp, so any percentage in a
+report can be re-derived rather than taken on faith.
 
 Layout:
 
