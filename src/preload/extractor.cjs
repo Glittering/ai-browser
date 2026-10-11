@@ -326,7 +326,16 @@ function extractTree() {
     //          ② 新元素用模块级只增不减的序号，保证生成出来的 id 不重号。
     var existingAiId = el.getAttribute("data-ai-id");
     var aiId = nativeId || existingAiId || "e:" + el.tagName.toLowerCase() + "-" + (AI_ID_SEQ++);
-    el.setAttribute("data-ai-id", aiId);
+    // ③ 只在值**真的变了**时才写。
+    //
+    // 实测（tools/_oneoff/mutation_microtest.cjs，真实 Chromium）：setAttribute 把属性
+    // 设成**完全相同的值**，MutationObserver 照样收到记录（{"name":"data-ai-id",
+    // "value":"a","old":"a"}）。所以无条件写 = **每一次**读取都向页面自己的 observer
+    // 灌 N 条属性变更 —— 4000 个语义元素的页面上实测每次 4001 条。
+    // 页面里任何监听属性的脚本（埋点、框架插件、站点自己的 observer）都会被惊动，
+    // 而我们只是想"读"一下。加个值比较，热读就归零；冷读仍要写，那是 id 稳定性的
+    // 代价，不能省。
+    if (existingAiId !== aiId) el.setAttribute("data-ai-id", aiId);
 
     var states = [];
     if (el.disabled === true) states.push("disabled");

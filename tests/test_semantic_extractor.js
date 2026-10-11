@@ -352,3 +352,53 @@ describe('同源 iframe 的内容必须进语义树', () => {
     expect(top.label).toBe('TOP');
   });
 });
+
+// ---------------------------------------------------------------------------
+// 属性写入纪律 —— 读取不得打扰页面
+//
+// 实测（tools/_oneoff/mutation_microtest.cjs，真实 Chromium）：setAttribute 设成
+// **完全相同的值**，MutationObserver 照样收到记录。所以"每次都写"等于每一次读取都
+// 向页面自己的 observer 灌 N 条属性变更（4000 元素页面实测每次 4001 条），页面里
+// 任何监听属性的脚本都会被惊动 —— 而我们只是想读它。
+//
+// 这一组必须自带阳性对照：只断言"热读写了 0 次"是不够的，万一探针本身失效（比如
+// setAttribute 不是走 prototype），0 就是假绿。所以先清掉标注证明"冷读确实会写"。
+// ---------------------------------------------------------------------------
+describe('data-ai-id 写入纪律', () => {
+  function spyOnAiIdWrites(fn) {
+    const calls = [];
+    const orig = Element.prototype.setAttribute;
+    Element.prototype.setAttribute = function (name, value) {
+      if (String(name).toLowerCase() === 'data-ai-id') calls.push({ tag: this.tagName, value });
+      return orig.call(this, name, value);
+    };
+    try { fn(); } finally { Element.prototype.setAttribute = orig; }
+    return calls;
+  }
+
+  it('SE-ID-001: 元素已带同一个 data-ai-id 时，第二次抽取不得再写（含无 id 的生成型）', () => {
+    // 清掉全部标注 → 制造一次真正的"冷读"
+    document.querySelectorAll('[data-ai-id]').forEach((el) => el.removeAttribute('data-ai-id'));
+    // 顺手把 iframe 里也清掉（同源帧的内容会被递归抽取）
+    document.querySelectorAll('iframe').forEach((f) => {
+      try { f.contentDocument.querySelectorAll('[data-ai-id]').forEach((el) => el.removeAttribute('data-ai-id')); } catch (_) {}
+    });
+
+    const cold = spyOnAiIdWrites(() => extractTree());
+    const warm = spyOnAiIdWrites(() => extractTree());
+
+    // 阳性对照：探针确实抓得到写入（否则下面的 0 没有意义）
+    expect(cold.length).toBeGreaterThan(0);
+    expect(cold.every((c) => c.value)).toBe(true);
+    // 断言本体：热读零写入
+    expect(warm).toEqual([]);
+  });
+
+  it('SE-ID-002: 沿用已有 id → 冷读写进去的值与树里报出的 id 一致', () => {
+    const tree = extractTree();
+    const flat = [];
+    (function walk(n) { if (!n) return; flat.push(n); (n.children || []).forEach(walk); })(tree);
+    const withId = flat.filter((n) => n.id && document.querySelector('[data-ai-id="' + n.id + '"]'));
+    expect(withId.length).toBeGreaterThan(0);
+  });
+});
