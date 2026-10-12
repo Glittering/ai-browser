@@ -138,6 +138,56 @@ describe('mcp_ws lazy launch', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// 启动失败必须可诊断（2026-10-12 实测的问题）
+//
+// 改之前 ensureRunning 的失败被 `catch (_e) {}` 吞掉，于是"浏览器根本没起来"与
+// "浏览器起来但 WS 还没好"表现完全一样：重试满 reconnectTimeout 后只报
+// "WS reconnect timeout: connection refused"。实测场景：环境里带着
+// ELECTRON_RUN_AS_NODE=1 时 `npm start` 会崩（拿 Node 加载 ESM 入口），端口永不
+// 监听 —— 而 agent 从错误信息里看不出任何与此相关的线索。
+// 可证伪：把 mcp_ws.js 里那行 `catch (e) { launchErr = e; }` 改回 `catch (_e) {}`，
+// 下面两条立刻红。
+// ---------------------------------------------------------------------------
+describe('mcp_ws launch failure diagnosability', () => {
+  it('LAUNCH-1: ensureRunning 抛错时，最终错误里带上启动失败的原因', async () => {
+    const p = await closedPort();
+    const lazy = createWsClient({
+      url: `ws://127.0.0.1:${p}`,
+      timeout: 200,
+      reconnectTimeout: 600,
+      retryBase: 50,
+      maxRetryDelay: 100,
+      ensureRunning: async () => { throw new Error('Electron exited early (code=1) — ELECTRON_RUN_AS_NODE?'); },
+    });
+    try {
+      await expect(lazy.call('ui.evaluate', { js: 'x' })).rejects.toThrow(/WS reconnect timeout/);
+      await expect(lazy.call('ui.evaluate', { js: 'x' })).rejects.toThrow(/browser launch failed/);
+      await expect(lazy.call('ui.evaluate', { js: 'x' })).rejects.toThrow(/ELECTRON_RUN_AS_NODE/);
+    } finally {
+      lazy.close();
+    }
+  });
+
+  it('LAUNCH-2: ensureRunning 成功时不虚报启动失败', async () => {
+    const p = await closedPort();
+    const lazy = createWsClient({
+      url: `ws://127.0.0.1:${p}`,
+      timeout: 200,
+      reconnectTimeout: 600,
+      retryBase: 50,
+      maxRetryDelay: 100,
+      ensureRunning: async () => {},   // 起来了（或本就该在跑），只是端口仍不通
+    });
+    try {
+      await expect(lazy.call('ui.evaluate', { js: 'x' })).rejects.toThrow(/WS reconnect timeout/);
+      await expect(lazy.call('ui.evaluate', { js: 'x' })).rejects.toThrow(/^((?!browser launch failed).)*$/);
+    } finally {
+      lazy.close();
+    }
+  });
+});
+
 describe('mcp_ws timeout', () => {
   it('MW-5 rejects with WS timeout when the server never responds', async () => {
     const hpm = makeHangingPM();

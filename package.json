@@ -5,7 +5,7 @@
   "main": "src/main/index.js",
   "type": "module",
   "scripts": {
-    "start": "electron .",
+    "start": "node scripts/start.cjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "smoke": "node e2e/smoke_ws.cjs",

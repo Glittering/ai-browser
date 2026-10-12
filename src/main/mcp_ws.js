@@ -76,6 +76,7 @@ export function createWsClient({
     _connecting = (async () => {
       const deadline = Date.now() + reconnectTimeout;
       let attempt = 0;
+      let launchErr = null;   // ensureRunning 的失败原因，超时那一刻报给调用方
       while (true) {
         // A concurrent open socket appearing (e.g. rude open racing the loop) wins.
         if (_ws && _ws.readyState === WebSocket.OPEN) return _ws;
@@ -110,11 +111,22 @@ export function createWsClient({
         // Electron on demand). ensureElectronRunning is idempotent — no-op when
         // the port is already listening — so calling it on every retry is safe and
         // also re-launches after a manual kill of Electron.
+        //
+        // ⚠️ 它的失败**不能吞**。此前这里是 `catch (_e) {}`，于是"浏览器根本没起来"
+        // 和"浏览器起来但 WS 还没好"表现完全一样：agent 先重试 120 秒，最后只拿到
+        // "WS reconnect timeout: connection refused"，没有任何线索。现在把原因累积
+        // 起来，超时那一刻一并报出。
         if (typeof ensureRunning === 'function') {
-          try { await ensureRunning(); } catch (_e) {}
+          try { await ensureRunning(); launchErr = null; }
+          catch (e) { launchErr = e; }
         }
 
-        if (Date.now() >= deadline) throw new Error('WS reconnect timeout: ' + err.message);
+        if (Date.now() >= deadline) {
+          const suffix = launchErr
+            ? `; browser launch failed: ${launchErr.message}`
+            : '';
+          throw new Error('WS reconnect timeout: ' + err.message + suffix);
+        }
         await wait(Math.min(retryBase * 2 ** attempt++, maxRetryDelay));
       }
     })().finally(() => { _connecting = null; });

@@ -58,25 +58,47 @@ function waitForPort(port, timeoutMs) {
 }
 
 // Spawn Electron detached so it survives this MCP subprocess.
+//
+// 两个坑都是实测踩出来的（2026-10-12）：
+//
+// ① `ELECTRON_RUN_AS_NODE` 必须删掉。本机 shell 就带着它，此时 `electron .` 会
+//    被当作普通 Node 运行，拿 Node 加载 ESM 入口直接崩，端口永不监听，而报错是
+//    一串 Node 的 ESM 栈 —— 完全不提 Electron。e2e 脚本都删了它，只有这里漏了。
+//    详见 scripts/start.cjs 顶部。
+//
+// ② 启动失败必须**说出来**。此前这里 return false，而 mcp_ws.js 又把它 catch 掉
+//    吞了，于是 agent 先重试 120 秒，最后只拿到 "WS reconnect timeout:
+//    connection refused" —— 没有任何线索表明浏览器根本没起来，更别说为什么。
+//    现在抛一个带原因的 Error，由 mcp_ws 并进最终错误信息。
 async function ensureElectronRunning() {
   if (await checkPort(ELECTRON_PORT)) return true;
   console.error('[mcp] port 9223 not listening — spawning Electron via npm start');
-  // Run `npm start` (which runs `electron .`) from project root.
+  // Run `npm start` (which runs `node scripts/start.cjs` → `electron .`) from
+  // project root.
   // AI_BROWSER_LAUNCHED_BY_AGENT：告诉 Electron 它是被 agent 拉起来的，因此
   // 窗口出现时**不要**抢焦点（showInactive）—— 否则 agent 第一次连上来就会把
   // 用户正在做的事打断。人手动 `npm start` 时没有这个变量，窗口正常显示在前台。
+  const childEnv = { ...process.env, AI_BROWSER_LAUNCHED_BY_AGENT: '1' };
+  delete childEnv.ELECTRON_RUN_AS_NODE;
   const child = spawn('npm', ['start'], {
     cwd: path.resolve(__dirname, '..', '..'),
     detached: true,
     stdio: 'ignore',
-    env: { ...process.env, AI_BROWSER_LAUNCHED_BY_AGENT: '1' },
+    env: childEnv,
   });
   child.unref();
+  // 子进程自己提前退出（例如上面那个 Node ESM 崩溃）时，等满 30 秒是纯浪费 ——
+  // 而且会掩盖真实原因。这里挂一个 exit 监听，把退出码留给下面的诊断。
+  let earlyExit = null;
+  child.on('exit', (code, signal) => { earlyExit = { code, signal }; });
   // Give Electron up to 30s to start the WS server.
   const ok = await waitForPort(ELECTRON_PORT, 30000);
   if (!ok) {
-    console.error('[mcp] Electron did not come up within 30s');
-    return false;
+    const why = earlyExit
+      ? `Electron exited early (code=${earlyExit.code}, signal=${earlyExit.signal}) — see scripts/start.cjs; a common cause is ELECTRON_RUN_AS_NODE being set in the environment`
+      : 'Electron did not come up within 30s';
+    console.error('[mcp] ' + why);
+    throw new Error(`could not start the browser: ${why}`);
   }
   return true;
 }
