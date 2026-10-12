@@ -1205,13 +1205,16 @@ guard.track(child);
   const comboNode = await nodeOf(chTab, "combo");
   check("E-09 自定义下拉（role=combobox）语义树可读",
     !!(comboNode && comboNode.role === "combobox"), JSON.stringify(comboNode && comboNode.role));
-  check("E-10 role=combobox 的语义树 actions 为空 —— 边界事实（agent 看不出它能点）",
-    !!(comboNode && (!comboNode.actions || comboNode.actions.length === 0)),
+  // 曾按 bug 写过："role=combobox 的 actions 为空 —— 边界事实（agent 看不出它能点）"。
+  // 那是在给缺陷背书。2026-10-12 修好之后翻转成断言正确行为：W3C 控件角色的
+  // 可点击是角色语义的一部分，不需要启发式推断。
+  check("E-10 role=combobox 自述可点（click/focus）",
+    !!(comboNode && (comboNode.actions || []).indexOf("click") >= 0),
     JSON.stringify(comboNode && comboNode.actions));
-  if (comboNode && (!comboNode.actions || comboNode.actions.length === 0)) {
-    defect("P2", "E/自定义控件",
-      "role=combobox 的节点 actions 为 []（extractor.cjs:105 extractActions 的 switch 没有 combobox/"
-      + "listbox/menu 分支），agent 从语义树看不出它是可点的，只能猜。");
+  if (comboNode && (comboNode.actions || []).indexOf("click") < 0) {
+    defect("P1", "E/自定义控件",
+      "role=combobox 的节点 actions 不含 click（extractor.cjs 的 ARIA_WIDGET_ACTIONS 表），"
+      + "agent 从语义树看不出它是可点的，只能猜。");
   }
   await click(chTab, "comboBtn");
   await sleep(500);
@@ -1339,12 +1342,18 @@ guard.track(child);
   const upNode = await nodeOf(upTab, "fileInput");
   check("F-01 input[type=file] 出现在语义树中",
     !!upNode, JSON.stringify(upNode && { id: upNode.id, role: upNode.role }));
-  check("F-02 input[type=file] 在语义树里的 role 被当成 textbox —— 边界事实",
-    !!(upNode && upNode.role === "textbox"), JSON.stringify(upNode && upNode.role));
-  if (upNode && upNode.role === "textbox") {
-    defect("P2", "F/文件上传",
-      "input[type=file] 被 inferRole 判成 'textbox'（extractor.cjs:83-89 只特判 checkbox/radio/range/number），"
-      + "且 actions 里出现 type/clear —— agent 可能把它当文本框去 type。建议加 file→role 'fileinput'/button。");
+  // 曾按 bug 写过："role 被当成 textbox —— 边界事实"。那是在给缺陷背书。
+  // 2026-10-12 修好之后翻转：file 输入框报 fileinput，自述 upload 而不是 type ——
+  // 否则 agent 会去 type 一个文件选择器，而真正的动作是 upload（见下面 F-03）。
+  check("F-02 input[type=file] 的 role 是 fileinput，且自述 upload 而非 type",
+    !!(upNode && upNode.role === "fileinput"
+        && (upNode.actions || []).indexOf("upload") >= 0
+        && (upNode.actions || []).indexOf("type") < 0),
+    JSON.stringify(upNode && { role: upNode.role, actions: upNode.actions }));
+  if (!(upNode && upNode.role === "fileinput" && (upNode.actions || []).indexOf("upload") >= 0)) {
+    defect("P1", "F/文件上传",
+      "input[type=file] 未报 fileinput/upload（extractor.cjs inferRole/extractActions），"
+      + "agent 可能把它当文本框去 type，而真正的动作是 upload。");
   }
 
   const upAct = await b.call("ui.act", {

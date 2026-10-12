@@ -402,3 +402,95 @@ describe('data-ai-id 写入纪律', () => {
     expect(withId.length).toBeGreaterThan(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 语义自述不得把 agent 引向错误动作
+//
+// 这两条都是 e2e/richtext_ws.cjs 自己打印出来的 P2 观察，但没人当失败处理 ——
+// 观察是对的，缺的是断言。实测依据 tools/_oneoff/role_gap_probe.cjs（真实 Chromium）：
+//
+//     input[type=file] → role=textbox  actions=[type,setContent,clear,focus]
+//     role=combobox    → actions=[focus]           （没有 click）
+//     role=listbox / option / menu / menuitem → actions=[]
+//
+// 共同点：不崩、不报错，只是让 agent 用错动作（去 type 一个文件选择器，
+// 或以为自定义下拉不可点）。所以永远不会红，必须由测试钉住。
+//
+// 注意：这组测试会替换 document.body，用完必须还原 —— 后面还有依赖同一个 fixture
+// 的用例（SE-ID 那组读的是 data-ai-id）。
+// ---------------------------------------------------------------------------
+describe('ARIA 控件角色与动作自述', () => {
+  const WIDGETS_HTML = `
+    <input type="file" id="f">
+    <input type="text" id="t">
+    <div role="combobox" id="c" tabindex="0">选择器</div>
+    <div role="listbox" id="l"><div role="option" id="o">A</div></div>
+    <div role="menu" id="m"><div role="menuitem" id="mi">X</div></div>
+    <div role="switch" id="sw" tabindex="0">开关</div>
+    <div role="tab" id="tb" tabindex="0">标签</div>
+    <div role="searchbox" id="sb" tabindex="0">搜索</div>
+    <button id="ok">确定</button>`;
+
+  let savedBody = null;
+  beforeEach(() => {
+    savedBody = document.body.innerHTML;
+    document.body.innerHTML = WIDGETS_HTML;
+  });
+  afterEach(() => { document.body.innerHTML = savedBody; });
+
+  const flat = (tree) => {
+    const out = [];
+    (function w(n) { if (!n) return; out.push(n); (n.children || []).forEach(w); })(tree);
+    return out;
+  };
+  const byId = (tree, id) => flat(tree).find((n) => n.id === id);
+
+  it('RW-001: input[type=file] 报 role=fileinput，动作是 upload 而不是 type', () => {
+    const f = byId(extractTree(), 'f');
+    expect(f.role).toBe('fileinput');
+    expect(f.actions).toContain('upload');
+    // 关键：不得出现 type/setContent/clear —— 那正是把 agent 引向错误动作的东西
+    for (const bad of ['type', 'setContent', 'clear']) {
+      expect(f.actions, `fileinput 不该自述 ${bad}`).not.toContain(bad);
+    }
+  });
+
+  it('RW-002: 普通文本输入框仍是 textbox + type（不得被 RW-001 波及）', () => {
+    const t = byId(extractTree(), 't');
+    expect(t.role).toBe('textbox');
+    expect(t.actions).toContain('type');
+  });
+
+  it('RW-003: W3C 控件角色一律自述可点（combobox/listbox/option/menu/menuitem/switch/tab）', () => {
+    const tree = extractTree();
+    for (const id of ['c', 'l', 'o', 'm', 'mi', 'sw', 'tb']) {
+      const n = byId(tree, id);
+      expect(n, `#${id} 应进入语义树`).toBeTruthy();
+      expect(n.actions, `#${id} (role=${n.role}) 应自述 click`).toContain('click');
+    }
+  });
+
+  it('RW-004: searchbox 自述输入类动作', () => {
+    const sb = byId(extractTree(), 'sb');
+    expect(sb.role).toBe('searchbox');
+    expect(sb.actions).toContain('type');
+  });
+
+  it('RW-005: 普通 button 不受影响（仍是 click/focus/hover）', () => {
+    const ok = byId(extractTree(), 'ok');
+    expect(ok.role).toBe('button');
+    expect(ok.actions).toEqual(['click', 'focus', 'hover']);
+  });
+
+  it('RW-006: 阳性对照 —— 带 draggable 的容器仍能推出 click', () => {
+    // 没有这条，RW-003 全绿也可能是因为整条动作推断链失效（例如节点根本没进树）。
+    // 第一次写的时候用的是裸 <div style="cursor:pointer">，结果它是 undefined ——
+    // 因为 isSemantic() 对无 role、无可交互子元素的裸 div 直接返回 false，
+    // 节点压根不进语义树。这个失败本身有价值：它证明"cursor:pointer 的裸 div"这条路
+    // 在真实页面里也拿不到动作，得靠 role/draggable 才进得来。
+    document.body.innerHTML = '<div role="group" id="d" draggable="true">可拖容器</div>';
+    const d = byId(extractTree(), 'd');
+    expect(d, '容器必须进入语义树').toBeTruthy();
+    expect(d.actions).toContain('click');
+  });
+});

@@ -113,6 +113,13 @@ function extractTree() {
       if (type === "checkbox") return "checkbox";
       if (type === "radio") return "radio";
       if (type === "range" || type === "number") return "slider";
+      // file 输入框必须单独一个 role。此前落进 textbox，于是 actions 报
+      // [type,setContent,clear,focus] —— agent 会去 type 一个文件选择器，
+      // 而真正的动作是 upload（ui.act action=upload file=...）。
+      // 实测（tools/_oneoff/role_gap_probe.cjs）：input[type=file] 报的是
+      // role=textbox actions=["type","setContent","clear","focus"]。
+      // 这是"不崩不报错、只是把 agent 引向错误动作"的典型，所以必须有回归钉住。
+      if (type === "file") return "fileinput";
       return "textbox";
     }
     if (tag === "textarea") return "textbox";
@@ -130,15 +137,53 @@ function extractTree() {
     return "generic";
   }
 
+  // ARIA 控件角色 → 自述动作。
+  //
+  // 为什么需要这张表：这些 role 是 W3C 定义的，**可点击是角色语义的一部分**，
+  // 不需要任何启发式推断。而此前它们全部落到 default 分支的 inferContainerActions，
+  // 只有当元素自己带 cursor:pointer / onclick / data-ai-clickable 时才报 click ——
+  // 一个老老实实写 <div role="combobox" tabindex="0"> 的自定义下拉，
+  // 在语义树里就是 role=combobox actions=["focus"]，listbox/option/menu/menuitem
+  // 更是 actions=[]。实测（tools/_oneoff/role_gap_probe.cjs）正是如此。
+  //
+  // 后果：agent 从树里看不出这些控件可点，只能猜或者放弃。这与下面
+  // inferContainerActions 补的是同一类问题（可交互面不可见），只不过那里靠行为信号，
+  // 这里靠角色定义 —— 角色是权威来源，优先用它。
+  var ARIA_WIDGET_ACTIONS = {
+    combobox: ["click", "focus"],
+    listbox: ["click", "focus"],
+    option: ["click", "focus"],
+    menu: ["click", "focus"],
+    menubar: ["click", "focus"],
+    menuitem: ["click", "focus"],
+    menuitemcheckbox: ["click", "focus"],
+    menuitemradio: ["click", "focus"],
+    tab: ["click", "focus"],
+    tablist: ["click", "focus"],
+    treeitem: ["click", "focus"],
+    gridcell: ["click", "focus"],
+    row: ["click", "focus"],
+    switch: ["click", "focus"],
+    spinbutton: ["type", "focus"],
+    searchbox: ["type", "setContent", "clear", "focus"],
+  };
+
   function extractActions(el, role) {
     switch (role) {
       case "button": case "link": return ["click", "focus", "hover"];
       case "textbox": return ["type", "setContent", "clear", "focus"];
+      // 文件输入框：真正的动作是 upload，不是 type。给 focus 是因为
+      // 有些站点的自定义上传按钮要先 focus 才渲染。
+      case "fileinput": return ["upload", "focus"];
       case "select": return ["select", "focus"];
       case "slider": return ["scroll_to", "focus"];
       case "checkbox": case "radio": return ["click", "focus"];
       case "dialog": return ["open", "close"];
-      default: return inferContainerActions(el);
+      default:
+        if (Object.prototype.hasOwnProperty.call(ARIA_WIDGET_ACTIONS, role)) {
+          return ARIA_WIDGET_ACTIONS[role];
+        }
+        return inferContainerActions(el);
     }
   }
 
