@@ -303,7 +303,7 @@ MCP is a thin stdio adapter. Anything MCP can do is reachable directly over JSON
 |---|---|---|
 | `ui.get_tree` | Semantic tree (+ context). Params: `focusedOnly`, `ax`, `subset`, `mode`, `tab` | `browse_get_tree` |
 | `ui.act` | `params.action` + `params.target`; per-action args nested under `params.params` | `browse_act` |
-| `ui.navigate` | Load a URL (`params.url`, optional `tab`) | `browse_navigate` |
+| `ui.navigate` | Load a URL (`params.url`, optional `tab`). Returns `{ok, error?}` — `{ok:false}` always carries a reason. | `browse_navigate` |
 | `ui.snapshot` / `ui.diff` | Capture a baseline (`params.js`, optional `label`) and diff against it (`params.snapshot`, `rearm`, `forget`) | `browse_diff` |
 | `ui.capabilities` | Probe the page: tree histogram, canvas, iframes, app globals, endpoints, recommended route | `browse_capabilities` |
 | `ui.repaint` | Force the compositor to redraw a tab; returns `repaint_count` so a repaint is provable | `browse_repaint` |
@@ -447,6 +447,25 @@ minutes at a time. If it still looks stale, `ui.repaint` forces it on demand and
 - Sometimes the action genuinely did nothing (an overlay ate the click, the app reverted the
   change). That is what `browse_diff` is for — wrap the write in a snapshot/diff pair rather than
   trusting the return value.
+
+**An action never returns at all.** Every path that goes into the page is bounded by a deadline, so a
+page whose main thread is blocked (a heavy recompute, a huge `JSON.parse`, a third-party script in a
+loop) can never hang your tool call. Measured against a page that occupies its main thread for 120s:
+
+| Call | Behaviour |
+|---|---|
+| `ui.get_tree` / `ui.get_focused` | errors at 5s (`getTree timeout`) |
+| `ui.evaluate` | errors at 10s (CDP 5s, then the preload fallback's 5s) |
+| `ui.act` | returns at 15s with `success:false, timed_out:true` |
+| `ui.capabilities` | returns normally (~15s) |
+| `ui.list_tabs` / `ui.network_list` | instant — they never touch the page |
+
+`ui.act`'s budget scales with the work requested, so a legitimate long operation is not killed: `type`
+/`setContent` budget `text.length × interval_ms`, `drag` budgets `duration_ms + steps`, `press`
+budgets `repeat × interval_ms`, `clear` gets 20s. Override with `params.params.timeout_ms`
+(1s floor, 300s cap) or globally with `AI_BROWSER_ACTION_TIMEOUT_MS`. A timeout explicitly warns that
+**the action may have partially applied** — pointer already down, half the characters typed — so
+re-read before retrying rather than firing the same write twice.
 
 **The app restarts itself.** Electron's NetworkService can wedge as a whole: the port still listens,
 every navigation fails with `ERR_FAILED`, and `curl` works fine. A watchdog probes from the main

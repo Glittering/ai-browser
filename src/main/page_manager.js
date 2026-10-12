@@ -8,6 +8,7 @@ import { NetworkMonitor, MAX_POST_DATA_SIZE } from './network_monitor.js';
 import { CanvasMonitor, isCanvasHookEnabled } from './canvas_monitor.js';
 import { buildCanvasHookSource } from './canvas_hook_source.js';
 import { diffValues, previewOf, safeByteLength, DEFAULT_SNAPSHOT_JS, DIFF_MAX_ENTRIES, evictOldest } from './snapshot_diff.js';
+import { withDeadline, actionDeadlineMs } from '../shared/deadline.js';
 import { probeCapabilities } from './capability_probe.js';
 import valueContract from '../shared/value_contract.cjs';
 
@@ -339,17 +340,33 @@ class PageManager {
     return true;
   }
 
+  /**
+   * 导航。返回 `{ok:true}` 或 `{ok:false,error}` —— 成功时形状与旧的布尔透出一致
+   * （外部调用方读 `.ok` 不受影响），失败时多带一个原因：否则 agent 只拿到
+   * `ok:false`，没有任何线索判断该重试还是该换 URL。
+   *
+   * loadURL 挂在 did-finish-load 上，而"永不触发 did-finish-load 的页面"是存在的
+   * （挂起的连接、不结束的加载）。这与 ui.act 是同一类故障：await 一个可能不返回的
+   * 东西。所以同样套 deadline。
+   */
   async navigate(url, tabId) {
     const tid = tabId !== undefined ? tabId : this.activeTab;
     const view = this._getView(tid);
-    if (!view) return false;
+    if (!view) return { ok: false, error: 'Tab not found' };
     this._axDiffCache.delete(tid); // fresh page → drop stale incremental snapshot
     // loadURL resolves at did-finish-load, which is exactly when the old
     // pixels may still be on screen — repaint here as well as from the event
     // hooks, so a programmatic navigate never depends on hook timing.
-    await view.webContents.loadURL(url);
+    try {
+      await withDeadline(view.webContents.loadURL(url), 30000, 'navigate');
+    } catch (e) {
+      if (e && e.__deadline) {
+        return { ok: false, error: `${e.message} — the page never finished loading; it may still be loading in the background` };
+      }
+      return { ok: false, error: String((e && e.message) || e).slice(0, 300) };
+    }
     this.repaint(tid);
-    return true;
+    return { ok: true };
   }
 
   async getTree(focusedOnly = false, tabId) {
@@ -388,12 +405,32 @@ class PageManager {
     } catch (e) {
       return { tree: null, context: null, error: 'cdp-unavailable' };
     }
-    const main = await axExtractor.extractFromDebugger(view.webContents.debugger);
-    // #1: decorate link/button nodes with their absolute target URL (read-only).
-    // Generic — agent sees "where clicking takes me" instead of guessing labels.
-    if (main && main.tree && view.webContents.debugger) {
-      main.tree = await axExtractor.attachHrefs(view.webContents.debugger, main.tree);
+    // 与 ui.act 同一类风险：这些全是 await CDP 命令（Accessibility.getFullAXTree /
+    // DOM.getDocument / DOM.resolveNode），渲染进程主线程被占住时它们不返回。
+    // getTree 的 preload 路径有 5s 超时，这条 AX 路径此前没有 —— 补上。
+    try {
+      const main = await withDeadline(
+        axExtractor.extractFromDebugger(view.webContents.debugger),
+        15000, 'get_tree(ax)'
+      );
+      // #1: decorate link/button nodes with their absolute target URL (read-only).
+      // Generic — agent sees "where clicking takes me" instead of guessing labels.
+      if (main && main.tree && view.webContents.debugger) {
+        main.tree = await withDeadline(
+          axExtractor.attachHrefs(view.webContents.debugger, main.tree),
+          15000, 'get_tree(ax).attachHrefs'
+        );
+      }
+      return await this._finishAxTree(main, view, tid, opts);
+    } catch (e) {
+      if (e && e.__deadline) {
+        return { tree: null, context: null, error: e.message + ' — the page main thread is likely blocked' };
+      }
+      throw e;
     }
+  }
+
+  async _finishAxTree(main, view, tid, opts) {
     // P0 down-drill: splice OOPIF sub-frame editors into the main AX tree so
     // editors rendered in cross-process iframes (B站 write-article: york/read-draft)
     // become visible to `ui.get_tree {ax:true}`. Each sub-frame is read by
@@ -599,7 +636,45 @@ class PageManager {
     return out;
   }
 
+  /**
+   * ui.act 的外壳：唯一职责是**保证它一定会在有限时间内返回**。
+   *
+   * 为什么必须有这一层：`ui.act` 内部会 await CDP 命令（Input.dispatchMouseEvent /
+   * Accessibility.getFullAXTree / DOM.getDocument），而这些命令在渲染进程主线程被
+   * 占住时**永不返回**—— 事件要等 ack，ack 等主线程空出来。实测一个跑 while 循环
+   * 的页面能让 ui.act 45 秒无回包（其余路径各自有 5s 超时并正确报错，见
+   * shared/deadline.js 顶部）。后果不是"慢"，是 agent 的工具调用永久悬挂、
+   * 整个会话死掉，且没有任何错误可看。
+   *
+   * 放在这一层而不是各个子路径里，是因为挂住的位置不止一个（AX handles、指针目标
+   * 解析、拖拽按键分发都可能），逐个补等于逐个漏。
+   */
   async executeAction(action, target, params = {}, tabId) {
+    const ms = actionDeadlineMs(action, params);
+    try {
+      return await withDeadline(
+        this._executeActionInner(action, target, params, tabId),
+        ms,
+        `action:${action}`
+      );
+    } catch (e) {
+      if (e && e.__deadline) {
+        // 明确告诉 agent 两件事：① 它该重试/换策略；② 这个动作**可能已经部分生效**
+        // （超时时指针可能已经按下、字符可能已经输入了一半）—— 后者必须说，否则
+        // agent 会以为页面没被动过而直接重试，造成双倍输入。
+        return {
+          success: false,
+          error: `${e.message} — the page's main thread is likely blocked; the action may have partially applied`,
+          timed_out: true,
+          deadline_ms: ms,
+          action,
+        };
+      }
+      throw e;
+    }
+  }
+
+  async _executeActionInner(action, target, params = {}, tabId) {
     const tid = tabId !== undefined ? tabId : this.activeTab;
     const view = this._getView(tid);
     if (!view) return { success: false, error: 'Tab not found' };

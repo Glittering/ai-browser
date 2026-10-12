@@ -1,6 +1,7 @@
 // main/ws_server.js — WebSocket JSON-RPC server v2 (multi-tab)
 import { WebSocketServer } from 'ws';
 import { evaluateGuardError } from '../shared/guards.js';
+import { withDeadline, actionDeadlineMs } from '../shared/deadline.js';
 import { config } from '../shared/config.js';
 
 // Each startWSServer() owns a private WebSocketServer. Keeping it local (not a
@@ -70,15 +71,43 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
             break;
           }
           case 'ui.act': {
-            const result = await pageManager.executeAction(
-              params.action, params.target, params.params || {}, tabId
-            );
-            send({ jsonrpc: '2.0', id, result });
+            // RPC 边界上的保底：这一层也套 deadline，与 page_manager 内部那一层
+            // 同源（都用 actionDeadlineMs 算预算）。为什么两层都要：
+            //   - page_manager 那层保护所有内部调用方（capability_probe、直接 API）；
+            //   - 这一层保护"以后新增的页面路径忘了套"，并且**可以用 mock PageManager
+            //     做单测**（真实 PageManager 依赖 Electron，vitest 里起不来）。
+            // 同源意味着两层不会打架：预算一致，谁先到期谁报，语义相同。
+            const budget = actionDeadlineMs(params.action, params.params || {});
+            try {
+              const result = await withDeadline(
+                pageManager.executeAction(params.action, params.target, params.params || {}, tabId),
+                budget, `action:${params.action}`
+              );
+              send({ jsonrpc: '2.0', id, result });
+            } catch (e) {
+              if (e && e.__deadline) {
+                send({
+                  jsonrpc: '2.0', id,
+                  result: {
+                    success: false,
+                    error: `${e.message} — the page's main thread is likely blocked; the action may have partially applied`,
+                    timed_out: true,
+                    deadline_ms: budget,
+                    action: params.action,
+                  },
+                });
+              } else {
+                throw e;
+              }
+            }
             break;
           }
           case 'ui.navigate': {
-            const ok = await pageManager.navigate(params.url, tabId);
-            send({ jsonrpc: '2.0', id, result: { ok } });
+            // navigate 现在返回 {ok, error?}：成功形状与旧的 {ok:true} 一致，
+            // 失败时多一个原因。此前只有布尔，agent 拿到 ok:false 无从判断
+            // 该重试还是换 URL；而"页面永不 did-finish-load"是会真实发生的。
+            const r = await pageManager.navigate(params.url, tabId);
+            send({ jsonrpc: '2.0', id, result: r && typeof r === 'object' ? r : { ok: !!r } });
             break;
           }
           case 'ui.repaint': {

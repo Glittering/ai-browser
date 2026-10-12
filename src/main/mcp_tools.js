@@ -45,6 +45,7 @@ export const MCP_TOOLS = [
         url: { type: 'string', description: 'For click: click the link whose href matches this URL instead of guessing the target label.' },
         keep_tab: { type: 'boolean', description: 'For click: keep the current tab active instead of auto-following a newly opened tab.' },
         file: { type: 'string', description: 'Absolute path to upload (upload only, target must be a file input).' },
+        timeout_ms: { type: 'integer', description: 'Override the action deadline in ms (default 15000; type/setContent/drag/press scale with text length / duration / repeat; 1s floor, 300s cap). A timeout returns success=false, timed_out=true and warns the action may have partially applied.' },
         to_target: { type: 'string', description: 'drag: data-ai-id to drop onto (e.g. drag from one node\'s output to another node to connect them).' },
         dx: { type: 'number', description: 'drag: horizontal distance to move (use with dy instead of to_target).' },
         dy: { type: 'number', description: 'drag: vertical distance to move.' },
