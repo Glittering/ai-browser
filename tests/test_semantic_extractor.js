@@ -494,3 +494,66 @@ describe('ARIA 控件角色与动作自述', () => {
     expect(d.actions).toContain('click');
   });
 });
+
+// ===========================================================================
+// AU 系列：e2e/audit_ws.cjs 审计发现的缺陷，回归钉在单测里
+//   1) role=dialog 曾广告 ["open","close"]，而两个执行器都没有这两个 case
+//      → 语义树自述了做不到的动作（AU-A3）
+//   2) ui.get_focused 恒返回 null：它读 root.focused_element_id，
+//      而 extractor 从不产出这个字段（AU-B2）
+// ===========================================================================
+describe('extractTree() — 审计缺陷回归', () => {
+  // byId 定义在文件另一个 describe 作用域里，这里自带一份（同一棵树上找节点）。
+  const flat = (n, out = []) => {
+    if (!n) return out;
+    if (Array.isArray(n)) { n.forEach((x) => flat(x, out)); return out; }
+    out.push(n);
+    if (n.children) n.children.forEach((c) => flat(c, out));
+    return out;
+  };
+  const node = (tree, id) => flat(tree).find((n) => n.id === id);
+
+  it('AU-001: role=dialog 不再广告 open/close（执行器里没有这两个动作）', () => {
+    document.body.innerHTML =
+      '<div role="dialog" id="d1"><p>内容</p><button id="b1">知道了</button></div>' +
+      '<dialog id="d2"><p>原生</p><button id="b2">好</button></dialog>';
+    const tree = extractTree();
+    for (const id of ['d1', 'd2']) {
+      const n = node(tree, id);
+      expect(n, `#${id} 应进入语义树`).toBeTruthy();
+      expect(n.role).toBe('dialog');
+      expect(n.actions || [], `#${id} 不得广告 open/close`).not.toContain('open');
+      expect(n.actions || [], `#${id} 不得广告 open/close`).not.toContain('close');
+    }
+  });
+
+  it('AU-002: 阳性对照 —— 弹窗里的按钮仍自述 click/focus（能力没丢）', () => {
+    const b = node(extractTree(), 'b1');
+    expect(b.role).toBe('button');
+    expect(b.actions).toEqual(['click', 'focus', 'hover']);
+  });
+
+  it('AU-003: 焦点在输入框上时 root.focused_element_id 是该元素的 data-ai-id', () => {
+    document.body.innerHTML = '<input id="ti" type="text"><input id="tb" type="text">';
+    document.getElementById('tb').focus();
+    const tree = extractTree();
+    expect(document.activeElement.id).toBe('tb');          // 前提：焦点真的在 tb 上
+    expect(tree.focused_element_id).toBe('tb');
+  });
+
+  it('AU-004: 焦点在 body 上时 focused_element_id 为 null（没有对应语义节点）', () => {
+    document.body.innerHTML = '<input id="ti" type="text">';
+    if (document.body.blur) document.body.blur();
+    (document.activeElement || {}).blur && document.activeElement.blur();
+    const tree = extractTree();
+    expect(tree.focused_element_id == null).toBe(true);
+  });
+
+  it('AU-005: 焦点元素不是语义节点（无 data-ai-id）时为 null，不猜', () => {
+    // 一个被 isPureLayout 剪掉的裸 div：设了 tabindex 也进不了树
+    document.body.innerHTML = '<div id="wrap" tabindex="0"><input id="ti"></div>';
+    document.getElementById('wrap').focus();
+    const tree = extractTree();
+    expect(tree.focused_element_id == null).toBe(true);
+  });
+});

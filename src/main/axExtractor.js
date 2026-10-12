@@ -56,7 +56,11 @@ function actionsFor(role) {
     case 'select': return ['select', 'focus'];
     case 'slider': return ['scroll_to', 'focus'];
     case 'checkbox': case 'radio': return ['click', 'focus'];
-    case 'dialog': case 'alertdialog': return ['open', 'close'];
+    // dialog/alertdialog 曾经也广告 ['open','close']，与 extractor.cjs 是同一个错：
+    // page_manager.performAction 与 preload actions.cjs 都没有这两个 case，调用只会
+    // 拿到 "Unknown action"。语义树（AX 路径）自述了做不到的动作，agent 照着做必然
+    // 失败。弹窗里真正能点的按钮本身就带 ['click','focus']，给空数组不损失能力。
+    case 'dialog': case 'alertdialog': return [];
     default: return [];
   }
 }

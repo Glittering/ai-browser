@@ -87,7 +87,12 @@ agent ──WS JSON-RPC┘        │                        └── preload (
 
 `ui.get_tree` 返回节点树 + 页面上下文（模态框、消息、表单、统计）。每个节点：
 `id / role / label / states / actions / bounds`（输入类附 `value`，超长时走
-`value_truncate` 契约，敏感控件给 `value_sensitive`）。
+`value_truncate` 契约，敏感控件给 `value_sensitive`）。根节点另带
+`focused_element_id`（当前焦点元素的 `data-ai-id`，无对应语义节点时为 `null`）。
+
+**`actions` 是自述契约，不是装饰**：树里广告的每个动作都必须在执行器里真有对应
+case。曾出现 `role=dialog` 广告 `["open","close"]` 而两个执行器都没有这两个 case
+（照着做必拿到 `Unknown action`），现由 `audit` 套件的「反虚假广告」检查逐条验。
 
 **页面上下文的读路径一律落顶层、扫整文档**，不依赖容器 class 里有没有
 `modal`/`dialog`/`popup` 关键词（那是猜语义，实测同一份错误汇总换个容器就读不到）：
@@ -193,9 +198,11 @@ input"这类位置猜测** —— 猜出来的对应关系比没有更糟。
 
 ## 测试基线
 
-- 单元：`npm test` —— Vitest，27 文件 / 399 条，0 skip。
+- 单元：`npm test` —— Vitest，27 文件 / 404 条，0 skip。
 - 端到端：各 `npm run <suite>` 自起 Electron（隔离 profile）：
   `smoke` / `capabilities` / `richtext` / `network` / `value` / `canvas` / `modeldiff` /
-  `focus` / `interact` / `view`。**改动不得破坏任何一项。**
+  `audit` / `focus` / `interact` / `view`。**改动不得破坏任何一项。**
+- `ui.wait` 的 `target` 先按元素 id 精确匹配、再退化为 label 子串匹配；
+  新增动作或角色时必须同步核对执行器里真有对应 case（`audit` 套件逐条验）。
 - 测量类断言必须先验前提：锁屏时前台恒为 `loginwindow`，会造成假绿/假红；
   不可测时打印 `SKIPPED`，不伪装成通过。

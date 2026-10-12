@@ -178,7 +178,15 @@ function extractTree() {
       case "select": return ["select", "focus"];
       case "slider": return ["scroll_to", "focus"];
       case "checkbox": case "radio": return ["click", "focus"];
-      case "dialog": return ["open", "close"];
+      // dialog 曾经广告 ["open","close"] —— 但 page_manager.performAction 与
+      // preload actions.cjs 都没有这两个 case，调用只会拿到
+      // {success:false,error:"Unknown action: open"}。语义树自述了做不到的动作，
+      // agent 照着做必然失败（e2e/audit_ws.cjs AU-A3/A4 抓到的）。
+      // "打开/关闭一个对话框"也没有通用实现：真正的 <dialog> 有 showModal/close，
+      // 而 <div role=dialog> 只能靠点它里面的确定/取消按钮 —— 那是猜。
+      // 弹窗里真正能点的按钮本身就带 ["click","focus"]，所以这里给空数组不损失能力。
+      // 与 inferContainerActions 同一条原则：宁可少报，绝不猜一个假动作。
+      case "dialog": return [];
       default:
         if (Object.prototype.hasOwnProperty.call(ARIA_WIDGET_ACTIONS, role)) {
           return ARIA_WIDGET_ACTIONS[role];
@@ -530,6 +538,22 @@ function extractTree() {
   if (!root) {
     return { id: "root", role: "generic", label: "", states: ["visible"], actions: [], bounds: { x: 0, y: 0, width: 0, height: 0 } };
   }
+  // 当前焦点元素的 data-ai-id，挂根上。ui.get_focused 一直在读这个字段，而
+  // extractor 从不产出它 —— 于是那个方法恒返回 null（e2e/audit_ws.cjs AU-B2 抓到）。
+  // 焦点信息本来就在每个节点的 states:[...,"focused"] 里，但那是 O(n) 扫树；
+  // 挂根上 O(1)，且与节点状态同源（都是 document.activeElement）。
+  //
+  // 三种情况给 null，不猜：焦点在 body/documentElement（没有对应语义节点）、
+  // 焦点在iframe 里（activeElement 是 iframe 元素本身，不是里面那个输入框）、
+  // 焦点元素不是语义节点（没有 data-ai-id，比如被 isPureLayout 剪掉的容器）。
+  var focusedEl = null;
+  try { focusedEl = document.activeElement; } catch (e) {}
+  var focusedId = null;
+  if (focusedEl && focusedEl !== document.body && focusedEl !== document.documentElement &&
+      typeof focusedEl.getAttribute === "function") {
+    focusedId = focusedEl.getAttribute("data-ai-id") || null;
+  }
+  root.focused_element_id = focusedId;
   root._debug = { iframe_count: extraIframes.length, version: VERSION_TAG };
   return root;
 }

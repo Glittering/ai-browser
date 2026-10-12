@@ -20,7 +20,8 @@
     "realsites": "node e2e/e2e_realsites.cjs",
     "realsites:meta": "vitest run tests/test_realsites_sites.js",
     "mcp": "node src/main/mcp_server.js",
-    "modeldiff": "node e2e/modeldiff_ws.cjs"
+    "modeldiff": "node e2e/modeldiff_ws.cjs",
+    "audit": "node e2e/audit_ws.cjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

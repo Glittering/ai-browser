@@ -15,6 +15,23 @@ function findInTree(node, field, value) {
   if (node.children) for (const c of node.children) { const f = findInTree(c, field, value); if (f) return f; }
   return null;
 }
+// wait{button_enabled} 的目标解析。
+//
+// 老实现直接 findInTree(tree,'label',target) —— 按 **label 子串** 匹配。可整个 API
+// 里 target 一律指元素 id（get_tree 给的那个），agent 拿 id 来等就永远等不到：
+// 实测传 'lateBtn'（元素 id）8s 超时后 satisfied=false，而传按钮文案 3ms 就满足
+// （e2e/audit_ws.cjs AU-E1/AU-E2）。agent 会误判成"按钮一直禁用"。
+//
+// 现在先按 id 精确匹配，命中不了再退化成 label 子串（老用法仍然成立）。
+// 顺序不能反：label 是子串匹配，'go' 会命中任何文案里带 go 的节点。
+function findWaitTarget(tree, target) {
+  if (!target) return null;
+  const byId = findInTree(tree, 'id', String(target));
+  if (byId && byId.id === String(target)) return byId;
+  const any = findInTree(tree, 'id', String(target));
+  if (any) return any;
+  return findInTree(tree, 'label', String(target));
+}
 
 export function startWSServer(pageManager, port = config.wsPort, onQuit = null) {
   const wss = new WebSocketServer({ port });
@@ -259,8 +276,8 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
                 const ctx = result?.context;
 
                 if (params.condition === 'button_enabled' && params.target) {
-                  // Find button by label in tree
-                  const btn = findInTree(tree, 'label', params.target);
+                  // Find button by id first (what get_tree hands the agent), label as fallback
+                  const btn = findWaitTarget(tree, params.target);
                   if (btn && (!btn.states || btn.states.indexOf('disabled') < 0)) {
                     satisfied = true; break;
                   }
