@@ -381,6 +381,14 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
           // === ui.quit — let MCP clients shut down the browser gracefully ===
           // The agent owns the browser lifecycle; without this it has no way
           // to release the process after finishing a task.
+          case 'ui.downloads': {
+            // 下载此前**完全没人处理**：Electron 默认取消，agent 点"导出"只看到
+            // success，然后什么都没有，连错误都没有。落盘路径可预期
+            // （<userData>/downloads/<tabId>/），这里就是让 agent 问到"文件在哪儿"。
+            const r = pageManager.downloads({ tab: tabId });
+            send({ jsonrpc: '2.0', id, result: r });
+            break;
+          }
           case 'ui.quit': {
             send({ jsonrpc: '2.0', id, result: { ok: true } });
             // Defer so the response actually flushes before the WS closes.

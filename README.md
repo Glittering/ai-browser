@@ -10,7 +10,7 @@
   <img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue.svg">
   <img alt="Electron" src="https://img.shields.io/badge/built%20with-Electron%2033-9cf">
   <img alt="Platforms" src="https://img.shields.io/badge/platforms-macOS%20%E2%80%A2%20Linux-blueviolet">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-316%20unit%20%2B%20356%20e2e-2ea043">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-363%20unit%20%2B%20356%20e2e-2ea043">
   <img alt="MCP" src="https://img.shields.io/badge/spec-MCP%20(stdio)-f5b23b">
 </p>
 
@@ -102,7 +102,7 @@ or any system prompt; it teaches the tool loop, the token-saving params, and whe
 
 ## The MCP tools
 
-Source of truth: [`src/main/mcp_tools.js`](src/main/mcp_tools.js). There are 16 — a deliberately
+Source of truth: [`src/main/mcp_tools.js`](src/main/mcp_tools.js). There are 17 — a deliberately
 small surface, since every tool schema is injected into your agent's context on every turn.
 
 | Tool | One line |
@@ -113,6 +113,7 @@ small surface, since every tool schema is injected into your agent's context on 
 | `browse_diff` | `snapshot` a baseline, then `diff` to get added / removed / changed paths with before/after values. **This is how you prove an action did anything.** |
 | `browse_capabilities` | Probe what a page affords and which route to take on it (see below). |
 | `browse_repaint` | Force the compositor to redraw the tab when the window shows a stale page; returns `repaint_count`. |
+| `browse_downloads` | List a tab's downloads with their on-disk paths. Downloads are asynchronous — poll this after clicking an export button. |
 | `browse_canvas` | Read `<canvas>` through captured draw calls: `list` / `read` / `configure` / `capture`. **Experimental — see the canvas section below.** |
 | `browse_evaluate` | Run a JS *expression* in page context (5000-char cap, Node identifiers rejected). |
 | `browse_scroll` | Scroll the page, or scroll an element into view. |
@@ -312,6 +313,7 @@ MCP is a thin stdio adapter. Anything MCP can do is reachable directly over JSON
 | `ui.wait` | Poll until a condition or timeout | `browse_wait` |
 | `ui.new_tab` / `ui.close_tab` / `ui.list_tabs` / `ui.set_active_tab` | Tab management | `browse_*_tab` |
 | `ui.subscribe` / `ui.unsubscribe` | Event subscription; `params.events`, `"*"` for all | — (WS only — see below) |
+| `ui.downloads` | This tab's downloads with on-disk paths (`state`, `received_bytes`, `dir`) | `browse_downloads` |
 | `ui.get_focused` | The focused element subtree | — |
 | `ui.peek` | Hover a folded/hover-only affordance and return the diff, without committing | — |
 | `ui.network_body` | Response body by URL substring (`url_pattern`) | — (superseded by `browse_network`) |
@@ -357,7 +359,7 @@ Error codes follow JSON-RPC: `-32700` parse error, `-32601` unknown method, `-32
 ## How it works
 
 ```
-   agent ── MCP stdio (16 browse_*) ──┐
+   agent ── MCP stdio (17 browse_*) ──┐
    agent ── WS JSON-RPC :9223 (ui.*) ─┤
                                       ▼
  ┌──────────────────────────────────────────────────┐
@@ -511,7 +513,7 @@ AI_BROWSER_USER_DATA=~/.ai-browser-work npm start
 ## Test & dev
 
 ```bash
-npm test             # vitest — 316 tests across 24 files
+npm test             # vitest — 363 tests across 26 files
 npm run smoke        # Electron contract layer, offline fixture      — 31 checks
 npm run capabilities # text fields, canvas, page source, network, DOM editing — 54 checks
 npm run richtext     # rich-text editors, nested menus, forms, errors, tags, upload — 111 checks

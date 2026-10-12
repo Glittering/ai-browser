@@ -9,6 +9,7 @@ import { CanvasMonitor, isCanvasHookEnabled } from './canvas_monitor.js';
 import { buildCanvasHookSource } from './canvas_hook_source.js';
 import { diffValues, previewOf, safeByteLength, DEFAULT_SNAPSHOT_JS, DIFF_MAX_ENTRIES, evictOldest } from './snapshot_diff.js';
 import { withDeadline, actionDeadlineMs } from '../shared/deadline.js';
+import { DownloadMonitor } from './download_monitor.js';
 import { probeCapabilities } from './capability_probe.js';
 import valueContract from '../shared/value_contract.cjs';
 
@@ -115,7 +116,73 @@ class PageManager {
     this.networkMonitor = new NetworkMonitor({}, { captureEnabled: NETWORK_CAPTURE_DEFAULT });
     this.canvasMonitor = new CanvasMonitor();
     this._canvasBindings = new Map(); // bindingName -> tabId（hook 回传时据此归 tab）
+    // 下载：此前 src/ 里没有任何 will-download 处理器，Electron 默认**取消**下载 ——
+    // agent 点"导出 CSV"拿到 success，然后什么都没有，连错误都没有。
+    this.downloadMonitor = new DownloadMonitor(null, {
+      broadcast: (type, data) => this._broadcast(type, data),
+    });
+    this.downloadMonitor._resolveTab = (wc) => this._tabIdOfWebContents(wc);
+    this._setupPermissions();
     this._setupIPC();
+  }
+
+  /**
+   * 权限请求白名单。
+   *
+   * 不装这个处理器时，Electron 对每个请求都**静默拒绝**。后果与下载一样隐蔽：
+   * 站点要 pointerLock / clipboard 写入才能继续，agent 完全看不出是被权限挡住。
+   *
+   * 默认只放行"不碰用户隐私、且 agent 确实需要"的几项：
+   *   pointerLock            画布类应用常用，无隐私面
+   *   clipboard-sanitized-write  "复制"按钮要它能用（写入是 sanititized 的，读不放）
+   *   fullscreen             演示/看图常用，无隐私面
+   *   localStorage/sessionStorage 等存储类（Chromium 已默认允许，列出来只为显式）
+   * 摄像头/麦克风/定位**不放**：那是隐私面，应由人主动决定。
+   * 覆盖：AI_BROWSER_PERMISSIONS="midi,geolocation"（追加）或 "*"（全放，慎用）。
+   *
+   * 拒绝也广播一条事件：否则 agent 无法区分"站点没这功能"和"被权限挡住"。
+   */
+  _setupPermissions() {
+    const DEFAULT_ALLOW = ['pointerLock', 'clipboard-sanitized-write', 'fullscreen'];
+    const raw = process.env.AI_BROWSER_PERMISSIONS;
+    const allow = raw === '*' ? null : (raw ? raw.split(',').map((s) => s.trim()).filter(Boolean) : DEFAULT_ALLOW);
+    const allowed = (p) => (allow === null ? true : allow.indexOf(p) >= 0);
+    this._permissionAllow = allow;
+    this._onPermission = (webContents, permission, callback) => {
+      if (allowed(permission)) return callback(true);
+      const tid = this._tabIdOfWebContents(webContents);
+      this._broadcast('permission_denied', {
+        tab: tid,
+        permission,
+        hint: 'grant it with AI_BROWSER_PERMISSIONS="' + permission + '" or "*", or ask the user to allow it in the window',
+      });
+      callback(false);
+    };
+    this._installPermissionHandler();
+  }
+
+  _installPermissionHandler() {
+    try {
+      // 延迟到 app ready 之后由 index.js 调 installSessionHooks(session)；
+      // 这里只存回调，避免在模块加载期碰 Electron session（vitest 起不来）。
+      if (this._session) this._session.setPermissionRequestHandler(this._onPermission);
+    } catch (_) { /* 无 session（单测/非 Electron 环境） */ }
+  }
+
+  installSessionHooks(session) {
+    this._session = session;
+    this.downloadMonitor.session = session;
+    this.downloadMonitor.install();
+    this._installPermissionHandler();
+  }
+
+  /** webContents → tabId。找不到返回 undefined（调用方各自决定怎么兜底）。 */
+  _tabIdOfWebContents(webContents) {
+    if (!webContents) return undefined;
+    for (const [tid, view] of this.tabs) {
+      if (view && view.webContents === webContents) return tid;
+    }
+    return undefined;
   }
 
   static _instance = null;
@@ -331,6 +398,26 @@ class PageManager {
    */
   async capabilities(opts = {}) {
     return probeCapabilities(this, opts);
+  }
+
+  /**
+   * ui.downloads —— agent 问"我刚才点导出，文件在哪儿"。
+   *
+   * 为什么必须是独立查询而不是塞进 ui.act 的返回值：下载是异步的，click 返回时
+   * 它往往还没开始（站点常先发一个 XHR 再触发下载）。塞进去会让 agent 在错的
+   * 时间点看到一个空列表，然后以为没触发。
+   */
+  downloads(params = {}) {
+    const tid = params.tab !== undefined && params.tab !== null ? params.tab : this.activeTab;
+    const r = this.downloadMonitor.list(tid);
+    return {
+      ...r,
+      tab: tid,
+      // 只把 completed 的算作"可用"，并明确告诉 agent 其余的状态 ——
+      // 一个 interrupted 的记录不代表文件存在。
+      ready: (r.downloads || []).filter((d) => d.state === 'completed'),
+      note: 'only state=completed entries have a file on disk; check .path',
+    };
   }
 
   _sendToView(tabId, channel, payload) {
@@ -1780,7 +1867,10 @@ class PageManager {
         // nodeIntegration stays false + contextIsolation true, so page code
         // has no Node access regardless of the OS-level renderer sandbox.
         sandbox: false,
-        partition: 'persist:ai-browser',
+        // 与 installSessionHooks 用的 session.fromPartition(config.viewPartition)
+        // 必须一致 —— 否则 will-download / 权限钩子装到了另一个 session 上，
+        // 表现是"页面确实请求了下载，但什么都没发生"（实测踩过，见 config.js）。
+        partition: config.viewPartition,
         persistStorage: true,
         webSecurity: true,
         allowRunningInsecureContent: false,
@@ -2014,6 +2104,9 @@ class PageManager {
     for (const [sid, s] of this._snapshots) {
       if (s.tab === tabId) this._snapshots.delete(sid);
     }
+    // 同理，下载记录只对"这个 tab 还在"有意义。注意**只清记录，不删文件** ——
+    // 文件是用户要的东西，删文件是另一个决定，不能藏在关 tab 里。
+    this.downloadMonitor.clearTab(tabId);
   }
 
   listTabs() {
@@ -2630,6 +2723,7 @@ class PageManager {
     // Same reasoning as closeTab: baselines and queued repaints belong to tabs
     // that are about to stop existing.
     this._snapshots.clear();
+    this.downloadMonitor.clearAll();
     for (const t of this._repaintTimers.values()) clearTimeout(t);
     this._repaintTimers.clear();
     for (const [id, view] of this.tabs) {

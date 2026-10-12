@@ -67,6 +67,7 @@ export const VALID_METHODS = [
   'ui.evaluate',
   'ui.subscribe',
   'ui.unsubscribe',
+  'ui.downloads',
   'ui.get_focused',
   'ui.peek',
   'ui.wait',

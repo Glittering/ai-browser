@@ -1,6 +1,6 @@
 // main/index.js — Electron entry v5 (multi-tab, real UI)
 // One process, one WS server, multiple tabs with real tab bar.
-import { app, BrowserWindow, BrowserView, ipcMain, net } from 'electron';
+import { app, BrowserWindow, BrowserView, ipcMain, net, session } from 'electron';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startWSServer } from './ws_server.js';
@@ -314,6 +314,21 @@ function refreshTabBar() {
 
 app.whenReady().then(() => {
   createWindow();
+  // 下载与权限的 session 级钩子。必须装在 will-download 上，否则 Electron 默认
+  // **取消**下载：agent 点"导出"只看到 success，然后什么都没有，连错误都没有
+  // （2026-10-12 审计发现 src/ 里原先没有任何下载处理）。
+  // 权限同理：不装 setPermissionRequestHandler 时每个请求被静默拒绝，站点要
+  // pointerLock / clipboard 写入才能继续时，agent 完全看不出是被权限挡住。
+  //
+  // ⚠️ 必须是 tab 的 BrowserView 实际所在的那个 session。它们用的是
+  // `partition: config.viewPartition`，不是 defaultSession —— 第一版传了
+  // defaultSession，钩子装到了另一个 session 上，表现是"页面确实发出了下载请求
+  // （服务端收到了 GET），但 will-download 从不触发、文件不落盘"。
+  try {
+    pageManager.installSessionHooks(session.fromPartition(config.viewPartition));
+  } catch (e) {
+    console.error('[index] failed to install session hooks:', e && e.message);
+  }
 });
 
 function cleanupAndQuit() {

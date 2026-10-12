@@ -18,6 +18,13 @@ export const config = {
   userAgent: process.env.AI_BROWSER_UA || DEFAULT_UA,
   // Height of the in-app tab strip below the window title bar
   tabBarHeight: 36,
+  // The session every tab's BrowserView uses. **Must stay a single source of
+  // truth**: session-level hooks (will-download, permission requests) are
+  // installed on `session.fromPartition(viewPartition)`. Hooking
+  // `session.defaultSession` instead silently does nothing — the views are not
+  // in that session. Measured 2026-10-12: a download was requested by the page,
+  // no will-download ever fired, and no file landed.
+  viewPartition: process.env.AI_BROWSER_VIEW_PARTITION || 'persist:ai-browser',
 };
 
 export function wsUrl(port = config.wsPort) {

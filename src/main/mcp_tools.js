@@ -234,6 +234,16 @@ export const MCP_TOOLS = [
     }
   },
   {
+    name: 'browse_downloads',
+    description: 'List downloads for a tab with their on-disk paths. Use after clicking an export/download button — downloads are asynchronous, so poll this rather than expecting the path in the click response.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tab: { type: 'integer', description: 'Tab ID (defaults to the active tab).' },
+      },
+    },
+  },
+  {
     name: 'browse_quit',
     description: 'Gracefully shut down the AI Browser (releases resources).',
     inputSchema: { type: 'object', properties: {} }

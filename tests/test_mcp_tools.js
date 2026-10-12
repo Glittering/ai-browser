@@ -26,7 +26,12 @@ describe('MCP tool list (token-cost guard)', () => {
     //     （DOM 树和 evaluate 早就报新页面了，只有屏幕是旧的），所以 agent 唯一
     //     的手段就是显式要求重绘。此前它只在 raw WS 上暴露，而 MCP 是 agent 的
     //     主通路 —— 恰好是这个功能最需要的地方够不着。描述压到 139 字符。
-    expect(MCP_TOOLS).toHaveLength(16);
+    //   + browse_downloads：此前 src/ 里**没有任何** will-download 处理器，
+    //     Electron 默认取消下载。agent 点"导出 CSV"只看到 success，然后什么都没有，
+    //     连错误都没有 —— 最隐蔽的一类 success ≠ done。这个工具是让 agent 能问到
+    //     "文件在哪儿"的唯一入口。下载是异步的，塞进 click 返回值会让 agent 在错的
+    //     时间点看到空列表，所以必须是独立查询。
+    expect(MCP_TOOLS).toHaveLength(17);
   });
 
   it('新增的两个工具都保持精简描述（护栏：描述长度是每轮都要付的成本）', () => {

@@ -344,6 +344,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return { content: [{ type: 'text', text: JSON.stringify(result) }] };
     }
 
+    case 'browse_downloads': {
+      const result = await wsClient.call('ui.downloads', { tab: args.tab });
+      return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+    }
+
     case 'browse_quit': {
       // Fire and forget — the WS server closes before we'd get the response.
       try { await wsClient.call('ui.quit', {}); } catch (e) {}
