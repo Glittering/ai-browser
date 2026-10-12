@@ -530,7 +530,7 @@ npm run network      # request log, POST bodies, headers, pagination, redaction 
 npm run value        # value truncation contract + read-only get_value — 15 checks
 npm run canvas       # canvas draw-call capture — 13 checks
 npm run modeldiff    # canvas app data-model diff (the "unchanged" false green) — 12 checks
-npm run audit        # every advertised action must exist; wait/downloads/quit — 30 checks
+npm run audit        # every advertised action must exist; wait/downloads/permissions/quit — 35 checks
 npm run focus        # no focus stealing + full capability while backgrounded — 32 checks
 npm run interact     # trusted drag / key press / wheel (pointer gestures) — 31 checks
 npm run view         # viewport repaint + snapshot/diff verification — 28 checks
