@@ -89,6 +89,20 @@ agent ──WS JSON-RPC┘        │                        └── preload (
 `id / role / label / states / actions / bounds`（输入类附 `value`，超长时走
 `value_truncate` 契约，敏感控件给 `value_sensitive`）。
 
+**页面上下文的读路径一律落顶层、扫整文档**，不依赖容器 class 里有没有
+`modal`/`dialog`/`popup` 关键词（那是猜语义，实测同一份错误汇总换个容器就读不到）：
+
+| 字段 | 内容 |
+|---|---|
+| `errors` / `field_errors` | 全文档可见错误文案；后者能按 `{field, text}` 对应到具体输入框 |
+| `hints` | 辅助文案：class 提示、N/M 型计数、**紧贴表单控件的裸 span/div 短文本** |
+| `required_hints` | 必填标记（红星所在行的文案、CSS 标记、「请填写」类），**启发式补充**；权威判定看 `forms[].fields[].required` |
+| `forms[].fields[]` / `modals[].fields[]` | 形状完全一致（`id/type/placeholder/required`，命中时加 `error`），`id` 可对应到具体元素 |
+
+字段级错误只认两条路，都没有就空着：`aria-describedby` / `aria-errormessage`
+（值可以是空格分隔的多个 id），或同一父容器内恰好一个输入控件。**不做"找最近的
+input"这类位置猜测** —— 猜出来的对应关系比没有更糟。
+
 **定位约定（踩过，务必守）**：
 
 - 节点 `id` 即页面元素上的 `data-ai-id` 属性值。取值优先级：
@@ -179,9 +193,9 @@ agent ──WS JSON-RPC┘        │                        └── preload (
 
 ## 测试基线
 
-- 单元：`npm test` —— Vitest，24 文件 / 309 条，0 skip。
+- 单元：`npm test` —— Vitest，27 文件 / 399 条，0 skip。
 - 端到端：各 `npm run <suite>` 自起 Electron（隔离 profile）：
-  `smoke` / `capabilities` / `richtext` / `network` / `value` / `canvas` /
+  `smoke` / `capabilities` / `richtext` / `network` / `value` / `canvas` / `modeldiff` /
   `focus` / `interact` / `view`。**改动不得破坏任何一项。**
 - 测量类断言必须先验前提：锁屏时前台恒为 `loginwindow`，会造成假绿/假红；
   不可测时打印 `SKIPPED`，不伪装成通过。

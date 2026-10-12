@@ -182,6 +182,8 @@ const FORM_PAGE = `<!doctype html><html><head><meta charset="utf-8">
   <div class="row"><label for="f3" id="labF3">邮箱（选填）</label><input id="f3"></div>
   <div class="row"><label for="f4">简介</label><textarea id="f4" maxlength="256"></textarea>
     <span id="f4cnt" class="counter">0/256</span></div>
+  <div class="row"><label for="f5">头像</label><input id="f5">
+    <span id="f5hint">支持 jpg/png，单张不超过 5MB</span></div>
   <div class="row"><span id="errF1" class="field-error" style="display:none">姓名不能为空</span></div>
   <div class="row"><span id="errF2" class="field-error" style="display:none">手机不能为空</span></div>
   <button id="submitBtn" type="submit">提交</button>
@@ -590,17 +592,12 @@ guard.track(child);
     for (const f of forms) for (const fld of (f.fields || [])) if (fld.id === id) return fld;
     return null;
   };
-  // context.modals[] 里按 type 找字段（modals[].fields[] 的条目不带 id，见 D-06c）
-  const modalFieldByType = (ctx, type) => {
+  // context.modals[] 里按 id 找字段（D-07b 起 fields[] 条目带 id，与 forms[].fields[] 同构）
+  const modalFieldById = (ctx, id) => {
     for (const m of ((ctx && ctx.modals) || [])) {
-      for (const f of (m.fields || [])) if (f.type === type) return f;
+      for (const f of (m.fields || [])) if (f.id === id) return f;
     }
     return null;
-  };
-  const allModalHints = (ctx) => {
-    const out = [];
-    for (const m of ((ctx && ctx.modals) || [])) for (const h of (m.required_hints || [])) out.push(h);
-    return out;
   };
   const allModalErrors = (ctx) => {
     const out = [];
@@ -741,18 +738,27 @@ guard.track(child);
   const cntSpanNode = await nodeOf(edTab, "cntSpan");
   check("A-17 字数提示（放在裸 <span> 内）语义树读不到 —— 边界事实",
     cntSpanNode === null, cntSpanNode ? "unexpectedly present: " + JSON.stringify(cntSpanNode.label) : "absent (边界证据)");
-  if (cntSpanNode === null) {
+  // 修复后新增：语义树仍然读不到裸 span（isPureLayout 的取舍没变），但同一段文案现在
+  // 进了 context.hints —— agent 不必再自己 evaluate。这是本项目对 P1 的修法：不改树
+  // 的剪枝策略（那是在压 token 体积），改的是"读不到的代价"。
+  const edCtx = await ctxOf(edTab);
+  const edHints = ((edCtx && edCtx.hints) || []);
+  const cntSpanHint = edHints.filter((h) => /^\d+\/256$/.test(String(h).trim()));
+  check("A-17b 字数提示（裸 span）→ context.hints 读得到（不用 evaluate 兜底）",
+    cntSpanHint.length > 0, "hints=" + JSON.stringify(edHints));
+  if (cntSpanHint.length === 0) {
     defect("P1", "A+C/提示文本",
-      "裸 <span>/<div> 里的辅助文本（字数、提示、说明）在语义树中完全不可见。" +
-      "根因：extractor.cjs:35 isPureLayout 把无 role/无 aria 的 div/span 当纯布局剪掉，" +
-      "process() 对无语义子节点的纯布局元素直接返回 null。站点普遍用 span/div 放这类文案，" +
-      "agent 只能靠 ui.evaluate 兜底。");
+      "裸 <span>/<div> 里的 N/M 型字数提示没有进 context.hints。"
+      + "根因：extractor.cjs 的 hints 扫描漏了这一类，agent 只能靠 ui.evaluate 兜底。");
   }
   const cntSpanEval = await domText(edTab, "cntSpan");
   check("A-18 字数提示（裸 span）走 ui.evaluate 兜底可读",
     String(cntSpanEval).indexOf("/256") >= 0, JSON.stringify(cntSpanEval));
-  note("辅助文案（字数/提示/说明）能否被语义树读到，取决于它落在什么标签里：<p>/<li>/<label>/<small> "
-    + "等语义标签可读，裸 <span>/<div> 被 isPureLayout 剪掉。给 agent 的实操结论：读这类文案要主动 evaluate。");
+  note("辅助文案（字数/提示/说明）有三条路，按代价从低到高：①落在 <p>/<li>/<label>/<small> "
+    + "等语义标签里 → 语义树直接可读（A-16）；②裸 <span>/<div> 但形状是 N/M，或紧贴表单控件 → "
+    + "context.hints 可读（A-17b，语义树仍然没有它，见 A-17）；③前两条都不中 → ui.evaluate 兜底（A-18）。"
+    + "仍然读不到的残余：既不在表单控件旁边、形状也不是 N/M 的裸 span/div 文案（比如文章正文里"
+    + "夹的说明句）——那是 isPureLayout 压 token 的代价，本次不碰，已由单测钉住边界。");
 
   // =======================================================================
   // B. 嵌套菜单（二级 / 三级）+ ui.peek 实测评估
@@ -953,7 +959,7 @@ guard.track(child);
   if (!(f2 && f2.required === true)) {
     defect("P1", "C/必填识别",
       "aria-required=\"true\" 的必填字段在 context.forms[].fields[].required 里报 false。" +
-      "根因：extractor.cjs:547 只读原生 `inps[ii].required`，完全不看 aria-required。" +
+      "根因：isRequired()（extractor.cjs:691）虽然已认 aria-required，但这条路径没走到。" +
       "只用 aria-required 标记必填的站点（不少组件库如此）会被 agent 当成选填跳过。");
   }
   const f2Node = await nodeOf(fmTab, "f2");
@@ -964,21 +970,32 @@ guard.track(child);
     + "带 aria-required=\"true\"（extractAttributes 保留 aria-*）。agent 判必填要两条路都看。");
 
   // 3) 红星标记 —— 普通页面表单 vs 弹窗内表单
-  const hintsC = allModalHints(ctxC);
-  const hasStarPlain = !!(ctxC && ctxC.required_hints);
-  check("C-06 页面级 context.required_hints 字段不存在（该字段只在 modals[] 里）",
-    !hasStarPlain, "top-level required_hints=" + JSON.stringify(ctxC && ctxC.required_hints));
-  check("C-07 红星标记（在弹窗容器内）→ context.modals[].required_hints 能读到",
-    hintsC.some((h) => String(h).indexOf("姓名") >= 0 || String(h).indexOf("标题") >= 0),
-    JSON.stringify(hintsC).slice(0, 300));
+  // 必填扫描原先全写在 modal 循环里，于是"红星能否被读到"取决于它所在容器的 class 里有没
+  // 有 modal/dialog/popup/drawer/overlay/mask 关键词。现已迁成整文档扫描 + 顶层字段，
+  // 弹窗里那份删掉（它是前者的子集，留着就是两份会漂移的实现）。
+  const topReq = ((ctxC && ctxC.required_hints) || []);
+  check("C-06 页面级 context.required_hints 存在，且收到普通页面表单的红星（姓名/手机）",
+    topReq.some((h) => String(h).indexOf("姓名") >= 0) && topReq.some((h) => String(h).indexOf("手机") >= 0),
+    "top-level required_hints=" + JSON.stringify(topReq));
+  if (!(topReq.some((h) => String(h).indexOf("姓名") >= 0))) {
+    defect("P2", "C/必填识别",
+      "普通页面表单里的红星没有进 context.required_hints（该字段原先只在 modals[] 里，"
+      + "且只扫 class 含 modal/dialog/popup/drawer/overlay/mask 的容器）。");
+  }
+  // 红星本身（"*"）不说明任何字段必填，说明它的是它所在那一行文案 —— 老代码把
+  // .req-star 的 textContent 原样推进来，数组里永远躺一个孤零零的 "*"。
+  check("C-06b required_hints 里没有孤零零的红星字符（无信息量的条目）",
+    topReq.every((h) => /[一-龥A-Za-z0-9]/.test(String(h))), JSON.stringify(topReq));
+  // 弹窗里那颗红星也要能在顶层读到（迁走后能力没丢），且 modals[] 里不再留第二份。
+  check("C-07 弹窗容器内的红星 → 顶层 context.required_hints 同样读到（标题）",
+    topReq.some((h) => String(h).indexOf("标题") >= 0), JSON.stringify(topReq));
+  const modalReqLeft = ((ctxC && ctxC.modals) || []).filter((m) => m.required_hints !== undefined).length;
+  check("C-07b context.modals[].required_hints 已删除（唯一实现在顶层，避免两份漂移）",
+    modalReqLeft === 0, "modals with required_hints=" + modalReqLeft);
   const starPlainEval = await ev(
     "(function(){var l=document.getElementById('labF1');return l?l.textContent:null;})()", fmTab);
   check("C-08 红星标记（普通页面表单）走 ui.evaluate 兜底能读到星号",
     String(starPlainEval).indexOf("*") >= 0, JSON.stringify(starPlainEval));
-  defect("P2", "C/必填识别",
-    "红星（<span class=\"req-star\">*</span>）标记的必填只在 class 含 modal/dialog/popup/drawer/"
-    + "overlay/mask 的容器内才被扫进 required_hints（extractor.cjs:469-523 的扫描全在 modal 循环里）。"
-    + "普通页面表单里的红星既不在 context.required_hints（该字段压根不在顶层），也不在 forms[].fields 里。");
 
   // 4) 选填不被误判
   const f3 = formField(ctxC, "f3");
@@ -998,12 +1015,23 @@ guard.track(child);
   const f4cntNode = await nodeOf(fmTab, "f4cnt");
   check("C-12 字数上限提示（裸 span）语义树读不到 —— 边界事实",
     f4cntNode === null, f4cntNode ? "unexpectedly present" : "absent");
+  // 新增的第三条路：紧贴表单控件的裸 span 辅助文案 —— 无 class、形状也不是 N/M，
+  // 只有"和表单控件同在一个紧凑容器"的扫描收得到它（f5hint 就是专为这条路径加的夹具）。
+  const f5HintNode = await nodeOf(fmTab, "f5hint");
+  const ctxHints12 = ((ctxC && ctxC.hints) || []);
+  const f5InHints = ctxHints12.some((h) => String(h).indexOf("jpg/png") >= 0);
+  check("C-12b 紧贴表单控件的裸 span 辅助文案 → context.hints 读得到（f5hint）",
+    f5InHints, "treeNode=" + JSON.stringify(f5HintNode) + " hints=" + JSON.stringify(ctxHints12));
   const mLimitNode = await nodeOf(fmTab, "mLimit");
   check("C-13 字数上限提示放在 <p> 内（弹窗中）语义树可读",
     !!(mLimitNode && String(mLimitNode.label).indexOf("/140") >= 0), JSON.stringify(mLimitNode && mLimitNode.label));
-  const hintsWithLimit = allModalHints(ctxC);
-  check("C-14 字数上限「N/M」被收进 context.modals[].required_hints",
-    hintsWithLimit.some((h) => /\d+\s*\/\s*\d+/.test(String(h))), JSON.stringify(hintsWithLimit).slice(0, 300));
+  // N/M 是字数上限，不是必填标记：它该在 hints 里，不该混进 required_hints 冒充必填。
+  // 老代码在 modal 容器里顺带收了 N/M，搬到整文档之后这个"顺手"变成噪声 —— 实测编辑器页
+  // （一个表单控件都没有）会报出 ["字数统计测试","字数 6/256","6/256"]，agent 会以为这页有必填项。
+  check("C-14 字数上限「N/M」落在 context.hints，且不混进 required_hints 冒充必填",
+    ctxHints12.some((h) => /\d+\s*\/\s*\d+/.test(String(h))) &&
+      !topReq.some((h) => /\d+\s*\/\s*\d+/.test(String(h))),
+    "hints=" + JSON.stringify(ctxHints12) + " required_hints=" + JSON.stringify(topReq));
 
   // =======================================================================
   // D. 报错与异常提醒
@@ -1037,10 +1065,12 @@ guard.track(child);
     errF1Node === null, errF1Node ? "unexpectedly present" : "absent");
   if (errF1Node === null) {
     defect("P0", "D/报错读取",
-      "字段级错误提示（小红字）在语义树里完全不可见。根因同 A-17：站点普遍用 "
-      + "<span>/<div class=\"xxx-error\"> 承载错误文案，被 isPureLayout 剪掉；extractPageContext 的 "
-      + "错误扫描（errSel，extractor.cjs:446）只对 modal 容器内部生效。后果：agent 提交了表单却看不到"
-      + "哪里错了，只能靠 ui.evaluate 自己找。建议：把 [role=alert] / 常见 error class 的元素提升为语义节点。");
+      "字段级错误提示（小红字）在语义树里完全不可见。站点普遍用 "
+      + "<span>/<div class=\"xxx-error\"> 承载错误文案，被 isPureLayout 剪掉。"
+      + "读的路径已经有了：整文档扫描后落顶层 context.errors / context.field_errors（D-10b 验证普通"
+      + "页面容器也能读到），所以 agent 不必再自己 evaluate；剩下的是「它不在语义树里」这一条 —— "
+      + "要修就得把 [role=alert] / 常见 error class 的元素提升为语义节点，那是压 token 体积的取舍，"
+      + "本次不碰。");
   }
   const errF1Eval = await ev(
     "(function(){var e=document.querySelector('#errF1.field-error');" +
@@ -1058,22 +1088,31 @@ guard.track(child);
   const dErrors = allModalErrors(ctxD);
   check("D-05 弹窗内字段级错误 → context.modals[].errors 读到",
     dErrors.some((e) => String(e).indexOf("标题不能为空") >= 0), JSON.stringify(dErrors).slice(0, 300));
-  const mTitleField = modalFieldByType(ctxD, "text");
+  const mTitleField = modalFieldById(ctxD, "mTitle");
   check("D-06 弹窗内字段级错误 → context.modals[].fields[].error 读到（aria-describedby 路径）",
     !!(mTitleField && String(mTitleField.error).indexOf("标题不能为空") >= 0),
     JSON.stringify(mTitleField));
   check("D-07 弹窗内必填字段 → context.modals[].fields[].required 为 true",
     !!(mTitleField && mTitleField.required === true), JSON.stringify(mTitleField));
-  const modalFieldHasId = ((ctxD && ctxD.modals) || [])
-    .some((m) => (m.fields || []).some((f) => f.id !== undefined));
-  check("D-07b context.modals[].fields[] 条目不带 id（无法对应到具体字段）—— 边界事实",
-    !modalFieldHasId, "hasId=" + modalFieldHasId);
-  if (!modalFieldHasId) {
+  // fields[] 的条目形状原先只有 type/placeholder/required/error，没有 id —— 弹窗里有多个
+  // 同类输入框时，agent 无法把读到的 error/required 对应到具体元素上，只能靠 placeholder 猜。
+  // 现已统一到 describeField()，与 forms[].fields[] 同构。
+  const modalFields = ((ctxD && ctxD.modals) || []).reduce((a, m) => a.concat(m.fields || []), []);
+  check("D-07b context.modals[].fields[] 每条都带 id（与 forms[].fields[] 同构，可对应到具体元素）",
+    modalFields.length > 0 && modalFields.every((f) => typeof f.id === "string" && f.id.length > 0),
+    JSON.stringify(modalFields));
+  if (!(modalFields.length > 0 && modalFields.every((f) => typeof f.id === "string" && f.id.length > 0))) {
     defect("P2", "D/弹窗字段",
-      "context.modals[].fields[] 的条目只有 type/placeholder/required/error，没有 id —— " +
-      "（extractor.cjs:414 起）而 context.forms[].fields[] 是带 id 的（extractor.cjs:543）。" +
-      "弹窗里有多个同类输入框时，agent 无法把读到的 error/required 对应到具体元素上，只能靠 placeholder 猜。");
+      "context.modals[].fields[] 仍有条目不带 id。弹窗里有多个同类输入框时，agent 无法把读到的 "
+      + "error/required 对应到具体元素上，只能靠 placeholder 猜。");
   }
+  // id 不能是编造的：回页面核对这些 id 真实存在、标签类型也对得上
+  const idProbe = await ev(
+    "(function(){var out={};['mTitle','mBody'].forEach(function(i){var e=document.getElementById(i);"
+    + "out[i]=e?e.tagName.toLowerCase():null;});return out;})()", fmTab);
+  check("D-07c modal fields 的 id 是真实 DOM id（回页面核对存在且标签类型一致）",
+    !!(idProbe && idProbe.mTitle === "input" && idProbe.mBody === "textarea"),
+    JSON.stringify(idProbe) + " fields=" + JSON.stringify(modalFields.map((f) => f.id)));
 
   // --- 表单级错误汇总 ---
   const sumDom = await domText(fmTab, "errSummary");
@@ -1086,10 +1125,17 @@ guard.track(child);
   const mSumErrors = allModalErrors(ctxD);
   check("D-10 表单级汇总（在弹窗容器内）→ context.modals[].errors 读到",
     mSumErrors.some((e) => String(e).indexOf("标题不能为空") >= 0), JSON.stringify(mSumErrors).slice(0, 300));
-  defect("P2", "D/报错读取",
-    "同一份错误汇总，放在 class 含 modal/dialog/popup/drawer/overlay/mask 的容器里就能进 "
-    + "context.modals[].errors，放在普通页面容器里就完全读不到 —— 报错能否被读到取决于容器的 class 命名，"
-    + "而非它是不是真的弹窗。这是按 class 关键词猜语义的固有脆弱性。");
+  // 顶层 errors 早已是整文档扫描（不依赖容器 class 是否含 modal 关键词）—— 这条原先只是
+  // 一条静态缺陷登记，现在改成可断言的检查：同一份汇总放普通页面容器里也要能读到。
+  const topErrsD = ((ctxD && ctxD.errors) || []);
+  check("D-10b 表单级汇总（普通页面容器）→ 顶层 context.errors 读到（不靠容器 class 命名）",
+    topErrsD.some((e) => String(e).indexOf("请修正以下问题：姓名不能为空") >= 0),
+    JSON.stringify(topErrsD).slice(0, 300));
+  if (!topErrsD.some((e) => String(e).indexOf("请修正以下问题：姓名不能为空") >= 0)) {
+    defect("P2", "D/报错读取",
+      "普通页面容器里的错误汇总进不了 context.errors —— 报错能否被读到仍取决于容器的 class 命名，"
+      + "而非它是不是真的弹窗。");
+  }
 
   // --- toast / 轻提示 ---
   const toastRoleNode = await nodeOf(fmTab, "toastRole");

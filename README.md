@@ -10,7 +10,7 @@
   <img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue.svg">
   <img alt="Electron" src="https://img.shields.io/badge/built%20with-Electron%2033-9cf">
   <img alt="Platforms" src="https://img.shields.io/badge/platforms-macOS%20%E2%80%A2%20Linux-blueviolet">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-379%20unit%20%2B%20368%20e2e-2ea043">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-399%20unit%20%2B%20374%20e2e-2ea043">
   <img alt="MCP" src="https://img.shields.io/badge/spec-MCP%20(stdio)-f5b23b">
 </p>
 
@@ -522,10 +522,10 @@ AI_BROWSER_USER_DATA=~/.ai-browser-work npm start
 ## Test & dev
 
 ```bash
-npm test             # vitest — 379 tests across 26 files
+npm test             # vitest — 399 tests across 27 files
 npm run smoke        # Electron contract layer, offline fixture      — 31 checks
 npm run capabilities # text fields, canvas, page source, network, DOM editing — 54 checks
-npm run richtext     # rich-text editors, nested menus, forms, errors, tags, upload — 111 checks
+npm run richtext     # rich-text editors, nested menus, forms, errors, tags, upload — 117 checks
 npm run network      # request log, POST bodies, headers, pagination, redaction — 41 checks
 npm run value        # value truncation contract + read-only get_value — 15 checks
 npm run canvas       # canvas draw-call capture — 13 checks
@@ -584,6 +584,15 @@ Two things it changed in the product:
 - Field-level errors used to be invisible — they are carried by bare `<span>`s with no ARIA role and
   were pruned as layout. They now surface in `context.errors` / `context.field_errors`, scanned
   across the whole document rather than only inside dialog containers.
+- Three reads used to depend on a container's **class name**. Red asterisks were scanned only
+  inside containers whose class happened to contain `modal`/`dialog`/`popup`/…, so a plain-page
+  form's required fields were invisible; `modals[].fields[]` entries carried no `id`, so an error
+  read for one field could not be mapped back to it; and auxiliary text in bare
+  `<span>`/`<div>` (character counters, format hints) was pruned from the semantic tree with no
+  second path at all. All three now sit at the **top level** of `context`: `required_hints` is
+  scanned across the whole document, `fields[]` entries are shaped identically in `modals[]` and
+  `forms[]` (`id` included, verified against the real DOM), and form-adjacent bare-span text lands
+  in `hints` — the semantic tree itself keeps its pruning, so the token cost is unchanged.
 
 **`npm run capabilities`** — typing into every kind of text field (plain inputs, `password`,
 `number`, `textarea`, `contenteditable`, plus `readonly` / `disabled` / `maxlength` — including

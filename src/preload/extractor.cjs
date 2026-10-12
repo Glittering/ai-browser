@@ -558,6 +558,64 @@ function extractPageContext() {
     "[class*=modal]", "[class*=dialog]", "[class*=popup]", "[class*=drawer]", "[class*=overlay]", "[class*=mask]",
     "[role=dialog]", "[role=alertdialog]"
   ];
+  // 字段级报错选择器。提到函数开头：describeField 在 modal 循环里就要用它，
+  // 而顶层扫描在后面 —— var 提升会让它在那时还是 undefined。
+  var ERROR_SEL = [
+    "[class*=error]", "[class*=err]", "[class*=invalid]", "[class*=fail]",
+    "[class*=warning]", "[class*=warn]", "[class*=toast]", "[class*=snackbar]",
+    "[role=alert]"
+  ];
+
+  // 字段描述的唯一实现。modals[].fields[] 与 forms[].fields[] 曾经各写一份，
+  // 结果弹窗字段少了 id —— 弹窗里有多个同类输入框时，agent 无法把读到的
+  // error/required 对应到具体元素，只能靠 placeholder 猜。两份实现必然漂移，
+  // 所以收成一处，两边形状完全一致。
+  //
+  // 字段级错误只认两条路，都没有就宁可空着也不猜（猜出来的对应关系比没有更糟）：
+  //   1) ARIA 承诺：aria-describedby / aria-errormessage 指向。属性值可以是
+  //      空格分隔的多个 id，逐个看，而不是整串塞进 getElementById（那样永远
+  //      查不到）。
+  //   2) 同一父容器内恰好一个输入控件 —— 结构上只可能对应它。
+  // 老实现没有第 2 条的数量约束：容器里有 3 个字段、3 条错误时，它取容器内
+  // 第一条错误，于是**每个字段都报同一条错误**。这是错报对应关系，比不报更糟。
+  function fieldErrorOf(inp) {
+    var ids = (inp.getAttribute("aria-describedby") || "") + " " +
+              (inp.getAttribute("aria-errormessage") || "");
+    var list = ids.split(/\s+/);
+    for (var i = 0; i < list.length; i++) {
+      if (!list[i]) continue;
+      var el = document.getElementById(list[i]);
+      if (el && isShown(el)) {
+        var t = (el.textContent || "").trim();
+        if (t && t.length < 100) return t;
+      }
+    }
+    var p = inp.parentElement;
+    if (!p) return null;
+    if (p.querySelectorAll("input:not([type=hidden]),textarea,select").length !== 1) return null;
+    var errs = p.querySelectorAll(ERROR_SEL.join(","));
+    for (var j = 0; j < errs.length; j++) {
+      var et = (errs[j].textContent || "").trim();
+      if (et && et.length > 0 && et.length < 100) return et;
+    }
+    return null;
+  }
+
+  function describeField(inp) {
+    var entry = {
+      id: inp.id || inp.name || "",
+      type: inp.type || inp.tagName.toLowerCase(),
+      placeholder: (inp.placeholder || "").slice(0, 40),
+      // 只读原生 required 会把只用 aria-required 标必填的站点（不少组件库如此）
+      // 整片当成选填 —— agent 于是跳过必填项、提交必失败。ARIA 的 "true"/"false"
+      // 都按字面认，其它值（含缺失）不认。
+      required: isRequired(inp)
+    };
+    var err = fieldErrorOf(inp);
+    if (err) entry.error = err;
+    return entry;
+  }
+
   var modals = [];
   for (var si = 0; si < modalSelectors.length; si++) {
     var els = document.querySelectorAll(modalSelectors[si]);
@@ -577,38 +635,7 @@ function extractPageContext() {
       }
 
       var fieldList = [];
-      for (var fi = 0; fi < inps.length; fi++) {
-        var inp = inps[fi];
-        var fieldEntry = {
-          type: inp.type || inp.tagName.toLowerCase(),
-          placeholder: (inp.placeholder || "").slice(0, 40),
-          required: isRequired(inp)
-        };
-
-        // Field-level error: aria-describedby or adjacent error sibling
-        var fieldError = null;
-        var descId = inp.getAttribute("aria-describedby");
-        if (descId) {
-          var descEl = document.getElementById(descId);
-          if (descEl && isShown(descEl)) {
-            var dt = (descEl.textContent || "").trim();
-            if (dt && dt.length < 100) fieldError = dt;
-          }
-        }
-        if (!fieldError) {
-          // Check siblings/parent for error-class elements near this field
-          var parent = inp.parentElement;
-          if (parent) {
-            var siblings = parent.querySelectorAll("[class*=error],[class*=err],[class*=invalid],[role=alert]");
-            for (var sbi = 0; sbi < siblings.length; sbi++) {
-              var st = (siblings[sbi].textContent || "").trim();
-              if (st && st.length > 0 && st.length < 100) { fieldError = st; break; }
-            }
-          }
-        }
-        if (fieldError) fieldEntry.error = fieldError;
-        fieldList.push(fieldEntry);
-      }
+      for (var fi = 0; fi < inps.length; fi++) fieldList.push(describeField(inps[fi]));
 
       // Errors — 14 selectors + key phrase scan
       var errSel = ["[class*=error]","[class*=err]","[class*=invalid]","[class*=toast]","[class*=message]",
@@ -633,68 +660,16 @@ function extractPageContext() {
         }
       }
 
-      // Required hints — character limits + Chinese hints + red star markers
-      var required = [];
-      // CSS required markers
-      var reqEls = m.querySelectorAll("[class*=required],[class*=req],[class*=mandatory],[class*=asterisk]");
-      for (var ri = 0; ri < reqEls.length; ri++) {
-        var rt = (reqEls[ri].textContent || "").trim();
-        if (rt && rt.length < 30 && required.indexOf(rt) < 0) required.push(rt);
-      }
-      // Character limits: N/M patterns
-      var mTextForReq = m.innerText || "";
-      var lines = mTextForReq.split("\n");
-      for (var li = 0; li < lines.length; li++) {
-        var rm = lines[li].match(/(\d+)\s*\/\s*(\d+)/);
-        if (rm) { var t2 = lines[li].trim().slice(0, 50); if (required.indexOf(t2) < 0) required.push(t2); }
-        if (/字数/.test(lines[li])) { var t3 = lines[li].trim().slice(0, 50); if (required.indexOf(t3) < 0) required.push(t3); }
-      }
-      // Chinese hints
-      var hintMatch = mTextForReq.match(/请\s*[选择填写输入].{0,20}/g);
-      if (hintMatch) {
-        for (var hi = 0; hi < hintMatch.length; hi++) {
-          var h = hintMatch[hi].trim().slice(0, 30);
-          if (required.indexOf(h) < 0) required.push(h);
-        }
-      }
-      // Scan for red * (asterisk character as required marker)
-      var redStars = m.querySelectorAll("span,em,i,label,sup");
-      for (var rsi = 0; rsi < redStars.length; rsi++) {
-        var rsText = (redStars[rsi].textContent || "").trim();
-        if (rsText === "*" || rsText === "＊" || rsText === "✱") {
-          // Check sibling text
-          var parent = redStars[rsi].parentElement;
-          if (parent) {
-            var sibling = (parent.textContent || "").trim().slice(0, 30).replace(/\*/g, "").trim();
-            if (sibling && required.indexOf(sibling) < 0) required.push(sibling);
-          }
-        }
-      }
-      // ::before pseudo-element red star — check computed style
-      var allInModal = m.querySelectorAll("*");
-      var checkedCount = 0;
-      for (var ai = 0; ai < allInModal.length && checkedCount < 100; ai++) {
-        var el = allInModal[ai];
-        try {
-          var before = window.getComputedStyle(el, "::before");
-          var content = before.getPropertyValue("content");
-          if (content && content !== "none" && content !== "normal" && content !== '""' && content !== "''") {
-            var color = before.getPropertyValue("color");
-            if (color && (color.indexOf("rgb(255") >= 0 || color.indexOf("red") >= 0 || color.indexOf("#f") >= 0 || color.indexOf("#F") >= 0 || color.indexOf("#e") >= 0)) {
-              // Red pseudo-element found — likely a red star
-              var parentText = (el.textContent || "").trim().slice(0, 30);
-              if (parentText && required.indexOf(parentText) < 0) required.push(parentText);
-              checkedCount++;
-            }
-          }
-        } catch(e) {}
-      }
-
+      // 必填提示不在这里扫。这些扫描原先全写在 modal 循环里，于是"红星能否被
+      // 读到"取决于它所在容器的 class 里有没有 modal/dialog/popup/drawer/
+      // overlay/mask 关键词 —— 普通页面表单里的红星，context.modals[].required_hints
+      // 读不到，顶层压根没有这个字段，forms[].fields 里也没有。报错扫描早已改成
+      // 整文档 + 顶层，必填扫描只是漏迁；现在统一扫整份文档、落顶层
+      // context.required_hints（见本函数下方的 scanRequiredHints）。
       modals.push({
         buttons: btnList,
         fields: fieldList,
-        errors: errors.length ? errors : null,
-        required_hints: required.length ? required : null
+        errors: errors.length ? errors : null
       });
     }
   }
@@ -707,17 +682,7 @@ function extractPageContext() {
     if (!isShown(f)) continue;
     var inps = f.querySelectorAll("input:not([type=hidden]),textarea,select");
     var fields = [];
-    for (var ii = 0; ii < inps.length; ii++) {
-      fields.push({
-        id: inps[ii].id || inps[ii].name || "",
-        type: inps[ii].type || inps[ii].tagName.toLowerCase(),
-        placeholder: (inps[ii].placeholder || "").slice(0, 40),
-        // 只读原生 required 会把只用 aria-required 标必填的站点（不少组件库如此）
-        // 整片当成选填 —— agent 于是跳过必填项、提交必失败。ARIA 的 "true"/"false"
-        // 都按字面认，其它值（含缺失）不认。
-        required: isRequired(inps[ii])
-      });
-    }
+    for (var ii = 0; ii < inps.length; ii++) fields.push(describeField(inps[ii]));
     if (fields.length) formList.push({ fields: fields });
   }
 
@@ -739,11 +704,7 @@ function extractPageContext() {
   // 刻意**不**把这些元素提升为语义树节点：站点用裸 span/div 承载提示文案是常态，
   // isPureLayout 剪掉它们正是为了压住语义树的 token 体积（真实页面上量极大）。
   // 只读文本、只进 context —— 主树一个节点都不加（实测节点数与改动前完全一致）。
-  var ERROR_SEL = [
-    "[class*=error]", "[class*=err]", "[class*=invalid]", "[class*=fail]",
-    "[class*=warning]", "[class*=warn]", "[class*=toast]", "[class*=snackbar]",
-    "[role=alert]"
-  ];
+  // ERROR_SEL 已在本函数开头声明（字段描述要用它，见 fieldErrorOf）。
   var HINT_SEL = [
     "[class*=tip]", "[class*=hint]", "[class*=notice]", "[class*=help]",
     "[class*=counter]", "[class*=remaining]", "[role=status]", "[aria-live]"
@@ -819,6 +780,99 @@ function extractPageContext() {
       if (topHints.indexOf(ht) < 0) topHints.push(ht);
     }
   } catch (e) {}
+  // 上面两条都要求"有 class 提示"或"文本形状是 N/M"。但站点普遍用裸 span/div 放
+  // 这一组的说明文案（格式要求、隐私承诺、快捷提示……），既没有 class 可依，形状也
+  // 未必是计数 —— 于是语义树里完全看不见：isPureLayout 剪掉裸 div/span 是为了压
+  // token 体积，那个取舍本身没错，但代价是 agent 只能靠 ui.evaluate 兜底才能读到。
+  //
+  // 收窄条件：只收"和表单控件待在同一个紧凑容器里"的短叶子文本。同一个父容器是
+  // **结构关系**，不是"离得近"这种位置猜测（项目对位置猜测有明确禁令）；再要求
+  // 容器元素数很少，避免顺着 body 把整页文本灌进来。字段自己的 label 文案跳过 ——
+  // 那部分语义树已经有了，重复会挤占名额。仍然只进 context，主树一个节点都不加。
+  try {
+    var ctrls = document.querySelectorAll("input:not([type=hidden]),textarea,select");
+    for (var ci3 = 0; ci3 < ctrls.length && topHints.length < 60; ci3++) {
+      var fbox = ctrls[ci3].parentElement;
+      if (!fbox || fbox === document.body || fbox === document.documentElement) continue;
+      if (fbox.querySelectorAll("*").length > 24) continue;   // 只认紧凑的字段组
+      var labs = fbox.querySelectorAll("label");
+      var labTexts = [];
+      for (var la = 0; la < labs.length; la++) labTexts.push((labs[la].textContent || "").trim());
+      var fleaves = fbox.querySelectorAll("span,div,small,em,i,b,strong,p,li");
+      for (var fli = 0; fli < fleaves.length && topHints.length < 60; fli++) {
+        if (fleaves[fli].children && fleaves[fli].children.length) continue;
+        var fht = textOf(fleaves[fli]);
+        if (!fht || fht.length < 2 || fht.length > 60) continue;
+        if (!/[一-龥A-Za-z0-9]/.test(fht)) continue;          // 纯符号（*、：、—）没有信息量
+        if (labTexts.indexOf(fht) >= 0) continue;             // 字段自己的文案，树里已经有了
+        if (topHints.indexOf(fht) < 0) topHints.push(fht);
+      }
+    }
+  } catch (e) {}
+
+  // ---- 必填提示（整文档，落顶层）----
+  // 这些扫描原先全部写在 modal 循环里，于是"红星能否被读到"取决于它所在容器的 class
+  // 里有没有 modal/dialog/popup/drawer/overlay/mask 关键词。报错扫描早已改成整文档 +
+  // 顶层，必填扫描只是漏迁；这里应用同一范式，弹窗里那份删掉（它是前者的子集，留着
+  // 就是两份会漂移的实现）。
+  //
+  // 这是**启发式补充**，不是权威判定：字段到底必填不必填看 fields[].required（原生
+  // required / aria-required，那是承诺）。这里抓的是"只用红星标注、什么都不写"的站点。
+  //
+  // 刻意不收字数上限 N/M 和「字数」提示：那不是必填标记，而且 hints 已经收过了
+  // （形状扫描 + 紧凑容器扫描两条路）。老代码在 modal 容器里顺带收了它们，搬到整文档
+  // 之后这个顺手就变成了噪声 —— 实测编辑器页（一个表单控件都没有）会报出
+  // ["字数统计测试","字数 6/256","6/256"]，agent 会以为这页有必填项。按字段名办事。
+  function scanRequiredHints() {
+    var out = [];
+    var push = function (t) {
+      t = (t || "").trim();
+      // 纯符号（*、＊、：）没有信息量：红星本身不说明"哪个字段必填"，说明它的是
+      // 它所在的那行文案（由下面的信号 4 收）。老代码把 .req-star 的 textContent
+      // 原样推进来，于是数组里永远躺一个孤零零的 "*"。
+      if (!/[一-龥A-Za-z0-9]/.test(t)) return;
+      if (t.length < 50 && out.indexOf(t) < 0 && out.length < 40) out.push(t);
+    };
+    // 1) CSS 必填标记
+    var reqEls = document.querySelectorAll("[class*=required],[class*=req],[class*=mandatory],[class*=asterisk]");
+    for (var rq = 0; rq < reqEls.length; rq++) push(reqEls[rq].textContent);
+    // 2) 中文提示（"请填写""请选择"——这是真的在要求 agent 填东西）
+    var rhm = (document.body ? (document.body.innerText || "") : "").match(/请\s*[选择填写输入].{0,20}/g);
+    if (rhm) for (var rh = 0; rh < rhm.length; rh++) push(rhm[rh]);
+    // 3) 红星字符（含全角）→ 收它所在那一行的文案，红星本身没有信息量
+    var rstars = document.querySelectorAll("span,em,i,label,sup");
+    for (var rs = 0; rs < rstars.length; rs++) {
+      var rst = (rstars[rs].textContent || "").trim();
+      if (rst === "*" || rst === "＊" || rst === "✱") {
+        var rsp = rstars[rs].parentElement;
+        if (rsp) push((rsp.textContent || "").slice(0, 30).replace(/\*/g, ""));
+      }
+    }
+    // 5) ::before 伪元素红星。getComputedStyle 不便宜，所以：候选集按标签收窄
+    //    （红星伪元素只可能落在这些标签上），宿主必须带短文本，且按**实际发起的
+    //    样式查询次数**设上限。老代码按"找到了几个"计数，等于没有上限。
+    var rcand = document.querySelectorAll("label,span,div,p,em,i,sup,b,strong,small,td,th");
+    var rchecked = 0;
+    for (var ra = 0; ra < rcand.length && rchecked < 200 && out.length < 40; ra++) {
+      var rel = rcand[ra];
+      var rown = (rel.textContent || "").trim();
+      if (!rown || rown.length > 30) continue;
+      rchecked++;
+      try {
+        var rbefore = window.getComputedStyle(rel, "::before");
+        var rcontent = rbefore.getPropertyValue("content");
+        if (!rcontent || rcontent === "none" || rcontent === "normal" ||
+            rcontent === '""' || rcontent === "''") continue;
+        var rcolor = rbefore.getPropertyValue("color");
+        if (rcolor && (rcolor.indexOf("rgb(255") >= 0 || rcolor.indexOf("red") >= 0 ||
+            rcolor.indexOf("#f") >= 0 || rcolor.indexOf("#F") >= 0 || rcolor.indexOf("#e") >= 0)) {
+          push(rown);
+        }
+      } catch (e) {}
+    }
+    return out;
+  }
+  var requiredHints = scanRequiredHints();
 
   // SESSION — more robust detection
   var hasPwdInput = document.querySelector("input[type=password]");
@@ -836,12 +890,15 @@ function extractPageContext() {
     url: document.URL,
     forms: formList.length ? formList : null,
     modals: modals.length ? modals : null,
-    // 顶层报错/提示：不依赖容器 class 是否含 modal 关键词，普通页面也能读到。
+    // 顶层报错/提示/必填：都不依赖容器 class 是否含 modal 关键词，普通页面也能读到。
     // errors —— 全文档扫描到的可见错误文案；field_errors —— 能对应到具体输入
-    // 框的那些（{field, text}）；hints —— 字数/提示/轻通知类辅助文案。
+    // 框的那些（{field, text}）；hints —— 字数/提示/轻通知类辅助文案；
+    // required_hints —— 必填标记（红星/CSS 标记/「请填写」类文案），启发式补充，
+    // 权威判定看 fields[].required。
     errors: topErrors.length ? topErrors : null,
     field_errors: fieldErrors.length ? fieldErrors : null,
     hints: topHints.length ? topHints : null,
+    required_hints: requiredHints.length ? requiredHints : null,
     session: { logged_in: loggedIn },
     stats: {
       inputs: document.querySelectorAll("input:not([type=hidden])").length,
