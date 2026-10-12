@@ -416,6 +416,51 @@ async function main() {
       closed === null, closed ? "still returns nodes" : "absent");
 
     // =====================================================================
+    console.log("\n[AU-H 权限请求 —— 此前零覆盖，且它是\"静默失败\"的高发面]");
+    // =====================================================================
+    // 站点要定位/摄像头/通知，不装 setPermissionRequestHandler 时每个请求被静默
+    // 拒绝，agent 分不清"这站点没这功能"和"被权限挡住"。现在默认白名单只放
+    // pointerLock / clipboard-sanitized-write / fullscreen，其余**明确拒绝 + 广播
+    // permission_denied 事件**（带怎么放行的 hint）。这里验的是"拒绝是明确的"。
+    const denied = [];
+    b.on("permission_denied", (p) => denied.push(p));
+    const subRes = await b.subscribe(["permission_denied"]);
+    check("AU-H1 能订阅 permission_denied 事件",
+      !!(subRes && subRes.result), JSON.stringify(subRes).slice(0, 200));
+
+    // geolocation 不在默认白名单 → 必被拒。站点侧必须拿到明确的 error，不能 hang。
+    // ui.evaluate 走 CDP 且 awaitPromise:false，所以不能用 Promise 直接回值 ——
+    // 改写成"结果落到 window.__geo，外面轮询"。这样 hang（一直 PENDING）也能被认出来。
+    await ev(
+      "(function(){window.__geo='PENDING';"
+      + "navigator.geolocation.getCurrentPosition("
+      + "function(){window.__geo='GRANTED';},"
+      + "function(e){window.__geo='DENIED:'+e.code;});"
+      + "return 'STARTED';})()", tab);
+    let geoOutcome = "PENDING";
+    for (let i = 0; i < 20 && geoOutcome === "PENDING"; i++) {
+      await sleep(250);
+      geoOutcome = String(await ev("(function(){return window.__geo;})()", tab));
+    }
+    check("AU-H2 geolocation（不在默认白名单）被明确拒绝，站点拿到 error 而不是 hang",
+      geoOutcome === "DENIED:1",
+      "outcome=" + JSON.stringify(geoOutcome) + "（PENDING 一直不变 = 静默 hang，比报错更糟）");
+    await sleep(600);
+    check("AU-H3 拒绝时广播 permission_denied（agent 能区分\"没这功能\"和\"被挡住\"）",
+      denied.some((d) => d && d.permission === "geolocation"),
+      JSON.stringify(denied).slice(0, 300));
+    check("AU-H4 广播里带放行方法（hint），不是只报一句被拒",
+      denied.some((d) => d && String(d.hint || "").indexOf("AI_BROWSER_PERMISSIONS") >= 0),
+      JSON.stringify(denied[denied.length - 1] || null).slice(0, 300));
+    // 阴性对照：不请求任何权限时不得凭空广播拒绝
+    const deniedBefore = denied.length;
+    const noopRes = await ev("(function(){return 1+1;})()", tab);
+    await sleep(400);
+    check("AU-H5 阴性对照：不请求权限时不广播 permission_denied",
+      denied.length === deniedBefore && noopRes === 2,
+      "before=" + deniedBefore + " after=" + denied.length);
+
+    // =====================================================================
     console.log("\n[AU-G ui.quit —— 全仓库零覆盖的方法，放最后测]");
     // =====================================================================
     const quitRes = await b.call("ui.quit", {});
