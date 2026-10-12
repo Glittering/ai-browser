@@ -53,8 +53,8 @@ agent ──WS JSON-RPC┘        │                        └── preload (
 | `src/main/network_monitor.js` | 请求/响应捕获（Chrome Network 面板等价物） |
 | `src/main/canvas_monitor.js` + `canvas_hook_source.js` | canvas 绘制调用记录（非像素） |
 | `src/main/axExtractor.js` | AX（无障碍树）读取层，链接带 url |
-| `src/main/snapshot_diff.js` | 结构化 diff、默认快照表达式、基线回收 |
-| `src/main/capability_probe.js` | "这一页该怎么操作"的决策探针 |
+| `src/main/snapshot_diff.js` | 结构化 diff、默认快照表达式（含 canvas 应用的模型指纹）、基线回收 |
+| `src/main/capability_probe.js` | "这一页该怎么操作"的决策探针；导出应用模型识别表（`APP_KEY_RE` / `MODEL_PROBES` / `GRAPH_RANK` / `MODEL_PROBE_ORDER`），供探针与默认快照共用同一份定义 |
 | `src/preload/bridge.cjs` | preload 入口：IPC 接线 |
 | `src/preload/extractor.cjs` | DOM → 语义树 + 页面上下文 |
 | `src/preload/actions.cjs` | 页内动作执行（部分场景的兜底路径） |
@@ -140,6 +140,18 @@ agent ──WS JSON-RPC┘        │                        └── preload (
 - **整页文本要按全文取指纹。** 旧实现只截前 4000 字符 + 记长度，等长变化落在 4000
   之后时两者都不变 → 把"变了"报成 `unchanged`（假绿）。现在 `textHash` 覆盖全文，
   `textSegs` 只用来定位变化发生在哪一段。
+- **canvas 应用的数据模型也要取指纹。** 上面两条都只描述 DOM，而 canvas 渲染页面的 DOM
+  是一张定格照片：拖一个节点、改一个 widget 只重绘画布，DOM 一个字节都不动 —— 于是
+  只比 DOM 的 `ui.diff` 会对一次确实发生了的写入回答 `unchanged`。ComfyUI 的文档级写路径
+  `node.widgets[].value` 移动的 DOM 恰好是 0 字节。现在默认快照在页面把模型挂在 window 上时
+  一并指纹化，diff 路径形如 `model.fp` / `model.count`。三条约束：
+  - **只读。** `serialize()` 是应用专门暴露出来供状态往返的入口；`loadGraphData` 是加载器，
+    调用它会改页面，绝不调用。抛异常或 `_nodes` 循环引用都只导致"没有指纹"，不会崩。
+  - **按"能读回什么"选候选，不按名字好不好看。** 库命名空间名字得分很高却没有模型可交，
+    所以 `amFp` 返回 null 就是它的落选原因。
+  - **排名与读取分开。** 排名看对象**拥有**哪个访问器，读取才走 `serialize()`（它返回 JSON
+    安全数据，而活的集合通常是循环的）。两者混为一谈会让每个候选都报 `serialize`、全部同分，
+    于是一个单纯的序列化器就能排在真正的模型前面 —— 这个缺陷是 SD-048 抓到的，不是 review 抓到的。
 
 ## 页面刷新（窗口显示陈旧）
 

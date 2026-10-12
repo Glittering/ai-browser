@@ -22,21 +22,62 @@
 // The route recommendation is a *recommendation*, not an oracle: it names
 // candidates and the evidence for each, so the caller can judge semantics.
 
-const APP_KEY_RE = /^(app|editor|graph|store|canvas|workspace|comfy|litegraph|monaco|codemirror|diagram|flow|rh|state|editorState|doc|documentModel)$/i;
+export const APP_KEY_RE = /^(app|editor|graph|store|canvas|workspace|comfy|litegraph|monaco|codemirror|diagram|flow|rh|state|editorState|doc|documentModel)$/i;
 
 // Globals worth reporting when they look like a graph/document model.
 // Kept as substrings so `myGraphStore` / `canvasApp` also match — exact
 // allow-listing missed real ones before.
-const HINTS = [
-  ['graph', 'v.graph'], ['_nodes', 'v._nodes'], ['nodes', 'v.nodes'],
-  ['getState', 'typeof v.getState'], ['serialize', 'typeof v.serialize'],
-  ['loadGraphData', 'typeof v.loadGraphData'], ['queuePrompt', 'typeof v.queuePrompt'],
+//
+// [probe name, accessor path]. A path ending in 'typeof' tests for a METHOD
+// and never calls it; anything else reads a property. Order is significant:
+// first match wins, and GRAPH_RANK below scores in the same spirit.
+export const MODEL_PROBES = [
+  ['graph', ['graph']],
+  ['_nodes', ['_nodes']],
+  ['nodes', ['nodes']],
+  ['getState', ['getState', 'typeof']],
+  ['serialize', ['serialize', 'typeof']],
+  ['loadGraphData', ['loadGraphData', 'typeof']],
+  ['queuePrompt', ['queuePrompt', 'typeof']],
 ];
 
-const PROBE_JS = `(function(){
+// Shared in-page scan for the capability probe. Lives here rather than being
+// re-derived per call site: the first version of rankAppGlobals matched the
+// hint prefix wrong, ranked every candidate -1, and silently downgraded a real
+// page. The tables are injected as data so there is exactly one definition.
+const APP_MODEL_SCAN_JS = `
+var amRe = new RegExp(${JSON.stringify(APP_KEY_RE.source)}, 'i');
+var amP = ${JSON.stringify(MODEL_PROBES)};
+function amProbe(v, p) {
+  var c = v;
+  for (var i = 0; i < p.length; i++) {
+    if (p[i] === 'typeof') return typeof c === 'function' ? 'fn' : undefined;
+    try { c = c[p[i]]; } catch (e) { return undefined; }
+    if (c === null || c === undefined) return undefined;
+  }
+  return c;
+}
+function amMatch(v) {
+  for (var i = 0; i < amP.length; i++) {
+    var r = amProbe(v, amP[i][1]);
+    if (r === undefined || r === null || r === false) continue;
+    var n = amP[i][0];
+    return {
+      name: n,
+      hint: r === 'fn' ? n : n + (Array.isArray(r) ? ' (' + r.length + ' items)'
+        : typeof r === 'object' ? ' (obj)' : '')
+    };
+  }
+  return null;
+}
+`;
+
+// Exported so tests can execute the real probe: the table tests below assert
+// against the hint strings this emits, and until now nothing verified that the
+// emitter and the table agreed — the format could have drifted silently.
+export const PROBE_JS = `(function(){
   try {
-    var APP_RE = ${JSON.stringify(APP_KEY_RE.source)};
-    var re = new RegExp(APP_RE, 'i');
+    ${APP_MODEL_SCAN_JS}
     var out = { url: location.href, title: document.title, topDom: 0,
                 topCanvas: 0, iframes: [], globals: [], canvases: [] };
 
@@ -56,24 +97,15 @@ const PROBE_JS = `(function(){
       var keys;
       try { keys = Object.keys(W); } catch(e) { return; }
       keys.forEach(function(k) {
-        if (!re.test(k)) return;
+        if (!amRe.test(k)) return;
         var v;
         try { v = W[k]; } catch(e) { return; }
         var t = (v === null ? 'null' : typeof v);
         var hint = null;
         try {
           if (v && (typeof v === 'object' || typeof v === 'function')) {
-            var probes = ${JSON.stringify(HINTS)};
-            for (var i = 0; i < probes.length; i++) {
-              var expr = probes[i][1];
-              // eslint-disable-next-line no-new-func
-              var fn = new Function('v', 'return (' + expr + ');');
-              var r = fn(v);
-              if (r !== undefined && r !== null && r !== false) {
-                hint = probes[i][0] + (typeof r === 'object' ? ' (' + (Array.isArray(r) ? r.length + ' items' : 'obj') + ')' : '');
-                break;
-              }
-            }
+            var m = amMatch(v);
+            if (m) hint = m.hint;
             if (!hint) hint = Object.keys(v).slice(0, 8).join(',');
           }
         } catch(e) {}
@@ -211,11 +243,11 @@ async function collectEndpoints(pageManager, tid, limit) {
 // "Owns nodes" is what separates them: a model holds nodes, a library exports
 // constructors.
 //
-// Match against the START of the hint. The probe names come from HINTS above and
-// come out as `_nodes (13 items)` / `graph (obj)` / `getState` — i.e. the bare
-// property name, NOT `has ._nodes`. Matching the "has ." form silently ranked
-// everything -1 and made the probe fall through to the generic L1_api route,
-// which is how that mistake was caught.
+// Match against the START of the hint. The probe names come from MODEL_PROBES
+// above and come out as `_nodes (13 items)` / `graph (obj)` / `getState` — i.e.
+// the bare property name, NOT `has ._nodes`. Matching the "has ." form silently
+// ranked everything -1 and made the probe fall through to the generic L1_api
+// route, which is how that mistake was caught.
 const GRAPH_RANK = [
   ['_nodes', 100],          // LiteGraph graph — the model itself
   ['nodes', 95],
@@ -226,6 +258,23 @@ const GRAPH_RANK = [
   ['getState', 30],         // library namespace: weaker signal
   ['queuePrompt', 25],
 ];
+
+// Below this score a candidate is NOT fingerprinted into the default snapshot.
+// `getState` (30) and `queuePrompt` (25) are what LIBRARY namespaces expose —
+// ComfyUI's window.LiteGraph scored ahead of the real model on exactly that
+// signal — and their state is far more likely to be volatile, which would turn
+// every diff into a change and destroy the tool's only real job. 60 is
+// `serialize`: an app that offers a serializer is offering its state for
+// round-tripping, which is precisely what a fingerprint wants.
+export const MODEL_MIN_SCORE = 60;
+
+// Names that clear MODEL_MIN_SCORE, best first. DERIVED from GRAPH_RANK rather
+// than written out again, so the in-page picker and rankAppGlobals can never
+// disagree about who qualifies. GRAPH_RANK is already sorted by descending
+// score, so array index IS rank.
+export const MODEL_PROBE_ORDER = GRAPH_RANK
+  .filter(([, score]) => score >= MODEL_MIN_SCORE)
+  .map(([name]) => name);
 
 function rankGlobal(g) {
   if (!g || !g.hint) return -1;

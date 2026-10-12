@@ -7,7 +7,8 @@
 // usable data model was downgraded to a generic "check the endpoints" answer.
 // A table test turns that class of mistake into an instant local failure.
 import { describe, it, expect } from 'vitest';
-import { rankAppGlobals } from '../src/main/capability_probe.js';
+import { rankAppGlobals, PROBE_JS } from '../src/main/capability_probe.js';
+import { JSDOM } from 'jsdom';
 
 const g = (key, hint, where = 'iframe[0]') => ({ where, key, hint, type: 'object' });
 
@@ -76,5 +77,48 @@ describe('rankAppGlobals — 必须指向真正持有数据的对象', () => {
   it('CP-010: rhtv 那种纯 DOM 画布不应被误判成有数据模型', () => {
     // 实测：rhtv 的 globals 是空的（无应用对象），所以推荐 L1_api + L2。
     expect(rankAppGlobals([]).length).toBe(0);
+  });
+});
+describe('PROBE_JS —— 表驱动测试赖以成立的 hint 格式（执行真探针）', () => {
+  // 上面每一张表都断言在"探针产出的 hint 字符串"上，却没有任何测试验证过探针
+  // 真的产出那个格式。emitter 与表一旦漂移（例如把 '_nodes (13 items)' 写成
+  // 'has ._nodes'），全部表驱动测试照样全绿，而真实站点上排名整体失效 —— 正是
+  // 本文件开头记录的那个事故。这里把探针本身跑起来，把格式钉住。
+  function probeWith(globals, html = '<canvas></canvas>') {
+    const dom = new JSDOM(`<!DOCTYPE html><html><body>${html}</body></html>`);
+    const win = dom.window;
+    for (const [k, v] of Object.entries(globals)) win[k] = v;
+    const fn = new Function('window', 'document', 'location', 'return ' + PROBE_JS);
+    const out = fn(win, win.document, win.location);
+    dom.window.close();
+    return out;
+  }
+
+  it('CP-011: 数组属性产出 "<name> (N items)"，与表驱动的假设一致', () => {
+    const out = probeWith({ graph: { _nodes: [1, 2, 3] } });
+    expect(out.globals.find((x) => x.key === 'graph').hint).toBe('_nodes (3 items)');
+  });
+
+  it('CP-012: 方法属性产出裸方法名（不带括号、不带 detail）', () => {
+    const out = probeWith({ graph: { getState() {}, serialize() {} } });
+    expect(out.globals.find((x) => x.key === 'graph').hint).toBe('getState');
+  });
+
+  it('CP-013: 对象属性产出 "<name> (obj)"', () => {
+    const out = probeWith({ app: { graph: { a: 1 } } });
+    expect(out.globals.find((x) => x.key === 'app').hint).toBe('graph (obj)');
+  });
+
+  it('CP-014: 库与真模型并存时，排名把模型排在库前面（emitter × 表驱动 串起来）', () => {
+    const out = probeWith({ LiteGraph: { getState() {} }, graph: { _nodes: [1, 2] } });
+    const keys = out.globals.map((x) => x.key);
+    expect(keys).toContain('LiteGraph');
+    expect(keys).toContain('graph');
+    expect(rankAppGlobals(out.globals)[0].g.key).toBe('graph');
+  });
+
+  it('CP-015: 没有应用对象的页面 globals 为空（不自己造候选）', () => {
+    const out = probeWith({});
+    expect(out.globals).toEqual([]);
   });
 });

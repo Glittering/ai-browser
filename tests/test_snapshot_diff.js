@@ -8,6 +8,7 @@
 import { describe, it, expect } from 'vitest';
 import { JSDOM } from 'jsdom';
 import { diffValues, previewOf, previewValue, safeByteLength, DEFAULT_SNAPSHOT_JS, DIFF_MAX_ENTRIES, evictOldest, SNAPSHOT_MAX } from '../src/main/snapshot_diff.js';
+import { MODEL_PROBE_ORDER } from '../src/main/capability_probe.js';
 import { EVAL_MAX_LENGTH } from '../src/shared/guards.js';
 
 const changedOf = (a, b) => diffValues(a, b).hasChanges;
@@ -370,5 +371,140 @@ describe('默认快照 —— 行为（jsdom）', () => {
     for (let i = 0; i < 20; i++) {
       expect(diffValues(a, snapshotOfHtml(html)).hasChanges).toBe(false);
     }
+  });
+});
+// ---- canvas 应用的数据模型指纹 ----
+//
+// 这一组堵的是一个**假绿**，而且是我自己 shipped 的功能里的：默认快照只描述 DOM，
+// 而 canvas 应用的 DOM 是一张定格照片 —— 拖一个节点、改一个 widget 只重绘画布，
+// DOM 一个字节都不动。于是 ui.diff 对一次确实发生了的写入回答 "unchanged"。
+// ComfyUI 上"改参数 = node.widgets[].value"是文档级写路径，它此前没有任何能用的
+// 校验。每一屏 DOM 都刻意断言"DOM 侧没变"，否则这些测试可能是被 DOM 变化喂饱的。
+function snapshotOfPage(html, globals = {}) {
+  const dom = new JSDOM(`<!DOCTYPE html><html><body>${html}</body></html>`, { pretendToBeVisual: true });
+  const win = dom.window;
+  win.Element.prototype.getBoundingClientRect = function () {
+    return { x: 0, y: 0, width: 100, height: 20, top: 0, left: 0, right: 100, bottom: 20 };
+  };
+  for (const [k, v] of Object.entries(globals)) win[k] = v;
+  const fn = new Function('window', 'document', 'location', 'getComputedStyle', 'return ' + DEFAULT_SNAPSHOT_JS);
+  const value = fn(win, win.document, win.location, win.getComputedStyle.bind(win));
+  dom.window.close();
+  return value;
+}
+
+// 形似 ComfyUI 的 window.graph：既有 _nodes（模型本体），也有 serialize()
+// （应用专门暴露出来供状态往返的入口，返回 JSON 安全对象）。
+const makeGraph = (n) => ({
+  _nodes: Array.from({ length: n }, (_, i) => ({ id: i, type: 'KSampler', widgets_values: [20] })),
+  serialize() { return { nodes: this._nodes.map((x) => ({ ...x })), links: [] }; },
+});
+
+const CANVAS_PAGE = '<canvas></canvas><button id="run">Run</button>';
+
+describe('默认快照 —— canvas 应用的数据模型', () => {
+  it('SD-043: DOM 逐字节相同、只多一个节点 —— diff 必须报 changed（假绿回归）', () => {
+    const before = snapshotOfPage(CANVAS_PAGE, { graph: makeGraph(3) });
+    const after = snapshotOfPage(CANVAS_PAGE, { graph: makeGraph(4) });
+    // 先证明 DOM 侧真的一个字节都没动，否则这条绿可能是 DOM 喂出来的。
+    expect(after.nodes).toEqual(before.nodes);
+    expect(after.text).toBe(before.text);
+    expect(after.textHash).toBe(before.textHash);
+    expect(after.count).toBe(before.count);
+    const d = diffValues(before, after);
+    expect(d.hasChanges).toBe(true);
+    expect(d.changed.some((c) => c.path === 'model.fp')).toBe(true);
+    expect(d.changed.some((c) => c.path === 'model.count')).toBe(true);
+  });
+
+  it('SD-044: 阳性对照 —— 同一页面同一模型反复快照必须判 unchanged', () => {
+    // 注意这里每次传入的是**新对象**：指纹必须由内容派生，而不是由对象身份派生，
+    // 否则每次快照都"有变化"，这个工具就废了。
+    const a = snapshotOfPage(CANVAS_PAGE, { graph: makeGraph(3) });
+    for (let i = 0; i < 5; i++) {
+      expect(diffValues(a, snapshotOfPage(CANVAS_PAGE, { graph: makeGraph(3) })).hasChanges).toBe(false);
+    }
+  });
+
+  it('SD-045: 节点数不变、只改一个 widget 的值 —— 指纹仍必须变', () => {
+    // ComfyUI 的文档级写路径。count 不变，所以只有全文指纹能抓到它。
+    const before = snapshotOfPage(CANVAS_PAGE, { graph: makeGraph(3) });
+    const g = makeGraph(3);
+    g._nodes[0].widgets_values[0] = 42;
+    const after = snapshotOfPage(CANVAS_PAGE, { graph: g });
+    expect(after.model.count).toBe(before.model.count);
+    const d = diffValues(before, after);
+    expect(d.hasChanges).toBe(true);
+    expect(d.changed.some((c) => c.path === 'model.fp')).toBe(true);
+    expect(d.changed.some((c) => c.path === 'model.count')).toBe(false);
+  });
+
+  it('SD-046: 阴性对照 —— 普通页面没有 model 字段（不许自己造候选）', () => {
+    const v = snapshotOfHtml('<div id="s">idle</div><button id="a">Alpha</button><input placeholder="q">');
+    expect(v.model).toBeUndefined();
+    expect(v.__error).toBeUndefined();
+  });
+
+  it('SD-047: 库命名空间（只有 getState）不被指纹化', () => {
+    // getState 是库也暴露的信号，且其内容更可能易变；收进来会让每次 diff 都有变化。
+    const v = snapshotOfPage(CANVAS_PAGE, { litegraph: { getState: () => ({ volatile: Math.random() }) } });
+    expect(v.model).toBeUndefined();
+  });
+
+  it('SD-048: 多候选时，持有节点的那个胜过只提供 serialize 的', () => {
+    // 这条测试抓到一个真缺陷：amFp 最初先试 serialize()，于是 graph（有 _nodes）
+    // 和 editor（只有 serialize）都报 src='serialize'，同分并列，优选顺序失效。
+    // 修正：排名看"对象拥有哪个访问器"，读取才走 serialize()，两者必须分开。
+    const v = snapshotOfPage(CANVAS_PAGE, {
+      editor: { serialize: () => ({ nodes: [] }) },
+      graph: { _nodes: [{ id: 1 }], serialize: () => ({ nodes: [{ id: 1 }] }) },
+    });
+    expect(v.model.global).toBe('graph');
+    expect(v.model.kind).toBe('_nodes');
+    expect(v.model.count).toBe(1);
+  });
+
+  it('SD-049: 循环引用的模型不能让快照崩，也不产出指纹', () => {
+    // _nodes 里的节点回指 graph 是常态；JSON.stringify 会抛，必须被接住。
+    const g = { _nodes: [] };
+    g._nodes.push({ id: 1, graph: g });
+    const v = snapshotOfPage(CANVAS_PAGE, { graph: g });
+    expect(v.__error).toBeUndefined();
+    expect(v.model).toBeUndefined();
+    expect(v.nodes).toBeDefined();
+  });
+
+  it('SD-050: serialize() 抛异常时不让快照崩，DOM 部分照样返回', () => {
+    const v = snapshotOfPage(CANVAS_PAGE, {
+      graph: { serialize() { throw new Error('boom'); }, _nodes: 'not-an-array' },
+    });
+    expect(v.__error).toBeUndefined();
+    expect(v.model).toBeUndefined();
+    expect(Object.keys(v.nodes).length).toBeGreaterThan(0);
+  });
+
+  it('SD-051: amFp 可能返回的每个 src 都必须出现在 MODEL_PROBE_ORDER 里', () => {
+    // 页内用 MOK.indexOf(f.src) 排名。漏掉一个 accessor 会拿到 -1 从而排到最前面，
+    // 静默改变优选顺序 —— 这是不变量断言，不是行为测试。
+    for (const src of ['serialize', '_nodes', 'nodes', 'links']) {
+      expect(MODEL_PROBE_ORDER, `accessor ${src} 不在 MODEL_PROBE_ORDER 中`).toContain(src);
+    }
+  });
+
+  it('SD-052: 模型从无到有必须显式报出来，不许静默当成"没变"', () => {
+    const before = snapshotOfPage(CANVAS_PAGE, {});
+    const after = snapshotOfPage(CANVAS_PAGE, { graph: makeGraph(3) });
+    const d = diffValues(before, after);
+    expect(d.hasChanges).toBe(true);
+    expect(d.added.some((a) => a.path === 'model')).toBe(true);
+  });
+
+  it('SD-053: 模型指纹不影响普通 DOM 变化的既有判定', () => {
+    // 带模型的页面上，一个普通 DOM 变化仍应按原样报出来，不被模型字段盖住。
+    const before = snapshotOfPage(CANVAS_PAGE, { graph: makeGraph(3) });
+    const after = snapshotOfPage('<canvas></canvas><button id="run">Stop</button>', { graph: makeGraph(3) });
+    const d = diffValues(before, after);
+    expect(d.changed.some((c) => c.path === 'nodes.button#run.l')).toBe(true);
+    expect(d.changed.some((c) => c.path === 'model.fp')).toBe(false);
   });
 });

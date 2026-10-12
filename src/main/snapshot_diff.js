@@ -20,6 +20,13 @@ export const DIFF_MAX_ENTRIES = 200;
 // Cap on how many snapshot baselines are kept alive at once.
 export const SNAPSHOT_MAX = 50;
 
+// The in-page scan that recognises "this window property is the app's own data
+// model", plus the derived order that decides which candidate wins. Imported
+// rather than re-implemented: the first version of the ranking matched the hint
+// prefix wrong, ranked everything -1, and silently downgraded a real page. Two
+// hand-maintained copies of that table would drift the same way.
+import { APP_KEY_RE, MODEL_PROBE_ORDER } from './capability_probe.js';
+
 /**
  * Drop oldest-inserted entries from a Map until it holds at most `max`.
  *
@@ -233,9 +240,55 @@ export function safeByteLength(value) {
  *    but a default that no longer fits the documented eval contract is a trap
  *    for whoever later routes it through the guarded path. Rationale lives in
  *    this comment block, not inside the string; SD-031 pins the length.
+ *
+ * 4. A CANVAS APP'S MODEL IS FINGERPRINTED, NOT JUST ITS DOM.
+ *    Properties 1-3 all describe the DOM, and on a canvas-rendered page the DOM
+ *    is a still photograph: adding a node or editing a widget repaints <canvas>
+ *    and changes nothing the element walk can see. So a DOM-only diff answers
+ *    "unchanged" to a write that demonstrably happened — on ComfyUI, changing
+ *    `node.widgets[].value` (the documented write path) moves the DOM by zero
+ *    bytes. When the page hangs its model off window, the snapshot therefore
+ *    fingerprints that too.
+ *
+ *    Selection is by "what can actually be read back", not by how promising the
+ *    name looks: a library namespace scores well on names and has no model to
+ *    hand back, so `amFp` returning null is what disqualifies it. Two things are
+ *    deliberately kept apart inside `amFp`: the RANK comes from the strongest
+ *    accessor the object HAS, while the READ goes through `serialize()` when one
+ *    exists (it returns JSON-safe data; the live collections are usually
+ *    circular). Collapsing the two makes every candidate report 'serialize',
+ *    they all tie, and a mere serializer can outrank the real model — SD-048
+ *    caught exactly that. Ties break by MODEL_PROBE_ORDER, and an accessor
+ *    absent from that order is skipped rather than silently sorted first.
+ *    Reading is strictly read-only: `loadGraphData` is a LOADER and is never
+ *    called, and a throwing `serialize()` or a circular `_nodes` is caught and
+ *    simply yields no fingerprint.
  */
 export const DEFAULT_SNAPSHOT_JS = `(function(){
   try {
+    var amRe = new RegExp(${JSON.stringify(APP_KEY_RE.source)}, 'i');
+    var h32 = function (s) {
+      var h = 5381;
+      for (var p = 0; p < s.length; p++) h = ((h << 5) + h + s.charCodeAt(p)) | 0;
+      return (h >>> 0).toString(36);
+    };
+    var amFp = function (v) {
+      try {
+        var s = Array.isArray(v._nodes) ? '_nodes' : Array.isArray(v.nodes) ? 'nodes'
+          : Array.isArray(v.links) ? 'links'
+          : (typeof v.serialize === 'function' ? 'serialize' : null);
+        if (!s) return null;
+        var d = null;
+        try { d = (typeof v.serialize === 'function') ? v.serialize() : v[s]; } catch (_) { return null; }
+        if (d == null) return null;
+        var j = (typeof d === 'string') ? d : JSON.stringify(d);
+        if (!j) return null;
+        var c = null;
+        if (Array.isArray(d)) c = d.length;
+        else if (d && d.nodes && typeof d.nodes.length === 'number') c = d.nodes.length;
+        return { kind: s, count: c, fp: h32(j) };
+      } catch (_) { return null; }
+    };
     var out = { url: location.href, title: document.title, nodes: {} };
     var all = document.querySelectorAll(
       'a,button,input,textarea,select,option,[role],[aria-label],[contenteditable="true"],canvas,img'
@@ -284,17 +337,32 @@ export const DEFAULT_SNAPSHOT_JS = `(function(){
     try {
       var txt = (document.body && (document.body.innerText || document.body.textContent)) || '';
       txt = txt.replace(/\\s+/g, ' ').trim();
-      var h32 = function (s) {
-        var h = 5381;
-        for (var p = 0; p < s.length; p++) h = ((h << 5) + h + s.charCodeAt(p)) | 0;
-        return (h >>> 0).toString(36);
-      };
       out.text = txt.slice(0, 4000);
       out.textLen = txt.length;
       out.textHash = h32(txt);
       var SEG = 1024, segs = [];
       for (var q = 0; q < 256 && q * SEG < txt.length; q++) segs.push(h32(txt.substr(q * SEG, SEG)));
       out.textSegs = segs;
+    } catch (_) {}
+    try {
+      var MOK = ${JSON.stringify(MODEL_PROBE_ORDER)};
+      var ks = Object.keys(window), cd = [];
+      for (var gi = 0; gi < ks.length; gi++) {
+        if (!amRe.test(ks[gi])) continue;
+        var gv = null;
+        try { gv = window[ks[gi]]; } catch (_) { continue; }
+        if (!gv || (typeof gv !== 'object' && typeof gv !== 'function')) continue;
+        var f = amFp(gv);
+        if (!f) continue;
+        var r = MOK.indexOf(f.kind);
+        if (r < 0) continue;
+        cd.push({ k: ks[gi], r: r, f: f });
+      }
+      if (cd.length) {
+        cd.sort(function (a, b) { return a.r - b.r; });
+        var p = cd[0];
+        out.model = { global: p.k, kind: p.f.kind, count: p.f.count, fp: p.f.fp };
+      }
     } catch (_) {}
     return out;
   } catch (e) {

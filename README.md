@@ -10,7 +10,7 @@
   <img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue.svg">
   <img alt="Electron" src="https://img.shields.io/badge/built%20with-Electron%2033-9cf">
   <img alt="Platforms" src="https://img.shields.io/badge/platforms-macOS%20%E2%80%A2%20Linux-blueviolet">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-363%20unit%20%2B%20356%20e2e-2ea043">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-379%20unit%20%2B%20368%20e2e-2ea043">
   <img alt="MCP" src="https://img.shields.io/badge/spec-MCP%20(stdio)-f5b23b">
 </p>
 
@@ -150,6 +150,15 @@ const d = await browse_diff({ operation: "diff", snapshot: base.snapshot });
 - Omit `js` for a **site-agnostic DOM snapshot** — role / label / value / disabled / size per
   element plus the page's visible text. No per-site JS required, and plain `<div>` status text
   changes are caught.
+- Omit `js` and it **also fingerprints the app's own data model** when the page hangs one off
+  `window`. A canvas-rendered app's DOM is a still photograph — dragging a node or editing a
+  widget repaints `<canvas>` and moves nothing the element walk can see, so a DOM-only diff
+  answers `unchanged` to a write that demonstrably happened. ComfyUI's documented write path
+  (`node.widgets[].value`) moved the DOM by exactly zero bytes. With the fingerprint, that same
+  write shows up as `model.fp` (and `model.count` when the node count moved). It is read-only
+  (`loadGraphData` is a loader and is never called), it picks whichever candidate can actually be
+  read back rather than whichever *looks* most promising, and a library namespace — which scores
+  well on names and has no model to hand back — is skipped.
 - `rearm: true` moves the baseline forward for the *next* diff, so you can loop "assert nothing
   changed" across many steps; `forget: true` drops it.
 - A throwing expression, a missing id, or a cross-tab comparison all return an explicit error.
@@ -513,13 +522,14 @@ AI_BROWSER_USER_DATA=~/.ai-browser-work npm start
 ## Test & dev
 
 ```bash
-npm test             # vitest — 363 tests across 26 files
+npm test             # vitest — 379 tests across 26 files
 npm run smoke        # Electron contract layer, offline fixture      — 31 checks
 npm run capabilities # text fields, canvas, page source, network, DOM editing — 54 checks
 npm run richtext     # rich-text editors, nested menus, forms, errors, tags, upload — 111 checks
 npm run network      # request log, POST bodies, headers, pagination, redaction — 41 checks
 npm run value        # value truncation contract + read-only get_value — 15 checks
 npm run canvas       # canvas draw-call capture — 13 checks
+npm run modeldiff    # canvas app data-model diff (the "unchanged" false green) — 12 checks
 npm run focus        # no focus stealing + full capability while backgrounded — 32 checks
 npm run interact     # trusted drag / key press / wheel (pointer gestures) — 31 checks
 npm run view         # viewport repaint + snapshot/diff verification — 28 checks
@@ -582,6 +592,32 @@ the page through `ui.evaluate`.
 
 **`npm run network`** — that a POST can be captured with its full request body, that headers are
 redacted by default, and that bodies paginate instead of being silently truncated.
+
+**`npm run modeldiff`** — the suite for the one place `ui.diff` used to lie. A canvas-rendered app's
+DOM is a still photograph: dragging a node or editing a widget repaints `<canvas>` and moves
+nothing the element walk can see, so the DOM-only default snapshot answered `unchanged` to a write
+that demonstrably happened — including ComfyUI's documented write path, `node.widgets[].value`,
+which moves the DOM by exactly zero bytes. The suite proves the model fingerprint on a self-built
+fixture (never someone's live project, where snapping and quantization make "move it back" untrue):
+
+- adding a node → `verdict: changed`, and the diff paths are **only** `model.count` / `model.fp` —
+  zero `nodes.*` and zero `text*`, which is how the test proves the credit belongs to the model
+  rather than to the DOM happening to move;
+- the ComfyUI case — changing one widget value with the node count unchanged → still `changed`,
+  and specifically `model.fp` without `model.count`;
+- both directions: an untouched page must stay `unchanged`, and a plain page with no app object
+  must never acquire a `model` field (no false reds from machinery that invented a candidate);
+- the model signal must not mask DOM changes — when both move, both are reported.
+
+Two design points the suite pins, both learned the hard way:
+
+- selection is by **what can actually be read back**, not by how promising the name looks. A library
+  namespace scores well on names and has no model to hand back, so returning null is what
+  disqualifies it;
+- the *rank* comes from the strongest accessor the object **has**, while the *read* goes through
+  `serialize()` when one exists (it returns JSON-safe data; the live collections are usually
+  circular). Collapsing the two makes every candidate report `serialize`, they all tie, and a mere
+  serializer can outrank the real model — that bug was caught by the tie-break test, not by review.
 
 ### Canvas: read through draw calls, not pixels
 
