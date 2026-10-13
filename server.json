@@ -1,0 +1,27 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.Glittering/ai-browser",
+  "description": "Visible Electron browser driven by a semantic accessibility tree: 17 MCP tools, no screenshots.",
+  "repository": {
+    "url": "https://github.com/Glittering/ai-browser",
+    "source": "github"
+  },
+  "version": "1.2.1",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@glittering0717/ai-browser",
+      "version": "1.2.1",
+      "runtimeHint": "npx",
+      "runtimeArguments": [
+        { "type": "positional", "value": "-y" }
+      ],
+      "packageArguments": [
+        { "type": "positional", "value": "mcp" }
+      ],
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
