@@ -3,10 +3,16 @@
 // mcp_server's main() side effects (spawning Electron / opening stdio).
 // Tool count and descriptions are kept minimal to reduce per-message token
 // cost in MCP clients that inject the full tool list on every turn.
+//
+// annotations 遵循 MCP Tool annotation 约定（title / readOnlyHint /
+// destructiveHint / openWorldHint），Smithery / Cursor / Claude 等目录与客户端
+// 会读取并渲染成徽标。只放布尔结论、不放长句，把额外 token 压到最低。
 export const MCP_TOOLS = [
   {
     name: 'browse_navigate',
+    title: 'Navigate tab',
     description: 'Navigate the active/focused tab to a URL.',
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -18,7 +24,9 @@ export const MCP_TOOLS = [
   },
   {
     name: 'browse_get_tree',
+    title: 'Read semantic tree',
     description: 'Return the page semantic UI tree (roles, labels, actions, bounds, urls).',
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -32,7 +40,9 @@ export const MCP_TOOLS = [
   },
   {
     name: 'browse_act',
+    title: 'Act on element',
     description: 'Act on an element by data-ai-id: click, type (append at caret), setContent (replace all), clear, focus, hover, scroll_to, upload, get_value (read-only), drag, press, wheel.',
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -68,7 +78,9 @@ export const MCP_TOOLS = [
   },
   {
     name: 'browse_evaluate',
+    title: 'Run page JavaScript',
     description: 'Run a JS expression in the page context and return its value.',
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -80,7 +92,9 @@ export const MCP_TOOLS = [
   },
   {
     name: 'browse_scroll',
+    title: 'Scroll page',
     description: 'Scroll the page or an element into view.',
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -93,7 +107,9 @@ export const MCP_TOOLS = [
   },
   {
     name: 'browse_wait',
+    title: 'Wait for condition',
     description: 'Poll the page until a condition holds or timeout. Conditions: button_enabled, modal_appeared, text_contains, url_contains.',
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -108,12 +124,16 @@ export const MCP_TOOLS = [
   },
   {
     name: 'browse_list_tabs',
+    title: 'List tabs',
     description: 'List open tabs (id, url, title, active).',
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     inputSchema: { type: 'object', properties: {} }
   },
   {
     name: 'browse_new_tab',
+    title: 'New tab',
     description: 'Open a new tab, optionally at a URL.',
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     inputSchema: {
       type: 'object',
       properties: {
@@ -123,7 +143,9 @@ export const MCP_TOOLS = [
   },
   {
     name: 'browse_close_tab',
+    title: 'Close tab',
     description: 'Close a tab by id.',
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
     inputSchema: {
       type: 'object',
       properties: {
@@ -134,7 +156,9 @@ export const MCP_TOOLS = [
   },
   {
     name: 'browse_set_active_tab',
+    title: 'Switch active tab',
     description: 'Switch the active tab.',
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     inputSchema: {
       type: 'object',
       properties: {
@@ -145,7 +169,9 @@ export const MCP_TOOLS = [
   },
   {
     name: 'browse_network',
+    title: 'Inspect network',
     description: 'Query captured HTTP requests (Chrome Network panel): list/get/clear/configure. Captures method, headers and POST bodies; sensitive headers redacted by default.',
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -178,7 +204,9 @@ export const MCP_TOOLS = [
   },
   {
     name: 'browse_canvas',
+    title: 'Read canvas',
     description: 'Read <canvas> through captured draw calls (not pixels): list canvases, read texts/regions, configure, or capture a PNG fallback. 2D canvas text comes from fillText, so no OCR needed; WebGL is opaque.',
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -196,7 +224,9 @@ export const MCP_TOOLS = [
   },
   {
     name: 'browse_diff',
+    title: 'Snapshot and diff',
     description: 'Prove an action changed the page: snapshot a baseline, then diff to get added/removed/changed paths with before/after values. Success is not evidence.',
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -213,7 +243,9 @@ export const MCP_TOOLS = [
   },
   {
     name: 'browse_capabilities',
+    title: 'Probe capabilities',
     description: 'Probe what a page affords and which route to take: DOM vs canvas, same-origin iframes, app objects on window, JSON endpoints, plus a recommended plan with evidence.',
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -225,7 +257,9 @@ export const MCP_TOOLS = [
   },
   {
     name: 'browse_repaint',
+    title: 'Force repaint',
     description: "Force the compositor to redraw a tab's BrowserView when the window shows a stale page; returns repaint_count so the repaint is provable.",
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     inputSchema: {
       type: 'object',
       properties: {
@@ -235,7 +269,9 @@ export const MCP_TOOLS = [
   },
   {
     name: 'browse_downloads',
+    title: 'List downloads',
     description: 'List downloads for a tab with their on-disk paths. Use after clicking an export/download button — downloads are asynchronous, so poll this rather than expecting the path in the click response.',
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     inputSchema: {
       type: 'object',
       properties: {
@@ -245,7 +281,9 @@ export const MCP_TOOLS = [
   },
   {
     name: 'browse_quit',
+    title: 'Quit browser',
     description: 'Gracefully shut down the AI Browser (releases resources).',
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
     inputSchema: { type: 'object', properties: {} }
   }
 ];

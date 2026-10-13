@@ -5,11 +5,18 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
+  ListPromptsRequestSchema,
+  ListResourcesRequestSchema,
+  ListResourceTemplatesRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import net from 'node:net';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+// Shared Electron-binary resolver. npm >= 11 blocks dependency install scripts
+// by default (so plain `npx` leaves electron without its engine); the resolver
+// self-heals by running electron's bundled installer on first launch.
+import electronResolve from '../../scripts/electron_resolve.cjs';
 import { MCP_TOOLS } from './mcp_tools.js';
 import { evaluateGuardError } from '../shared/guards.js';
 import { config, wsUrl } from '../shared/config.js';
@@ -22,6 +29,11 @@ const ELECTRON_PORT = config.wsPort;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// App/package root — identical layout in a git checkout and inside
+// node_modules/@glittering0717/ai-browser: src/main/ → up two levels.
+const APP_ROOT = path.resolve(__dirname, '..', '..');
+const { resolveElectronBinary } = electronResolve;
 
 // Persistent WS client — one reused connection with incrementing ids.
 // Lazy launch: no Electron is started at boot. The first browse_* call that
@@ -72,20 +84,27 @@ function waitForPort(port, timeoutMs) {
 //    现在抛一个带原因的 Error，由 mcp_ws 并进最终错误信息。
 async function ensureElectronRunning() {
   if (await checkPort(ELECTRON_PORT)) return true;
-  console.error('[mcp] port 9223 not listening — spawning Electron via npm start');
-  // Run `npm start` (which runs `node scripts/start.cjs` → `electron .`) from
-  // project root.
+  console.error('[mcp] port 9223 not listening — spawning the ai-browser Electron app');
+  // Spawn the electron binary directly (resolved from this package's
+  // dependencies), pointed at the app root. Do NOT shell out to `npm start`:
+  // npm is not guaranteed on PATH for MCP clients, and on Windows the
+  // executable is npm.cmd — direct spawn avoids both classes of failure.
   // AI_BROWSER_LAUNCHED_BY_AGENT：告诉 Electron 它是被 agent 拉起来的，因此
   // 窗口出现时**不要**抢焦点（showInactive）—— 否则 agent 第一次连上来就会把
-  // 用户正在做的事打断。人手动 `npm start` 时没有这个变量，窗口正常显示在前台。
+  // 用户正在做的事打断。人手动 `ai-browser` / `npm start` 时没有这个变量。
   const childEnv = { ...process.env, AI_BROWSER_LAUNCHED_BY_AGENT: '1' };
   delete childEnv.ELECTRON_RUN_AS_NODE;
-  const child = spawn('npm', ['start'], {
-    cwd: path.resolve(__dirname, '..', '..'),
-    detached: true,
-    stdio: 'ignore',
-    env: childEnv,
-  });
+  let child;
+  try {
+    child = spawn(resolveElectronBinary(), [APP_ROOT], {
+      cwd: APP_ROOT,
+      detached: true,
+      stdio: 'ignore',
+      env: childEnv,
+    });
+  } catch (e) {
+    throw new Error(`could not start the browser: ${e.message}`);
+  }
   child.unref();
   // 子进程自己提前退出（例如上面那个 Node ESM 崩溃）时，等满 30 秒是纯浪费 ——
   // 而且会掩盖真实原因。这里挂一个 exit 监听，把退出码留给下面的诊断。
@@ -95,8 +114,8 @@ async function ensureElectronRunning() {
   const ok = await waitForPort(ELECTRON_PORT, 30000);
   if (!ok) {
     const why = earlyExit
-      ? `Electron exited early (code=${earlyExit.code}, signal=${earlyExit.signal}) — see scripts/start.cjs; a common cause is ELECTRON_RUN_AS_NODE being set in the environment`
-      : 'Electron did not come up within 30s';
+      ? `Electron exited early (code=${earlyExit.code}, signal=${earlyExit.signal}) — a common cause is ELECTRON_RUN_AS_NODE being set in the environment, or the electron binary being missing (check node_modules/electron/dist)`
+      : 'Electron did not come up within 30s (slow first-run binary download? try ELECTRON_MIRROR for users behind a slow network)';
     console.error('[mcp] ' + why);
     throw new Error(`could not start the browser: ${why}`);
   }
@@ -105,7 +124,10 @@ async function ensureElectronRunning() {
 
 const server = new Server(
   { name: 'ai-browser-mcp', version: VERSION },
-  { capabilities: { tools: {} } }
+  // resources/prompts 声明为空能力：协议要求即使一个都没有也要正常应答这两个
+  // list 请求（部分目录扫描器，如 Smithery，会把 "Method not found" 记为健康
+  // 检查失败）。能力清单保留声明，客户端据此知道服务端支持该方法族。
+  { capabilities: { tools: {}, resources: {}, prompts: {} } }
 );
 
 // Tool definitions — curated minimal MCP_TOOLS (see mcp_tools.js). Kept small
@@ -114,6 +136,11 @@ const server = new Server(
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: MCP_TOOLS
 }));
+
+// 无资源 / 无提示词模板 —— 返回空集合而不是 protocol error。
+server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: [] }));
+server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({ resourceTemplates: [] }));
+server.setRequestHandler(ListPromptsRequestSchema, async () => ({ prompts: [] }));
 
 // Tool execution
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -190,7 +217,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // length before forwarding. Same contract as the raw WS ui.evaluate path.
       const guardErr = evaluateGuardError(js);
       if (guardErr) {
-        return { content: [{ type: 'text', text: `Error: ${guardErr}` }] };
+        // 工具结果形式的错误（isError:true），而不是 -32603：目录审核与客户端
+        // 都会实际调用一次工具，不透明的 internal error 会被当成"坏了"。
+        return { content: [{ type: 'text', text: `Error: ${guardErr}` }], isError: true };
       }
       const result = await wsClient.call('ui.evaluate', { js, tab: args.tab });
       return { content: [{ type: 'text', text: JSON.stringify(result) }] };

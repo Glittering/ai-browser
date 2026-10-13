@@ -178,3 +178,29 @@ describe('不变量 5：措辞必须与"人可见可操作"的定位一致', () 
     ).toBe(false);
   });
 });
+
+describe('不变量 6：MCP 协议面在目录扫描器面前必须完整', () => {
+  // mcp_server.js 的 main() 有启动 stdio 的副作用，单测里不 import 它，
+  // 与本文件其他守护一致，用源码扫描锁定协议契约。
+  const MCP_SERVER_JS = 'src/main/mcp_server.js';
+  const mcpSrc = readSrc(MCP_SERVER_JS);
+
+  it('resources / prompts / resource-templates 三个 list 都要应答空集合（不返回 method not found）', () => {
+    // Smithery 等目录在发布时会真实扫描服务端：空 list 必须是合法空集合，
+    // "Method not found" 会被记为健康检查失败。
+    expect(mcpSrc).toContain('ListResourcesRequestSchema');
+    expect(mcpSrc).toContain('ListResourceTemplatesRequestSchema');
+    expect(mcpSrc).toContain('ListPromptsRequestSchema');
+    expect(mcpSrc).toMatch(/resources:\s*\[\s*\]/);
+    expect(mcpSrc).toMatch(/resourceTemplates:\s*\[\s*\]/);
+    expect(mcpSrc).toMatch(/prompts:\s*\[\s*\]/);
+  });
+
+  it('capabilities 必须同时声明 tools / resources / prompts', () => {
+    expect(mcpSrc).toMatch(/capabilities:\s*\{\s*tools:\s*\{\},\s*resources:\s*\{\},\s*prompts:\s*\{\}\s*\}/);
+  });
+
+  it('evaluate 守卫拒绝必须以 isError 工具结果返回，而不是抛出 -32603', () => {
+    expect(mcpSrc).toMatch(/isError:\s*true/);
+  });
+});

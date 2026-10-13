@@ -4,7 +4,7 @@ import { MCP_TOOLS } from '../src/main/mcp_tools.js';
 describe('MCP tool list (token-cost guard)', () => {
   const names = MCP_TOOLS.map((t) => t.name);
 
-  it('keeps exactly 16 tools', () => {
+  it('keeps exactly 17 tools', () => {
     // browse_subscribe 与 browse_network_body 已换出：
     // - browse_subscribe：MCP 路径收不到 server→client 通知（mcp_ws.js 丢弃无 id
     //   的推送），订阅对它毫无作用；且网络采集已改为默认开启，它"启动采集"的
@@ -120,5 +120,44 @@ describe('MCP tool list (token-cost guard)', () => {
       expect(typeof t.name).toBe('string');
       expect(t.name.startsWith('browse_')).toBe(true);
     }
+  });
+
+  it('every tool carries MCP annotations（目录/客户端渲染徽标，且是 Smithery 扫描项）', () => {
+    for (const t of MCP_TOOLS) {
+      expect(t.title, `${t.name} 需要 title`).toBeTruthy();
+      expect(t.title.length, `${t.name} title 保持简短`).toBeLessThan(40);
+      const a = t.annotations;
+      expect(a, `${t.name} 需要 annotations`).toBeTruthy();
+      for (const k of ['readOnlyHint', 'destructiveHint', 'openWorldHint']) {
+        expect(typeof a[k], `${t.name}.annotations.${k}`).toBe('boolean');
+      }
+    }
+  });
+
+  it('读类工具标 readOnly；写/生命周期类不标', () => {
+    const readOnly = MCP_TOOLS.filter((t) => t.annotations.readOnlyHint).map((t) => t.name);
+    expect(readOnly).toContain('browse_get_tree');
+    expect(readOnly).toContain('browse_diff');
+    expect(readOnly).toContain('browse_capabilities');
+    expect(readOnly).toContain('browse_list_tabs');
+    expect(readOnly).toContain('browse_downloads');
+    expect(readOnly).not.toContain('browse_navigate');
+    expect(readOnly).not.toContain('browse_act');
+    expect(readOnly).not.toContain('browse_evaluate');
+  });
+
+  it('只有 close_tab / quit 标 destructive', () => {
+    const destructive = MCP_TOOLS.filter((t) => t.annotations.destructiveHint).map((t) => t.name);
+    expect(destructive.sort()).toEqual(['browse_close_tab', 'browse_quit']);
+  });
+
+  it('触达远程页面的工具标 openWorld，纯本地生命周期/标签管理不标', () => {
+    const open = new Set(MCP_TOOLS.filter((t) => t.annotations.openWorldHint).map((t) => t.name));
+    expect(open.has('browse_navigate')).toBe(true);
+    expect(open.has('browse_act')).toBe(true);
+    expect(open.has('browse_evaluate')).toBe(true);
+    expect(open.has('browse_quit')).toBe(false);
+    expect(open.has('browse_close_tab')).toBe(false);
+    expect(open.has('browse_list_tabs')).toBe(false);
   });
 });
