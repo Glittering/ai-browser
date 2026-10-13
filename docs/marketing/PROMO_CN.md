@@ -60,7 +60,7 @@ Agent 不需要截图，它直接问浏览器"页面上有什么？"。浏览器
 
 不只是独立使用。可以作为 MCP server，让 Claude Code / Cursor / Codex 直接调用。把下面这句话丢进 Agent 的指令，它就能自己驱动真实浏览器，甚至自己拉起、自己关闭：
 
-> 我可以使用 AI Browser 浏览网页（13 个 browse_* 的 MCP 工具）。第一次调用会自动启动 Electron 浏览器，用完自动关闭。用 browse_navigate 打开网页，用 browse_get_tree 把页面读成 DOM 树，用 browse_act 像人一样点击/输入，用 browse_evaluate 执行 JS，用 browse_wait 等待目标出现。
+> 我可以使用 AI Browser 浏览网页（17 个 browse_* 的 MCP 工具）。第一次调用会自动启动 Electron 浏览器，用完自动关闭。用 browse_navigate 打开网页，用 browse_get_tree 把页面读成语义树，用 browse_act 像人一样点击/输入，用 browse_diff 证明操作真的生效，用 browse_wait 等待目标出现。
 
 注册配置：
 
@@ -68,8 +68,8 @@ Agent 不需要截图，它直接问浏览器"页面上有什么？"。浏览器
 {
   "mcpServers": {
     "ai-browser": {
-      "command": "node",
-      "args": ["/绝对路径/ai-browser/src/main/mcp_server.js"]
+      "command": "npx",
+      "args": ["-y", "@glittering0717/ai-browser", "mcp"]
     }
   }
 }
@@ -77,20 +77,22 @@ Agent 不需要截图，它直接问浏览器"页面上有什么？"。浏览器
 
 MCP 服务启动时会探测 9223 端口：没人监听就自动从项目根拉起 Electron，用完用 `browse_quit` 释放。**Agent 全程拥有浏览器生命周期，不需要人手动启停。**
 
-## 为什么不是 Playwright / Puppeteer？
+## 为什么不是 Playwright（含 Playwright MCP）？
 
-Playwright 也是 Chrome，但它是 headless 的、靠选择器——网站一改版就全断。
+Playwright MCP 很优秀，它也读无障碍树、也能 headed 跑，自动化测试它仍是首选。但它的产品形态是"**临时实例**"：每次起一个干净浏览器，跑完即弃，面向的是脚本和测试。
 
-AI Browser 是双输出：
-- **人类**看到正常网页（像素渲染）
-- **AI** 拿到语义树 + 事件流（结构化 API）
+AI Browser 是另一种形态——"**副驾浏览器**"：
+
+- **持久登录、日常常驻**：会话存在独立分区，扫码登录一次长期有效；窗口就在你桌面上，agent 在后台操作也不抢焦点。
+- **人随时伸手**：扫码、滑块、支付、SSO——你直接动鼠标，没有交接 API，也没有权限弹窗；agent 在对话里说一句"请扫码"，然后等你。
+- **验证是内建原语**：`browse_diff` 快照/比对给出显式 changed/unchanged，canvas 应用指纹化数据模型——"工具返回 success 但什么都没发生"在 agent 场景里是头号故障，测试框架不管这件事。
 
 人和 Agent 共享同一个浏览器实例。你看你的网页，Agent 操作它的 API，互不干扰。
 
 ## 架构
 
 ```
-外部 Agent（MCP stdio · 13 工具 │ WS JSON-RPC :9223）
+外部 Agent（MCP stdio · 17 工具 │ WS JSON-RPC :9223）
         │
 Electron 主进程：index.js · ws_server.js · page_manager.js
         │  CDP 共享会话（Network + Runtime，每 tab 只 attach 一次）
@@ -107,10 +109,12 @@ WebPage → 语义树（全程无一张截图）
 ## 快速开始
 
 ```bash
+# npm 包（推荐，Node ≥ 18）
+npx -y @glittering0717/ai-browser start   # WS 服务起在 :9223
+
+# 或从源码
 git clone https://github.com/Glittering/ai-browser
-cd ai-browser
-npm install
-npm start   # WS 服务起在 :9223
+cd ai-browser && npm install && npm start
 ```
 
 ## 为什么开源
@@ -122,4 +126,4 @@ AI Browser 给 Agent 真正的 Web 感官：**DOM 精度的感知，像人一样
 ---
 
 **项目地址：https://github.com/Glittering/ai-browser**
-**100 单测 + 31 Electron smoke 全绿 · 13 个 MCP 工具 · MCP/WS 双原生**
+**411 单测 + 409 个 Electron e2e 断言（11 套件）全绿 · 17 个 MCP 工具 · MCP/WS 双原生**

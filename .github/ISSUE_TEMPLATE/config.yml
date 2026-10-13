@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 使用问题与讨论
+    url: https://github.com/Glittering/ai-browser/discussions
+    about: 安装配置、"怎么让我的 agent 做 X"、使用心得请发 Discussions。
+  - name: README 与故障排查
+    url: https://github.com/Glittering/ai-browser#troubleshooting
+    about: 端口占用、Electron 下载失败、窗口陈旧、登录态丢失等常见问题先看这里。

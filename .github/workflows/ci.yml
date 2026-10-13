@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+jobs:
+  unit:
+    name: Unit tests (vitest)
+    # 单测会 import 直接依赖 Electron 运行时的源码模块，在与开发环境一致的
+    # macOS 上跑最稳；Electron e2e 套件需要真实桌面会话，不在 CI 内运行。
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies (downloads Electron)
+        run: npm ci
+
+      - name: Run unit tests
+        run: npm test

@@ -40,7 +40,7 @@
 
 ### 【安装 3:00】
 
-装只要 3 步：git clone，npm install，注册进 Agent 的 `.mcp.json`。浏览器自己会起、自己会关，全托管。
+装只要一句话：`npx -y @glittering0717/ai-browser mcp` 注册进 Agent 的 `.mcp.json`，不用 clone 不用配路径，浏览器自己会起、自己会关，全托管。想先看窗口就跑 `npx -y @glittering0717/ai-browser start`。
 
 ### 【结尾 3:30】
 
@@ -57,7 +57,7 @@
 ## 项目真实数据（供口播/字幕引用，勿夸大）
 
 - MIT 开源，主仓库：https://github.com/Glittering/ai-browser
-- 13 个 MCP 工具（`browse_navigate` / `browse_get_tree` / `browse_act` / `browse_evaluate` / `browse_wait` 为核心）
-- 100 单元测试 + 31 Electron smoke 测试全绿
+- 17 个 MCP 工具（`browse_navigate` / `browse_get_tree` / `browse_act` / `browse_diff` / `browse_evaluate` / `browse_wait` 为核心）
+- 411 单元测试 + 11 个 Electron e2e 套件（409 个断言）全绿
 - 实测站点：知乎（Draft.js 全流程）、CSDN（发布）、百度、东方财富（2458 节点）、同花顺、魔塔
 - MCP 自动拉起/自动关闭 Electron，Agent 全托管浏览器生命周期
