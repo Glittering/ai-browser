@@ -15,7 +15,7 @@
 ## 中文版（copy-paste）
 
 ```text
-我可以用 AI Browser 浏览网页。它提供 MCP 服务（13 个 browse_* 工具），第一次调用时会自动
+我可以用 AI Browser 浏览网页。它提供 MCP 服务（17 个 browse_* 工具），第一次调用时会自动
 拉起一个真实可见的浏览器窗口，用完调用 browse_quit 释放。页面以结构化语义树返回，不是截图。
 
 标准循环：
@@ -23,8 +23,9 @@
 2. browse_get_tree                         读页面，返回语义树：每个节点有 role / label / value /
                                            states / actions
 3. browse_act { action, target }           操作元素，target 填第 2 步节点里的 id（即 data-ai-id）
-                                           action 可选：click / type / clear / focus / hover /
-                                           scroll_to / upload
+                                           action 可选：click / type（光标处追加）/ setContent
+                                           （整体替换）/ clear / focus / hover / scroll_to /
+                                           upload / get_value（只读回读全文）/ drag / press / wheel
 4. browse_wait { condition }               等待条件成立：button_enabled / modal_appeared /
                                            text_contains / url_contains
 5. browse_evaluate { js }                  在页面上下文跑 JS 表达式（上限 5000 字符，
@@ -35,10 +36,14 @@
 - { "ax": true }               走 AX 语义层，链接会带 url
 - { "mode": "diff" }           只看上次读取以来新增 / 消失的可交互节点
 
-其他：browse_scroll 滚动；browse_list_tabs / browse_new_tab / browse_close_tab /
-browse_set_active_tab 管标签页；browse_subscribe 订阅 dom_change / network_response /
-captcha_appeared / message_appeared / js_error / state_changed；browse_network_body 取某个
-请求的响应体（需先 subscribe）。
+验证写操作（success 不等于做成了）：browse_diff 先 snapshot 基线，写操作之后再 diff，
+verdict 显式给出 changed / unchanged。
+
+其他：browse_scroll 滚动文档（画布类页面用 browse_act 的 wheel）；browse_list_tabs /
+browse_new_tab / browse_close_tab / browse_set_active_tab 管标签页；browse_network 拉取网络
+请求（含 POST body，免订阅）；browse_capabilities 一次探明页面该走哪条路（结构化数据 /
+语义树 / 指针手势）；browse_canvas 读 canvas 绘制调用里的文本（不是 OCR）；
+browse_downloads 查下载文件落盘路径；browse_repaint 在窗口画面陈旧时强制重绘。
 
 需要人帮忙时（登录、扫码、短信验证码、滑块 / 人机验证，以及任何我做不了的操作）：
 浏览器窗口是真实可见的，人随时可以用鼠标键盘操作。我应该在对话里直接说一句人话请用户去窗口里
@@ -52,7 +57,7 @@ captcha_appeared / message_appeared / js_error / state_changed；browse_network_
 ## English (copy-paste)
 
 ```text
-I can browse the web with AI Browser. It exposes an MCP server (13 browse_* tools), auto-starts a
+I can browse the web with AI Browser. It exposes an MCP server (17 browse_* tools), auto-starts a
 real, visible browser window on my first call, and I release it with browse_quit when done. Pages come
 back as a structured semantic tree — no screenshots, no OCR.
 
@@ -61,8 +66,9 @@ Standard loop:
 2. browse_get_tree                         read the page: nodes carry role / label / value / states /
                                            actions
 3. browse_act { action, target }           act on an element; target is the node's id (its data-ai-id)
-                                           action: click / type / clear / focus / hover / scroll_to /
-                                           upload
+                                           action: click / type (append at caret) / setContent
+                                           (replace all) / clear / focus / hover / scroll_to /
+                                           upload / get_value (read-only) / drag / press / wheel
 4. browse_wait { condition }               block until: button_enabled / modal_appeared /
                                            text_contains / url_contains
 5. browse_evaluate { js }                  run a JS expression in page context (5000-char cap;
@@ -73,9 +79,15 @@ Saving tokens (browse_get_tree params):
 - { "ax": true }                AX semantic layer; links carry url
 - { "mode": "diff" }            only interactive nodes added/hidden since my last read
 
-Also: browse_scroll; browse_list_tabs / browse_new_tab / browse_close_tab / browse_set_active_tab for
-tabs; browse_subscribe for dom_change / network_response / captcha_appeared / message_appeared /
-js_error / state_changed; browse_network_body to fetch a response body (subscribe first).
+Verifying writes (success is not evidence): browse_diff snapshots a baseline, then diffs after the
+write and returns an explicit verdict of changed / unchanged.
+
+Also: browse_scroll (document scrolling; use the wheel action on canvas apps); browse_list_tabs /
+browse_new_tab / browse_close_tab / browse_set_active_tab for tabs; browse_network for captured
+requests including POST bodies (no subscription); browse_capabilities to pick a route on an
+unfamiliar page (structured data / semantic tree / pointer gestures); browse_canvas reads text
+straight from canvas draw calls (no OCR); browse_downloads for on-disk download paths;
+browse_repaint when the window shows a stale page.
 
 When I need a human (login, QR code, SMS code, slider/CAPTCHA, or anything I genuinely cannot do):
 the browser window is real and visible — the user can just use their mouse and keyboard in it. I should
@@ -91,25 +103,26 @@ Wrap up: call browse_quit when the task is finished (it closes the window and ex
 
 ## 配置 MCP 服务器
 
-复制 `mcp-config.json` 到你的客户端配置文件里（Claude Desktop `claude_desktop_config.json`、
-项目根目录 `.mcp.json`、Cursor `~/.cursor/mcp.json`、Codex 等），**把占位符换成你本机的绝对路径**：
+把下面配置复制到你的客户端配置文件里（Claude Desktop `claude_desktop_config.json`、
+项目根目录 `.mcp.json`、Cursor `~/.cursor/mcp.json`、Codex 等）。npm 包方式无需任何本地路径：
 
-```jsonc
+```json
 {
   "mcpServers": {
     "ai-browser": {
-      "command": "node",
-      // ↓ 改成你的实际路径，必须是绝对路径
-      "args": ["/ABSOLUTE/PATH/TO/ai-browser/src/main/mcp_server.js"]
+      "command": "npx",
+      "args": ["-y", "@glittering0717/ai-browser", "mcp"]
     }
   }
 }
 ```
 
-例如 `/Users/me/code/ai-browser/src/main/mcp_server.js`。
+从源码运行时改用 `"command": "node"`，args 指向
+`/你的/绝对路径/ai-browser/src/main/mcp_server.js`（必须是绝对路径）。
 
-* 路径必须是绝对路径：MCP 客户端的工作目录不一定是项目根目录。
-* 无需事先 `npm start`：MCP 服务器会探测 `9223` 端口，没人在监听就自己 spawn Electron（最多等 30 秒）。
+* 首次启动会准备 Electron 引擎（约 100 MB，仅一次）；网络慢可在客户端的环境变量里设
+  `ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/`。
+* 无需事先启动浏览器：MCP 服务器会探测 `9223` 端口，没人在监听就自己 spawn Electron（最多等 30 秒）。
 * 想常驻浏览器也可以：在项目根目录跑 `npm start`，之后所有客户端共用这一个窗口。
 * 不装 MCP 也能用：原始 WebSocket JSON-RPC 在 `ws://localhost:9223`，见 `raw-ws.mjs`。
 
@@ -125,10 +138,18 @@ Wrap up: call browse_quit when the task is finished (it closes the window and ex
 | `browse_evaluate` | `js`, `tab?` | 表达式（非语句），5000 字符上限 |
 | `browse_scroll` | `direction`, `amount`, `target`, `tab` | 滚页面或滚到某元素 |
 | `browse_wait` | `condition`, `target?`, `text?`, `timeout_ms?` | 轮询直到成立或超时 |
+| `browse_diff` | `operation` (`snapshot`/`diff`), `js?`, `snapshot?`, `rearm?`, `forget?` | 快照基线 + 比对，证明写操作真的生效 |
+| `browse_capabilities` | `include_network?`, `network_limit?` | 探明页面路线：L1 结构化数据 / L2 语义树 / L3 指针手势 |
+| `browse_network` | `operation` (`list`/`get`/`clear`/`configure`), `method?`, `url_contains?`, `status_min/max?` | 网络请求检查，含 POST body，默认免订阅 |
+| `browse_canvas` | `operation` (`list`/`read`/`configure`/`capture`), `canvas_id?` | 读 canvas 绘制调用文本；WebGL 才用 `capture` |
+| `browse_downloads` | — | 查下载项与落盘路径（下载异步，点完后轮询） |
+| `browse_repaint` | — | 窗口画面陈旧时强制合成器重绘，返回 `repaint_count` |
 | `browse_list_tabs` / `browse_new_tab` / `browse_close_tab` / `browse_set_active_tab` | `tab?`, `url?` | 标签页管理 |
-| `browse_network_body` | `url_pattern`, `tab?` | 取响应体（先 `browse_subscribe` 订阅 `network_response`） |
-| `browse_subscribe` | `events[]` | `dom_change` / `network_response` / `captcha_appeared` / `message_appeared` / `js_error` / `state_changed`，`"*"` 订阅全部 |
 | `browse_quit` | — | 关闭窗口并退出进程 |
+
+> 实时事件订阅（`dom_change` / `network_response` / `js_error` 等）只在原始 WebSocket 层
+> 提供（`ui.subscribe`），MCP stdio 不支持 server→client 通知，所以没有 `browse_subscribe`；
+> 拉取式的检查一律用 `browse_network`。
 
 ---
 

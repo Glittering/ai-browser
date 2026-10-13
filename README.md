@@ -7,15 +7,22 @@
 </p>
 
 <p align="center">
+  <img alt="CI" src="https://github.com/Glittering/ai-browser/actions/workflows/ci.yml/badge.svg">
   <img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue.svg">
   <img alt="Electron" src="https://img.shields.io/badge/built%20with-Electron%2033-9cf">
   <img alt="Platforms" src="https://img.shields.io/badge/platforms-macOS%20%E2%80%A2%20Linux-blueviolet">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-399%20unit%20%2B%20374%20e2e-2ea043">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-411%20unit%20%2B%20409%20e2e-2ea043">
   <img alt="MCP" src="https://img.shields.io/badge/spec-MCP%20(stdio)-f5b23b">
 </p>
 
+<p align="center">
+  <em>One agent, no coordinates: open Bing → type through trusted key events (live suggestions) → scroll the results → open page 2 → back to page 1 → open the project site in a new tab → keep scrolling there. Every target was found in the semantic tree by role/label.</em><br>
+  <a href="docs/marketing/demo.gif"><img src="docs/marketing/demo.gif" alt="AI Browser demo: search, paginate, and open a website — all driven by the semantic tree" width="860"></a><br>
+  Reproduce: <code>npm start</code> then <code>node examples/demo.mjs</code>
+</p>
+
 **What it is.** An Electron app that exposes its tabs over two equivalent interfaces — an MCP server
-(15 `browse_*` tools) and a raw WebSocket JSON-RPC API (`ws://localhost:9223`, methods `ui.*`). Your
+(17 `browse_*` tools) and a raw WebSocket JSON-RPC API (`ws://localhost:9223`, methods `ui.*`). Your
 agent navigates, reads a structured semantic tree (`role` / `label` / `value` / `states` / `actions`),
 and clicks or types by `data-ai-id`. There is no screenshot step and no OCR: `src/` contains no
 capture call at all.
@@ -33,14 +40,38 @@ is a conversation between the agent and the user, not a browser API.
 
 Requires **Node ≥ 18** and a desktop session (this is a GUI app).
 
+### Option A — npx (recommended for MCP users)
+
+The package is published as [`@glittering0717/ai-browser`](https://www.npmjs.com/package/@glittering0717/ai-browser); no clone needed:
+
+```bash
+npx -y @glittering0717/ai-browser --help
+```
+
+To open the visible browser window directly:
+
+```bash
+npx -y @glittering0717/ai-browser start
+```
+
+The first launch prepares the Electron engine (~100 MB, downloaded once). npm ≥ 11 blocks
+dependency install scripts by default — the launcher detects that and runs Electron's own
+downloader itself, so nothing extra is needed. If the download from GitHub releases is slow or
+blocked (common on mainland-China networks), point it at a mirror:
+
+```bash
+ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ npx -y @glittering0717/ai-browser start
+```
+
+### Option B — from source
+
 ```bash
 git clone https://github.com/Glittering/ai-browser.git
 cd ai-browser
 npm install
 ```
 
-`npm install` also downloads the Electron binary (~100 MB) from GitHub releases. If that download is
-slow, blocked, or fails outright — common from mainland China — point it at a mirror:
+If the Electron binary download is slow or fails outright, use the mirror:
 
 ```bash
 ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ npm install
@@ -79,24 +110,26 @@ project-level `.mcp.json`:
 {
   "mcpServers": {
     "ai-browser": {
-      "command": "node",
-      "args": ["/absolute/path/to/ai-browser/src/main/mcp_server.js"]
+      "command": "npx",
+      "args": ["-y", "@glittering0717/ai-browser", "mcp"]
     }
   }
 }
 ```
 
-Replace the path with **your** absolute path to `src/main/mcp_server.js`. It has to be absolute: the
-MCP client's working directory is not necessarily the project root. A ready-made copy sits in
-[`examples/mcp-config.json`](examples/mcp-config.json).
+A ready-made copy sits in [`examples/mcp-config.json`](examples/mcp-config.json). From-source users
+can instead point `command: "node"` at `/absolute/path/to/ai-browser/src/main/mcp_server.js`.
 
 **You do not need to start the browser yourself.** On the first `browse_*` call the MCP server probes
-port 9223; if nothing is listening it spawns Electron (detached, from the project root) and waits up
-to 30 seconds for the WebSocket server. If you would rather keep one long-lived window shared by
-every client, run `npm start` manually in a terminal — a second launch just focuses the existing window.
+port 9223; if nothing is listening it spawns Electron detached and waits up to 30 seconds for the
+WebSocket server (the very first call may additionally spend time preparing the engine). If you would
+rather keep one long-lived window shared by every client, run `npx -y @glittering0717/ai-browser start`
+(or `npm start` from source) in a terminal — a second launch just focuses the existing window.
 
 `examples/AGENT_INSTRUCTIONS.md` has a copy-paste prompt you can drop into a `CLAUDE.md`, Cursor Rule,
 or any system prompt; it teaches the tool loop, the token-saving params, and when to ask a human.
+Agents installing this themselves (Cline, etc.) can read the short machine-oriented
+[`llms-install.md`](llms-install.md) instead of this README.
 
 ---
 
@@ -500,10 +533,11 @@ AI_BROWSER_PORT=9224 npm start
 Keep the port consistent across every client; both the app and the MCP server read
 `AI_BROWSER_PORT` from `src/shared/config.js`.
 
-**Electron is missing or `npm start` fails immediately.** Almost always the post-install download
-never completed: check `ls node_modules/electron/dist`, then re-run `npm install` with the mirror in
-[Install](#install). Setting `AI_BROWSER_PORT` will not help here — this is a missing binary, not a
-port conflict.
+**Electron is missing or launch fails immediately.** The ~100 MB engine never landed. With the npm
+package, just launch again — the launcher downloads it itself (set `ELECTRON_MIRROR` for a slow
+network, see [Install](#install)). From source, check `ls node_modules/electron/dist` and re-run
+`npm install` with the mirror. Setting `AI_BROWSER_PORT` will not help here — this is a missing
+binary, not a port conflict.
 
 **Input is accepted but nothing happens.** Usually the window is occluded. The three
 `disable-*-backgrounding` switches above exist to prevent it, but if you still see clicks that report
@@ -522,7 +556,7 @@ AI_BROWSER_USER_DATA=~/.ai-browser-work npm start
 ## Test & dev
 
 ```bash
-npm test             # vitest — 404 tests across 27 files
+npm test             # vitest — 411 tests across 27 files
 npm run smoke        # Electron contract layer, offline fixture      — 31 checks
 npm run capabilities # text fields, canvas, page source, network, DOM editing — 54 checks
 npm run richtext     # rich-text editors, nested menus, forms, errors, tags, upload — 117 checks

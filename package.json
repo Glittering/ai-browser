@@ -1,9 +1,52 @@
 {
-  "name": "ai-browser",
+  "name": "@glittering0717/ai-browser",
   "version": "1.1.10",
-  "description": "AI-native browser — renders pixels for humans, structured API for agents. No screenshots, no OCR.",
+  "description": "AI-native browser — renders pixels for humans, structured semantic-tree API for agents. No screenshots, no OCR, no coordinate guessing.",
   "main": "src/main/index.js",
+  "bin": {
+    "ai-browser": "bin/ai-browser.cjs"
+  },
+  "files": [
+    "bin",
+    "scripts",
+    "src",
+    "examples/AGENT_INSTRUCTIONS.md",
+    "examples/mcp-config.json",
+    "llms-install.md",
+    "LICENSE"
+  ],
   "type": "module",
+  "license": "MIT",
+  "author": {
+    "name": "Glittering",
+    "url": "https://github.com/Glittering"
+  },
+  "homepage": "https://github.com/Glittering/ai-browser#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Glittering/ai-browser.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Glittering/ai-browser/issues"
+  },
+  "keywords": [
+    "ai",
+    "ai-agent",
+    "browser",
+    "mcp",
+    "model-context-protocol",
+    "agent",
+    "automation",
+    "electron",
+    "semantic",
+    "web-scraping"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "start": "node scripts/start.cjs",
     "test": "vitest run",
@@ -33,6 +76,5 @@
     "@playwright/test": "^1.45.0",
     "playwright": "^1.45.0",
     "vitest": "^2.0.0"
-  },
-  "allowScripts": {}
+  }
 }

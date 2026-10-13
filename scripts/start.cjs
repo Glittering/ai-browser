@@ -23,18 +23,38 @@ const { spawn } = require('node:child_process');
 const path = require('node:path');
 
 const root = path.resolve(__dirname, '..');
-const electron = require('electron');
 
-const env = { ...process.env };
-delete env.ELECTRON_RUN_AS_NODE;
+/**
+ * Launch the Electron app in the foreground (stdio inherited).
+ *
+ * Works both from a git checkout and from an installed npm package: it resolves
+ * the electron binary through Node's own resolution and points it at the app
+ * root explicitly instead of relying on `electron .` + cwd conventions.
+ *
+ * Returns the child process. Callers may attach their own exit handling; when
+ * run as a script the exit code is forwarded so npm/npx sees real failures.
+ */
+function launchElectron() {
+  const { resolveElectronBinary } = require('./electron_resolve.cjs');
+  const electron = resolveElectronBinary();
 
-const child = spawn(electron, ['.'], { cwd: root, stdio: 'inherit', env });
+  const env = { ...process.env };
+  delete env.ELECTRON_RUN_AS_NODE;
 
-child.on('exit', (code, signal) => {
-  // 子进程被信号杀死时 code 是 null，用 1 退出，避免 npm 认为成功。
-  process.exit(code === null && signal ? 1 : (code ?? 0));
-});
-child.on('error', (e) => {
-  console.error('[start] failed to launch Electron:', e.message);
-  process.exit(1);
-});
+  return spawn(electron, [root], { cwd: root, stdio: 'inherit', env });
+}
+
+module.exports = { launchElectron, appRoot: root };
+
+if (require.main === module) {
+  const child = launchElectron();
+
+  child.on('exit', (code, signal) => {
+    // 子进程被信号杀死时 code 是 null，用 1 退出，避免 npm 认为成功。
+    process.exit(code === null && signal ? 1 : (code ?? 0));
+  });
+  child.on('error', (e) => {
+    console.error('[start] failed to launch Electron:', e.message);
+    process.exit(1);
+  });
+}

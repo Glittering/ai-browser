@@ -1,9 +1,11 @@
 {
   "mcpServers": {
     "ai-browser": {
-      "command": "node",
+      "command": "npx",
       "args": [
-        "/ABSOLUTE/PATH/TO/ai-browser/src/main/mcp_server.js"
+        "-y",
+        "@glittering0717/ai-browser",
+        "mcp"
       ]
     }
   }
