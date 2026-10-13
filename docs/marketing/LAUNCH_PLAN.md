@@ -58,7 +58,7 @@ note-gen（8 个月 5k stars）作者的一手经验[cite:2]：
 | 仓库元信息 | description/topics/MIT/Discussions 已就绪；homepage 指回仓库 | 补独立官网或 GitHub Pages 落地页（可选，提升信任）；确认仓库 Settings 里的 social preview 图（1280×640）已上传 |
 | 平台支持 | README 徽章 macOS • Linux | Show HN 首评主动声明"Windows 未测试"，管理预期，避免评论区被 Windows 问题淹没 |
 | 初始信任 | 1 star、0 fork | 发布前定向邀请 10–20 位真实目标用户（MCP/agent 开发者）试用拿第一批真实 star 与 issue；**严禁买 star** |
-| 物料 | demo.gif（Bing 搜索→翻页→开 GitHub 全链）、SHOW_HN 稿、RELEASE v1.1.10、中文稿/知乎稿/B 站稿已备 | 再补 2 个短 GIF：① WS 原始 JSON-RPC 往返（给想看协议的工程师）② 人机共驾：agent 操作中途人接管鼠标 |
+| 物料 | demo.gif（Bing 搜索→翻页→开 GitHub 全链）、SHOW_HN 稿、RELEASE v1.2.0、中文稿/知乎稿/B 站稿已备 | 再补 2 个短 GIF：① WS 原始 JSON-RPC 往返（给想看协议的工程师）② 人机共驾：agent 操作中途人接管鼠标 |
 | 安全声明 | WS 9223 无鉴权仅监听 localhost，README 已声明 | Show HN 首评再次主动说明——主动披露是 HN 文化加分项[cite:8] |
 
 ## 四、渠道地图（按点火顺序）
@@ -85,9 +85,9 @@ note-gen（8 个月 5k stars）作者的一手经验[cite:2]：
 
 ### D-7 ~ D-1（10/13–10/19）准备周
 
-- [ ] **npm 发布**：改名 `@glittering0717/ai-browser`，补 bin/files，干净环境 npx 实测 + 三类客户端接入实测（P0，不通则整个发布顺延）
-- [ ] 打 tag 发 **GitHub Release v1.1.10**（用 RELEASE_v1.1.10.md 草稿），确认 CI 绿徽章
-- [ ] README 安装命令全部指向新包名；确认 social preview 图、About/Topics
+- [x] **npm 发布**：包名 `@glittering0717/ai-browser`，bin/files 齐备，干净环境真实 npx 实测通过（1.1.10 首版已发；首发 Release 版本为 1.2.0）
+- [ ] 打 tag 发 **GitHub Release v1.2.0**（用 RELEASE_v1.2.0.md），确认 CI 绿徽章
+- [x] README 安装命令全部指向新包名；确认 About/Topics（social preview 图仍待补）
 - [ ] 上传 **MCP 官方 Registry、mcp.so**；提 awesome-mcp-servers 两个 PR
 - [ ] 补 2 个 GIF；SHOW_HN.md 终稿（首评含：为什么做、与 Playwright MCP/chrome-devtools-mcp 的差异、Windows 未测、localhost 无鉴权声明）
 - [ ] 定向邀请 10–20 位真实用户试用（MCP 群、身边 agent 开发者），收集 issue 与第一批 star

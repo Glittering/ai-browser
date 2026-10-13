@@ -1,17 +1,9 @@
-# Release v1.1.10 — draft（待人工确认后用 `gh release create v1.1.10` 发布）
-
-> 发布前检查：
-> 1. `git tag v1.1.10`（当前 HEAD 还没有该 tag，package.json 已是 1.1.10）
-> 2. `git push origin main --tags`
-> 3. `gh release create v1.1.10 --title "v1.1.10 — verification primitives, pointer gestures, no focus stealing" --notes-file docs/marketing/RELEASE_v1.1.10.md`
-
----
-
-## AI Browser v1.1.10
+## AI Browser v1.2.0
 
 A release about three things: **proving an action actually happened**, **driving
 canvas/board UIs with real pointer gestures**, and **never interrupting the human
-sitting next to the browser**.
+sitting next to the browser**. v1.2.0 is also the first release distributed on
+npm — one command, no clone.
 
 ### Install — now on npm
 
@@ -117,7 +109,7 @@ clicks, apps revert edits, canvas UIs repaint without touching the DOM.
 17 `browse_*` tools. Since earlier versions: added `browse_diff`,
 `browse_capabilities`, `browse_repaint`, `browse_downloads`; real-time
 `subscribe`/`network_body` remain raw-WebSocket only (MCP stdio can't deliver
-server→client notifications). Every tool now carries MCP annotations
+server→client notifications). Every tool carries MCP annotations
 (`readOnlyHint` / `destructiveHint` / `openWorldHint`); `resources/list` and
 `prompts/list` answer with empty collections; guard rejections return as tool
 results (`isError: true`).

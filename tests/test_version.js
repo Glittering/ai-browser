@@ -34,7 +34,8 @@ describe('version single-source consistency', () => {
     ).toBe(true);
   });
 
-  it('adheres to the v1.1.x semver scheme', () => {
-    expect(VERSION).toMatch(/^1\.1\.\d+$/);
+  it('stays on the v1 semver line (breaking changes bump major to 2)', () => {
+    // 首个公开发布（npm / GitHub Release）是 v1.2.0；1.1.x 为发布前的开发版本号。
+    expect(VERSION).toMatch(/^1\.\d+\.\d+$/);
   });
 });
