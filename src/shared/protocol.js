@@ -80,6 +80,9 @@ export const VALID_METHODS = [
   // 还没画出第一帧"，而这只能从窗口侧观测（WS 端口比 showInitialWindow 早开），
   // 所以留一个查询口；见 e2e/nav_ws.cjs NV-A。
   'ui.window_shown',
+  // 服务端进程身份（pid + 启动时刻）。调用方据此核对"我连上的是不是我拉起的
+  // 那个实例" —— 连错实例时结果毫无意义但不会报错，是最难查的一类。
+  'ui.server_info',
   'ui.canvas_configure',
   'ui.canvas_list',
   'ui.canvas_read',

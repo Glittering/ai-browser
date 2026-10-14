@@ -33,6 +33,10 @@ function findWaitTarget(tree, target) {
   return findInTree(tree, 'label', String(target));
 }
 
+// 进程启动时刻（秒）。供 ui.server_info 报出去 —— pid 会被复用，只比 pid
+// 不够稳；pid + started_at 两个一起才足以判定"是不是同一个进程"。
+const serverStartedAt = Math.floor(Date.now() / 1000);
+
 export function startWSServer(pageManager, port = config.wsPort, onQuit = null) {
   const wss = new WebSocketServer({ port });
 
@@ -208,6 +212,25 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
           case 'ui.set_active_tab': {
             const ok = pageManager.setActive(params.tab);
             send({ jsonrpc: '2.0', id, result: { ok } });
+            break;
+          }
+          // 服务端的进程身份。存在的理由（2026-10-15 实测）：调用方**无法确认
+          // 自己连上的是不是自己拉起的那个实例**。决定性实验——在"端口忙"预检
+          // 之后让一个冒牌 WS server 抢占端口，e2e 套件照常发出 ui.new_tab /
+          // ui.evaluate / ui.get_tree 却毫不知情：测的是别人的实例，结果毫无
+          // 意义，而且不报错，只给出一堆莫名其妙的失败。
+          // 有了 pid，调用方就能核对"是不是我 spawn 的那个进程"。
+          case 'ui.server_info': {
+            send({
+              jsonrpc: '2.0', id,
+              result: {
+                pid: process.pid,
+                // 进程启动时刻（秒）。pid 可被复用，两个数字一起才够稳。
+                started_at: serverStartedAt,
+                ws_port: port,
+                platform: process.platform,
+              },
+            });
             break;
           }
           // === Subscribe/unsubscribe (with response) ===

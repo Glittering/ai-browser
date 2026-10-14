@@ -66,7 +66,8 @@
     "mcp": "node src/main/mcp_server.js",
     "modeldiff": "node e2e/modeldiff_ws.cjs",
     "nav": "node e2e/nav_ws.cjs",
-    "audit": "node e2e/audit_ws.cjs"
+    "audit": "node e2e/audit_ws.cjs",
+    "e2e:all": "node e2e/run_all.cjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

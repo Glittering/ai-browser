@@ -315,7 +315,10 @@ function showInitialWindow() {
   const wc = firstView && firstView.webContents;
   if (!wc || wc.isDestroyed()) { doShow(); return; }
   let shown = false;
-  const showOnce = () => {
+  // reason: 为什么在这个时刻显示。必须如实记录 —— 之前 waited_for_dom 恒为
+  // true（3s 兜底显示时也报 true），于是"到底等到了 dom-ready 没有"看不出来，
+  // 白屏缺陷和"我们主动选择先显示"被混成同一种结果。
+  const showOnce = (reason) => {
     if (shown) return;
     shown = true;
     // 同步先落一条记录：哪怕 renderer 还没就绪（executeJavaScript 会 reject），
@@ -326,7 +329,10 @@ function showInitialWindow() {
       tab: pageManager.activeTab,
       body_len: null,
       ready_state: null,
-      waited_for_dom: true,
+      // 'dom-ready' | 'fail-load' | 'renderer-ready' | 'timeout'
+      show_reason: reason || 'unknown',
+      // 真话：只有 3s 兜底（renderer 迟迟没到）才是 false。
+      waited_for_dom: reason !== 'timeout',
       renderer_ready: false,
     };
     pageManager.windowShownAt = rec;
@@ -361,15 +367,15 @@ function showInitialWindow() {
       });
     doShow();
   };
-  wc.once('dom-ready', showOnce);
-  wc.once('did-fail-load', showOnce);   // 失败也要显示（错误页会接手）
-  setTimeout(showOnce, 3000);
+  wc.once('dom-ready', () => showOnce('dom-ready'));
+  wc.once('did-fail-load', () => showOnce('fail-load'));   // 失败也要显示（错误页会接手）
+  setTimeout(() => showOnce('timeout'), 3000);
   // dom-ready 可能在上面注册**之前**就已经触发过（缓存命中时 baidu 首屏
   // 一到就 ready，而 showInitialWindow 是 createWindow 的最后一步）——
   // once() 收不到已经过去的事件，那就只能干等 3s 兜底。先主动查一次
   // readyState（走 CDP，见 showOnce 里的说明），已经就绪就立刻显示。
   pageManager.evaluate('(function(){return document.readyState;})()', pageManager.activeTab)
-    .then((rs) => { if (rs && rs !== 'loading') showOnce(); })
+    .then((rs) => { if (rs && rs !== 'loading') showOnce('renderer-ready'); })
     .catch(() => { /* renderer 未就绪，等事件 */ });
 }
 

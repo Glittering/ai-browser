@@ -15,6 +15,7 @@
 // Run:  npm run audit
 //       AI_BROWSER_PORT=<port> npm run audit
 
+const harness = require("./_harness.cjs");
 const http = require("node:http");
 const net = require("node:net");
 const fs = require("node:fs");
@@ -146,18 +147,19 @@ async function main() {
   const server = await startServer();
   const HOST = `http://127.0.0.1:${server.address().port}`;
 
-  try {
-    await waitForPort(WS_PORT, 600);
-    console.error("!! port " + WS_PORT + " is busy — stop the running ai-browser first," +
-      " or pick a free port with: AI_BROWSER_PORT=<port> npm run audit");
+  // 等端口真的空闲，而不是“探一次没通就当空闲”：上一个 Electron 还在退出
+  // 途中时，一次性探测就是抽签（会假性报“port busy”然后 exit 3）。
+  if (!(await harness.waitPortFree(WS_PORT, 15000))) {
+    console.error("!! port " + WS_PORT + " 一直被占用 —— 换一个 AI_BROWSER_PORT，或先杀掉占用它的进程");
     process.exit(3);
-  } catch { /* free */ }
+  }
 
   console.log("spawn electron port", WS_PORT);
   const child = await spawnElectron(WS_PORT);
 
   const b = new Browser(WS_PORT);
   await b.ready();
+  await harness.assertIdentity(b, child, "audit");
 
   const rawTree = (tab) => b.call("ui.get_tree", { tab });
   const treeOf = async (tab) => {

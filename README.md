@@ -11,7 +11,7 @@
   <img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue.svg">
   <img alt="Electron" src="https://img.shields.io/badge/built%20with-Electron%2033-9cf">
   <img alt="Platforms" src="https://img.shields.io/badge/platforms-macOS%20%E2%80%A2%20Linux-blueviolet">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-415%20unit%20%2B%20427%20e2e-2ea043">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-427%20unit%20%2B%20428%20e2e-2ea043">
   <img alt="MCP" src="https://img.shields.io/badge/spec-MCP%20(stdio)-f5b23b">
 </p>
 
@@ -565,16 +565,27 @@ npm run value        # value truncation contract + read-only get_value — 15 ch
 npm run canvas       # canvas draw-call capture — 13 checks
 npm run modeldiff    # canvas app data-model diff (the "unchanged" false green) — 12 checks
 npm run audit        # every advertised action must exist; wait/downloads/permissions/quit — 35 checks
-npm run nav          # address bar + load-failure error page (the "white screen" report) — 18 checks
+npm run nav          # address bar + load-failure error page (the "white screen" report) — 19 checks
 npm run focus        # no focus stealing + full capability while backgrounded — 32 checks
 npm run interact     # trusted drag / key press / wheel (pointer gestures) — 31 checks
 npm run view         # viewport repaint + snapshot/diff verification — 28 checks
+npm run e2e:all      # 一次跑完上面全部套件（每个独立端口）+ 可信汇总 — 428 checks
 npm run realsites    # navigate/read/act against a matrix of real sites
 ```
 
 All e2e suites boot a genuine Electron against offline fixtures and exit non-zero on failure.
 Together they cover what jsdom structurally cannot: preload integrity, `ui.evaluate` under a strict
 CSP, CDP click hit-testing, multi-tab lifecycle, event fan-out, and the `evaluate` guard rails.
+
+**Each suite proves it is talking to the browser it just started.** Before any assertion runs it
+calls `ui.server_info` and compares the returned `pid` against the child process it spawned; a
+mismatch aborts with exit 4 instead of quietly producing results about somebody else's instance.
+That gap was measured, not assumed: with an impostor WebSocket server holding the port, a suite
+happily sent `ui.new_tab` / `ui.evaluate` / `ui.get_tree` to it and never noticed. Repro:
+`REPRO_PORT=9799 node e2e/_repro_identity.cjs`.
+
+`npm run e2e:all` also gives every suite its own port, because they share `/tmp/ai-browser-e2e-<port>`
+as the profile and therefore Electron's single-instance lock too.
 
 They all need the WS port free — stop a running `npm start` first, or point them elsewhere:
 

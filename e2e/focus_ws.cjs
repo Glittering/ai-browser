@@ -27,6 +27,7 @@
 // Run:  npm run focus
 //       AI_BROWSER_PORT=<port> npm run focus
 
+const harness = require("./_harness.cjs");
 const http = require("node:http");
 const net = require("node:net");
 const path = require("node:path");
@@ -198,6 +199,7 @@ async function runGroup({ label, port, extraEnv, expectStealOnBoot, expectStealO
 
   const b = new Browser(port);
   await b.ready();
+  await harness.assertIdentity(b, child, "focus");
   const created = (await b.call("ui.new_tab", { url: HOST + "/focus" })).result;
   const tab = created && created.tab;
   await sleep(2500);
@@ -350,14 +352,12 @@ async function main() {
   }
 
   // 端口必须是空闲的（默认 9223 很可能被正在跑的 ai-browser 占着）
-  try {
-    await waitForPort(WS_PORT, 600);
-    console.error(
-      "!! port " + WS_PORT + " is busy — stop the running ai-browser first, or pick a free port:" +
-      " AI_BROWSER_PORT=<port> npm run focus"
-    );
+  // 等端口真的空闲，而不是“探一次没通就当空闲”：上一个 Electron 还在退出
+  // 途中时，一次性探测就是抽签（会假性报“port busy”然后 exit 3）。
+  if (!(await harness.waitPortFree(WS_PORT, 15000))) {
+    console.error("!! port " + WS_PORT + " 一直被占用 —— 换一个 AI_BROWSER_PORT，或先杀掉占用它的进程");
     process.exit(3);
-  } catch { /* free */ }
+  }
 
   note("观测手段：macOS lsappinfo 查当前前台应用；靶子 app 是「计算器」");
   note("测试期间会反复把「计算器」切到前台，这是测量本身需要，不是被测程序的行为");

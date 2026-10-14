@@ -11,6 +11,7 @@
 // Run:  npm run modeldiff
 //       AI_BROWSER_PORT=<port> npm run modeldiff
 
+const harness = require("./_harness.cjs");
 const http = require("node:http");
 const net = require("node:net");
 const { spawn } = require("node:child_process");
@@ -135,20 +136,19 @@ async function main() {
   const server = await startServer();
   const HOST = `http://127.0.0.1:${server.address().port}`;
 
-  try {
-    await waitForPort(WS_PORT, 600);
-    console.error(
-      "!! port " + WS_PORT + " is busy — stop the running ai-browser first," +
-      " or pick a free port with: AI_BROWSER_PORT=<port> npm run modeldiff"
-    );
+  // 等端口真的空闲，而不是“探一次没通就当空闲”：上一个 Electron 还在退出
+  // 途中时，一次性探测就是抽签（会假性报“port busy”然后 exit 3）。
+  if (!(await harness.waitPortFree(WS_PORT, 15000))) {
+    console.error("!! port " + WS_PORT + " 一直被占用 —— 换一个 AI_BROWSER_PORT，或先杀掉占用它的进程");
     process.exit(3);
-  } catch { /* free */ }
+  }
 
   console.log("spawn electron port", WS_PORT);
-  await spawnElectron(WS_PORT);
+  const child = await spawnElectron(WS_PORT);
 
   const b = new Browser(WS_PORT);
   await b.ready();
+  await harness.assertIdentity(b, child, "modeldiff");
 
   const snap = async () => (await b.call("ui.snapshot", {})).result;
   const diff = async (id) => (await b.call("ui.diff", { snapshot: id })).result;

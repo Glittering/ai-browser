@@ -22,6 +22,7 @@
 // Run:  npm run richtext
 //       AI_BROWSER_PORT=<port> npm run richtext
 
+const harness = require("./_harness.cjs");
 const http = require("node:http");
 const net = require("node:net");
 const fs = require("node:fs");
@@ -495,14 +496,12 @@ async function main() {
   const HOST = `http://127.0.0.1:${server.address().port}`;
 
   // 先占端口：有人占着就直接退出，别去打搅正在跑的实例。
-  try {
-    await waitForPort(WS_PORT, 600);
-    console.error(
-      "!! port " + WS_PORT + " is busy — stop the running ai-browser first," +
-      " or pick a free port with: AI_BROWSER_PORT=<port> npm run richtext"
-    );
+  // 等端口真的空闲，而不是“探一次没通就当空闲”：上一个 Electron 还在退出
+  // 途中时，一次性探测就是抽签（会假性报“port busy”然后 exit 3）。
+  if (!(await harness.waitPortFree(WS_PORT, 15000))) {
+    console.error("!! port " + WS_PORT + " 一直被占用 —— 换一个 AI_BROWSER_PORT，或先杀掉占用它的进程");
     process.exit(3);
-  } catch { /* free */ }
+  }
 
   // 上传用的真实本地文件（1x1 PNG），提前写盘。
   const tmpFile = path.join(os.tmpdir(), `ai-browser-richtext-${process.pid}.png`);
@@ -537,6 +536,7 @@ guard.track(child);
 
   const b = new Browser(WS_PORT);
   await b.ready();
+  await harness.assertIdentity(b, child, "richtext");
 
   // ---- 通用读写助手 -------------------------------------------------------
   const rawTree = (tab) => b.call("ui.get_tree", { tab });

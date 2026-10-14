@@ -29,6 +29,7 @@
 //
 // 断言政策与其它套件一致：不信 success，回读真实 DOM / 真实截图。
 
+const harness = require("./_harness.cjs");
 const http = require("node:http");
 const net = require("node:net");
 const path = require("node:path");
@@ -157,18 +158,19 @@ async function main() {
   const server = await startServer();
   const HOST = `http://127.0.0.1:${server.address().port}`;
 
-  try {
-    await waitForPort(WS_PORT, 600);
-    console.error("!! port " + WS_PORT + " is busy — stop the running ai-browser first," +
-      " or pick a free port with: AI_BROWSER_PORT=<port> npm run nav");
+  // 等端口真的空闲，而不是“探一次没通就当空闲”：上一个 Electron 还在退出
+  // 途中时，一次性探测就是抽签（会假性报“port busy”然后 exit 3）。
+  if (!(await harness.waitPortFree(WS_PORT, 15000))) {
+    console.error("!! port " + WS_PORT + " 一直被占用 —— 换一个 AI_BROWSER_PORT，或先杀掉占用它的进程");
     process.exit(3);
-  } catch { /* free */ }
+  }
 
   console.log("spawn electron port", WS_PORT);
   const child = await spawnElectron(WS_PORT);
 
   const b = new Browser(WS_PORT);
   await b.ready();
+  await harness.assertIdentity(b, child, "nav");
   // 窗口首次显示的时刻与当时页面状态（ui.window_shown）。
   // 这是唯一能观测"窗口显示时页面是否已有内容"的口子 —— WS 端口在
   // createWindow 中途就开了，比 showInitialWindow 早，从 agent 侧轮询
@@ -203,9 +205,30 @@ async function main() {
       shownDom = await readDom(b, tab);
       if (shownDom && typeof shownDom.body === "number" && shownDom.body > 1000) break;
     }
-    check("NV-A3 窗口显示后极短时间内页面已有内容（不是白屏）",
-      !!(shownDom && shownDom.body > 1000),
-      `显示记录=${JSON.stringify(shown)} 之后 1.5s 内 body=${shownDom && shownDom.body}`);
+    // 判据必须分清两条路径，否则会把"我们主动降级"当成"产品缺陷"：
+    //
+    //   waited_for_dom=true  —— 窗口确实等到了 dom-ready / 渲染器就绪才显示。
+    //     这条路径上"1.5s 内有内容"是**承诺**，不满足就是白屏缺陷，必须红。
+    //   waited_for_dom=false —— 3s 兜底触发：dom-ready 迟迟没到（机器负载高 /
+    //     网络慢），我们选择"先让人看到窗口"而不是继续白等。此时页面本来就没
+    //     加载完，再断言"1.5s 内有内容"测的是网速，不是这个修复 —— 会假红。
+    //     判据降级到 NV-A4（最终会加载出内容），并明确打印出来，不静默放过。
+    //
+    // （`waited_for_dom` 曾经恒为 true，两种路径混成一种，这个区分根本做不出来。）
+    const waitedForDom = !!(shown && shown.waited_for_dom !== false);
+    if (waitedForDom) {
+      check("NV-A3 窗口显示后极短时间内页面已有内容（不是白屏）",
+        !!(shownDom && shownDom.body > 1000),
+        `显示记录=${JSON.stringify(shown)} 之后 1.5s 内 body=${shownDom && shownDom.body}`);
+    } else {
+      note(`NV-A3 本次显示走了 3s 兜底（show_reason=${shown && shown.show_reason}），`
+        + `dom-ready 未在窗口内到达 —— 判据降级到 NV-A4，不做"1.5s 内有内容"的断言。`
+        + ` 1.5s 内 body=${shownDom && shownDom.body}`);
+    }
+    check("NV-A3b 显示原因如实记录（waited_for_dom 不是恒 true 的摆设）",
+      !!shown && typeof shown.show_reason === "string" && typeof shown.waited_for_dom === "boolean"
+      && (shown.waited_for_dom === (shown.show_reason !== "timeout")),
+      JSON.stringify(shown && { r: shown.show_reason, w: shown.waited_for_dom }));
     note("window_shown：" + JSON.stringify(shown));
     // 再等一会儿确认内容完整（与上面"显示时刻"是两个判据：一个管时序，一个管内容）
     let startDom = null;
