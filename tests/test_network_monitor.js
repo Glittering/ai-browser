@@ -320,6 +320,92 @@ describe('保留 / 淘汰 / 错误码', () => {
     expect(m.stats().dropped_records).toBe(0); // clear 不算 dropped
   });
 
+  // 复现路径（2026-10-14，e2e/network_ws.cjs N-04/N-05/N-12 间歇红）：
+  // 默认页 baidu.com 在后台持续累积响应体，把 agent 正在操作的那个 tab 上的
+  // 请求体/小响应体挤成 evicted。请求确实发生了、body 也确实拿到过，只是被
+  // 后台噪声顶掉 —— agent 读到的是 evicted 而不是内容。
+  const BG = 1;   // 后台：默认的启动页
+  const FG = 2;   // 活跃：agent 正在操作的 tab
+
+  function fireOn(m, tab, url, method, postData, requestId = 'q' + Math.random()) {
+    m.onRequestWillBeSent(tab, {
+      requestId, type: 'Fetch',
+      request: { url, method, headers: { 'content-type': 'application/json' }, postData },
+      timestamp: 1000, wallTime: 1700000000,
+    });
+    return requestId;
+  }
+  async function finishOn(m, tab, requestId, mimeType = 'application/json') {
+    m.onResponseReceived(tab, { requestId, type: 'Fetch', response: { url: 'u', status: 200, mimeType, headers: {} } });
+    m.onLoadingFinished(tab, { requestId, timestamp: 1000.5, encodedDataLength: 128 });
+    await new Promise((r) => setImmediate(r));
+  }
+
+  // 造出"活跃 tab 有两个小 body + 后台 tab 塞进一条 80KB body（超过 64KB 配额）"
+  async function bgFloodsActive(useActiveTab) {
+    const m = mkMonitor({ maxBodyBytes: 65536, maxRecords: 1000 });
+    m.setBodyFetcher(BG, async () => ({ data: 'Z'.repeat(40000) }));   // 40k cp = 80KB
+    m.setBodyFetcher(FG, async () => ({ data: 'GET-PAYLOAD-OK' }));    // 14 cp = 28B
+    if (useActiveTab) m.setActiveTab(FG);
+
+    const get = fireOn(m, FG, 'http://fg.test/api/get', 'GET');
+    await finishOn(m, FG, get, 'text/plain');
+    const post = fireOn(m, FG, 'http://fg.test/api/post-json', 'POST', '{"title":"X","items":[1]}');
+    await finishOn(m, FG, post);
+
+    const huge = fireOn(m, BG, 'http://bg.test/huge', 'GET');
+    await finishOn(m, BG, huge);
+
+    const rows = m.list({}).requests;
+    return {
+      getResp: rows.find((r) => r.network_id === `${FG}:${get}:0`).response_body_state,
+      postReq: rows.find((r) => r.network_id === `${FG}:${post}:0`).request_body_state,
+    };
+  }
+
+  it('NM-22 后台 tab 的大 body 不会顶掉活跃 tab 的 body', async () => {
+    const st = await bgFloodsActive(true);
+    expect(st.getResp).toBe('captured');
+    expect(st.postReq).toBe('captured');
+  });
+
+  it('NM-22c 阳性对照：不告知活跃 tab（activeTabId=null）时同一场景确实会顶掉', async () => {
+    // 没有这条，NM-22 就算观测口失效也会永远绿。
+    const st = await bgFloodsActive(false);
+    expect(st.getResp).toBe('evicted');
+    expect(st.postReq).toBe('evicted');
+  });
+
+  it('NM-23 活跃 tab 自己超限仍然淘汰（保护不是免死金牌）', async () => {
+    const m = mkMonitor({ maxBodyBytes: 2000 });
+    m.setActiveTab(FG);
+    m.setBodyFetcher(FG, async () => ({ data: 'C'.repeat(500) }));  // 1000 字节/条
+    const first = fireOn(m, FG, 'http://fg.test/first', 'GET');
+    await finishOn(m, FG, first, 'text/plain');
+    for (let i = 0; i < 6; i++) {
+      const id = fireOn(m, FG, 'http://fg.test/' + i, 'GET');
+      await finishOn(m, FG, id, 'text/plain');
+    }
+    const rec = m.list({ tab: FG }).requests.find((r) => r.network_id === `${FG}:${first}:0`);
+    expect(rec).toBeTruthy();                      // metadata 保留
+    expect(rec.response_body_state).toBe('evicted');
+  });
+
+  it('NM-24 记录数淘汰同样优先牺牲后台 tab', async () => {
+    const m = mkMonitor({ maxRecords: 20 });
+    m.setActiveTab(FG);
+    const fgId = fireOn(m, FG, 'http://fg.test/keep', 'GET');   // 活跃 tab 的第一条，全局最旧
+    await finishOn(m, FG, fgId);
+    for (let i = 0; i < 30; i++) {
+      const id = fireOn(m, BG, 'http://bg.test/' + i, 'GET');
+      await finishOn(m, BG, id);
+    }
+    expect(m.stats().dropped_records).toBeGreaterThan(0);
+    const rows = m.list({}).requests;
+    expect(rows.find((r) => r.network_id === `${FG}:${fgId}:0`)).toBeTruthy();
+    expect(rows.every((r) => r.tab_id === BG || r.network_id === `${FG}:${fgId}:0`)).toBe(true);
+  });
+
   it('NM-21 clear 只影响指定 tab', async () => {
     const m = mkMonitor();
     const a = fireGet(m, 'http://x.test/a', 'ta');

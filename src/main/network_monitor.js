@@ -165,9 +165,21 @@ export class NetworkMonitor {
     this.captureEnabled = opts.captureEnabled !== undefined ? opts.captureEnabled : envFlag('AI_BROWSER_NETWORK_CAPTURE', true);
     this.sensitiveAllowed = opts.sensitiveAllowed !== undefined ? opts.sensitiveAllowed : envFlag('AI_BROWSER_NETWORK_SENSITIVE', false);
     this.globalCaptureBodies = 'api';
+    // 当前活跃 tab（由 page_manager 在 setActive / closeTab 时同步进来）。
+    // 只被 body 淘汰顺序用：null 表示不知道/没有活跃 tab，此时退回纯按新旧。
+    // 注意它可以是 null，所以下面 _enforceBodyLimit 里判等不能假设非空。
+    this.activeTabId = null;
   }
 
   // ==== 配置 ============================================================
+
+  /**
+   * 告知活跃 tab。page_manager 是唯一调用方（setActive / closeTab 换活跃页时）。
+   * 传 null = 没有活跃 tab（最后一个 tab 关掉了）。
+   */
+  setActiveTab(tabId) {
+    this.activeTabId = tabId == null ? null : tabId;
+  }
 
   setBodyFetcher(tabId, fn) { this._fetchers.set(tabId, fn); }
   clearBodyFetcher(tabId) { this._fetchers.delete(tabId); }
@@ -204,14 +216,34 @@ export class NetworkMonitor {
 
   _enforceRecordLimit(protectId) {
     while (this._records.size > this.limits.maxRecords) {
-      let victim = null;
-      for (const id of this._order) {
-        if (id === protectId) continue;
-        victim = id; break;
-      }
+      const victim = this._evictionVictim(protectId);
       if (!victim) break;
       this._dropRecord(victim);
     }
+  }
+
+  // 淘汰候选：**非活跃 tab 的最旧一条**优先；一条都没有（全是活跃 tab 的，或
+  // 根本不知道活跃 tab）才退到全局最旧。
+  //
+  // 为什么两处淘汰都要挑 tab：全局上限（记录数 / body 字节）是跨 tab 共享的，
+  // 而后台 tab 会持续累积。实测默认页 baidu.com 挂久了之后，agent 正在操作的
+  // 那个 tab 的 POST 请求体被挤成 evicted（e2e/network_ws.cjs N-04/N-05 红）——
+  // 请求确实发生了、body 也确实拿到过，只是被后台噪声顶掉，agent 读到的是
+  // evicted 而不是内容。让活跃 tab 有优先保留权，后台 tab 超限时先牺牲自己。
+  //
+  // activeTabId 为 null（无活跃 tab / 单测未接线）时，`tab_id !== null` 恒真，
+  // 直接返回全局最旧 —— 与改动前完全一致。
+  _evictionVictim(protectId) {
+    const active = this.activeTabId;
+    let fallback = null;
+    for (const id of this._order) {
+      if (id === protectId) continue;
+      const rec = this._records.get(id);
+      if (!rec) continue;
+      if (fallback === null) fallback = id;
+      if (rec.tab_id !== active) return id;
+    }
+    return fallback;
   }
 
   _dropRecord(networkId) {
@@ -225,25 +257,35 @@ export class NetworkMonitor {
     this._droppedRecords += 1;
   }
 
-  // body 超限：优先淘汰最旧的 response body，其次 request body；metadata 保留。
+  // body 超限淘汰：先 response body 后 request body（同一次超限里），同一种 body
+  // 内部按 _order 由旧到新。**并且先淘汰非活跃 tab 的**（见 _evictionVictim 的
+  // 注释：全局 32MB 配额跨 tab 共享，后台 tab 会把活跃 tab 的 body 顶成 evicted）。
+  // metadata 不淘汰，只丢 body 内容，记录仍然查得到。
+  //
+  // 单 tab 场景下行为不变（活跃 tab 就是唯一的 tab，排序等价于纯按新旧）。
   _enforceBodyLimit(protectId) {
     if (this._bodyBytes <= this.limits.maxBodyBytes) return;
-    for (const pass of ['response', 'request']) {
-      for (const id of this._order) {
-        if (this._bodyBytes <= this.limits.maxBodyBytes) return;
-        if (id === protectId) continue;
-        const rec = this._records.get(id);
-        if (!rec) continue;
-        if (pass === 'response' && rec._respBody) {
-          this._bodyBytes -= rec._respBodyBytes || 0;
-          rec._respBody = null; rec._respBodyBytes = 0;
-          rec.response_body_state = 'evicted';
-          rec._respEvicted = true;
-        } else if (pass === 'request' && rec._reqBody) {
-          this._bodyBytes -= rec._reqBodyBytes || 0;
-          rec._reqBody = null; rec._reqBodyBytes = 0;
-          rec.request_body_state = 'evicted';
-          rec._reqEvicted = true;
+    const active = this.activeTabId;
+    // 两轮：先把非活跃 tab 的 body 淘汰掉，仍然超限才动活跃 tab 自己的。
+    for (const phase of ['background', 'active']) {
+      for (const pass of ['response', 'request']) {
+        for (const id of this._order) {
+          if (this._bodyBytes <= this.limits.maxBodyBytes) return;
+          if (id === protectId) continue;
+          const rec = this._records.get(id);
+          if (!rec) continue;
+          if (phase === 'background' ? rec.tab_id === active : rec.tab_id !== active) continue;
+          if (pass === 'response' && rec._respBody) {
+            this._bodyBytes -= rec._respBodyBytes || 0;
+            rec._respBody = null; rec._respBodyBytes = 0;
+            rec.response_body_state = 'evicted';
+            rec._respEvicted = true;
+          } else if (pass === 'request' && rec._reqBody) {
+            this._bodyBytes -= rec._reqBodyBytes || 0;
+            rec._reqBody = null; rec._reqBodyBytes = 0;
+            rec.request_body_state = 'evicted';
+            rec._reqEvicted = true;
+          }
         }
       }
     }
@@ -283,7 +325,19 @@ export class NetworkMonitor {
       rec.response_body_state = overCap ? 'partial' : 'captured';
     }
     this._bodyBytes += bytes;
-    this._enforceBodyLimit(rec.network_id);
+    // "刚存进来的这条不在本轮淘汰里"是给活跃 tab 的特权，不是普适规则。
+    //
+    // 后台 tab 的 body 没有这个权利：否则一条 40KB 的后台响应体会先把活跃
+    // tab 里的小 body 全部挤掉（实测 baidu 默认页的一条响应把活跃 tab 上
+    // "GET-PAYLOAD-OK" 这 28 字节的响应顶成 evicted —— e2e/network_ws.cjs
+    // N-12 间歇红）。让它自己先被牺牲，活跃 tab 的 body 就不受影响：后台的
+    // body 反正没人看，而"活跃 tab 里明明还在配额内的小 body 消失了"是硬伤。
+    //
+    // activeTabId == null（没接线 / 单 tab）时一律按活跃处理 —— 保持改动前的
+    // 行为，不让新增逻辑在没有 tab 语义的场景里改变语义。
+    const active = this.activeTabId;
+    const isActive = active == null || rec.tab_id === active;
+    this._enforceBodyLimit(isActive ? rec.network_id : null);
     return body;
   }
 
@@ -522,6 +576,10 @@ export class NetworkMonitor {
       max_records: this.limits.maxRecords,
       body_bytes: this._bodyBytes,
       max_body_bytes: this.limits.maxBodyBytes,
+      // 淘汰优先级看这个：非活跃 tab 的 body / 记录先被牺牲。null = 不知道活跃
+      // tab（此时按纯新旧淘汰）。暴露出来是因为"我的 body 怎么被 evicted 了"
+      // 这类问题只能靠它定位 —— 曾经它就是个黑盒。
+      active_tab: this.activeTabId,
     };
   }
 
@@ -531,6 +589,11 @@ export class NetworkMonitor {
       enabled: !!cfg.enabled,
       capture_bodies: cfg.capture_bodies,
       since: this._startedAt,
+      // 当前全局占用与淘汰优先级。body 被 evicted 时，先看这里就能分清是
+      // "自己这个 tab 太多了"还是"后台 tab 把自己顶了"。
+      body_bytes: this._bodyBytes,
+      max_body_bytes: this.limits.maxBodyBytes,
+      active_tab: this.activeTabId,
       limits: {
         max_records: this.limits.maxRecords,
         max_body_bytes: this.limits.maxBodyBytes,
