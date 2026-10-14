@@ -2,112 +2,172 @@
 <html>
 <head>
 <meta charset="utf-8">
+<title>AI Browser</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
   body {
-    height: 36px;
     background: #1a1a1a;
     display: flex;
-    align-items: center;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    flex-direction: column;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif;
     font-size: 12px;
     color: #ccc;
     user-select: none;
     -webkit-app-region: drag;
   }
-  #tabs {
-    display: flex;
-    flex: 1;
-    overflow: hidden;
-    -webkit-app-region: no-drag;
-  }
+  /* ---- 第一行：tab 条 ---- */
+  #tabs-row { display: flex; align-items: stretch; height: 36px; flex: none; }
+  #tabs { display: flex; flex: 1; overflow: hidden; }
   .tab {
-    display: flex;
-    align-items: center;
-    max-width: 200px;
-    min-width: 80px;
-    padding: 0 12px;
-    height: 36px;
-    cursor: pointer;
-    border-right: 1px solid #2a2a2a;
+    display: flex; align-items: center;
+    max-width: 200px; min-width: 80px; padding: 0 12px; height: 36px;
+    cursor: pointer; border-right: 1px solid #2a2a2a;
     transition: background 0.15s;
+    -webkit-app-region: no-drag;
   }
   .tab:hover { background: #2a2a2a; }
   .tab.active { background: #2d2d30; color: #fff; border-bottom: 2px solid #007acc; }
   .tab-title {
-    flex: 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     margin-right: 8px;
   }
   .tab-close {
-    width: 16px;
-    height: 16px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border-radius: 3px;
-    font-size: 14px;
-    color: #666;
-    cursor: pointer;
+    width: 16px; height: 16px; display: flex; align-items: center;
+    justify-content: center; border-radius: 3px; font-size: 14px; color: #666;
+    cursor: pointer; flex: none;
   }
   .tab-close:hover { background: #3a3a3a; color: #fff; }
   #new-tab {
-    width: 36px;
-    height: 36px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 20px;
-    cursor: pointer;
-    color: #888;
-    -webkit-app-region: no-drag;
+    width: 36px; height: 36px; display: flex; align-items: center;
+    justify-content: center; font-size: 20px; cursor: pointer; color: #888;
+    -webkit-app-region: no-drag; flex: none;
   }
   #new-tab:hover { background: #2a2a2a; color: #fff; }
-  .tab-id { color: #555; font-size: 10px; margin-right: 4px; }
+  .tab-id { color: #555; font-size: 10px; margin-right: 4px; flex: none; }
+
+  /* ---- 第二行：工具栏（地址栏 + 导航按钮）---- */
+  #toolbar {
+    display: flex; align-items: center; gap: 6px;
+    height: 38px; padding: 0 8px; flex: none;
+    background: #202021; border-bottom: 1px solid #333;
+  }
+  .nav-btn {
+    width: 30px; height: 26px; display: flex; align-items: center;
+    justify-content: center; border: none; border-radius: 4px;
+    background: transparent; color: #bbb; font-size: 14px; cursor: pointer;
+    -webkit-app-region: no-drag; flex: none; padding: 0;
+    font-family: inherit;
+  }
+  .nav-btn:hover:not(:disabled) { background: #3a3a3a; color: #fff; }
+  .nav-btn:disabled { color: #4a4a4a; cursor: default; }
+  #addr {
+    flex: 1; min-width: 0; height: 26px;
+    background: #3c3c3c; border: 1px solid #3c3c3c; border-radius: 4px;
+    color: #e8e8e8; padding: 0 10px; font-size: 12px; font-family: inherit;
+    -webkit-app-region: no-drag;
+  }
+  #addr:focus { outline: none; border-color: #007acc; background: #2d2d2d; }
+  #status {
+    font-size: 11px; color: #777; flex: none; max-width: 260px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  #status.busy { color: #e0a33e; }
 </style>
 </head>
 <body>
-<div id="tabs"></div>
-<div id="new-tab">+</div>
+<div id="tabs-row">
+  <div id="tabs"></div>
+  <div id="new-tab" title="新建标签页">+</div>
+</div>
+
+<div id="toolbar">
+  <button class="nav-btn" id="back"    title="后退" disabled>&#8592;</button>
+  <button class="nav-btn" id="forward" title="前进" disabled>&#8594;</button>
+  <button class="nav-btn" id="reload"  title="刷新">&#8635;</button>
+  <button class="nav-btn" id="stop"    title="停止加载" disabled>&times;</button>
+  <input id="addr" type="text" placeholder="输入网址，回车打开" spellcheck="false" autocomplete="off">
+  <span id="status"></span>
+</div>
+
 <script>
 const { ipcRenderer } = require('electron');
+
+const $ = (id) => document.getElementById(id);
+const tabsEl = $('tabs'), addrEl = $('addr'), statusEl = $('status');
+const backBtn = $('back'), fwdBtn = $('forward'), reloadBtn = $('reload'), stopBtn = $('stop');
+
+// ---- tab 条（原有逻辑，保持可用）----
+// 主进程通过 window.__onNavState 推送地址栏状态（push 模式）。
+// 也暴露 window.__applyNavState 供本地自取（nav:state invoke 的回落）。
+window.__onNavState = function (s) { applyNavState(s); };
+function applyNavState(s) {
+  activeTab = s.tab;
+  // 地址栏只在不是用户正在输入时才更新，否则会打断打字
+  if (document.activeElement !== addrEl) addrEl.value = s.url || '';
+  backBtn.disabled = !s.canBack;
+  fwdBtn.disabled = !s.canForward;
+  reloadBtn.style.display = s.loading ? 'none' : '';
+  stopBtn.style.display = s.loading ? '' : 'none';
+  stopBtn.disabled = !s.loading;
+  statusEl.textContent = s.status || '';
+  statusEl.className = s.loading ? 'busy' : '';
+  addrEl.style.borderColor = s.loading ? '#e0a33e' : '';
+}
 
 async function renderTabs() {
   try {
     const tabs = await ipcRenderer.invoke('tab:list');
-    const container = document.getElementById('tabs');
-    container.innerHTML = '';
+    tabsEl.innerHTML = '';
     for (const tab of tabs) {
       const el = document.createElement('div');
       el.className = 'tab' + (tab.active ? ' active' : '');
       const title = (tab.title || tab.url || 'New Tab').slice(0, 30);
       el.innerHTML = '<span class="tab-id">[' + tab.id + ']</span>' +
-        '<span class="tab-title">' + title + '</span>' +
+        '<span class="tab-title">' + escapeHtml(title) + '</span>' +
         '<span class="tab-close" data-id="' + tab.id + '">&times;</span>';
-      el.addEventListener('click', function(e) {
+      el.addEventListener('click', function (e) {
         if (e.target.classList.contains('tab-close')) {
           ipcRenderer.send('tab:close', parseInt(e.target.dataset.id));
         } else {
           ipcRenderer.send('tab:activate', tab.id);
         }
       });
-      container.appendChild(el);
+      tabsEl.appendChild(el);
     }
-  } catch(e) {
-    // ipcRenderer not ready yet
-  }
+  } catch (e) { /* ipcRenderer 尚未就绪 */ }
+}
+function escapeHtml(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-// expose for main process to call
-window.renderTabs = renderTabs;
+// ---- 地址栏 + 导航按钮 ----
+// 所有交互都走 ipc 到主进程，由主进程操作对应 tab 的 webContents。
+// 这里不直接碰页面：地址栏必须能反映**真实**状态（包括 agent 造成的导航），
+// 所以显示数据全部由主进程推送，本地不缓存。
+let activeTab = null;
 
-document.getElementById('new-tab').addEventListener('click', function() {
-  ipcRenderer.send('tab:new');
+ipcRenderer.on('nav:state', (_e, s) => applyNavState(s));
+
+backBtn.addEventListener('click', () => ipcRenderer.send('nav:back'));
+fwdBtn.addEventListener('click', () => ipcRenderer.send('nav:forward'));
+reloadBtn.addEventListener('click', () => ipcRenderer.send('nav:reload'));
+stopBtn.addEventListener('click', () => ipcRenderer.send('nav:stop'));
+
+addrEl.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  const v = addrEl.value.trim();
+  if (!v) return;
+  addrEl.blur();
+  ipcRenderer.send('nav:go', v);
 });
+// 聚焦时全选，方便直接输入覆盖（浏览器惯例）
+addrEl.addEventListener('focus', () => addrEl.select());
 
-// Initial render + periodic refresh
+$('new-tab').addEventListener('click', () => ipcRenderer.send('tab:new'));
+
+// 初始拉一次状态，然后 tab 条照旧定时刷新
+ipcRenderer.invoke('nav:state').then((s) => { if (s) applyNavState(s); });
 renderTabs();
 setInterval(renderTabs, 1500);
 </script>

@@ -76,6 +76,10 @@ export const VALID_METHODS = [
   'ui.close_tab',
   'ui.list_tabs',
   'ui.set_active_tab',
+  // 窗口首次显示的时刻与当时页面状态。白屏类缺陷的根因是"窗口显示了但渲染器
+  // 还没画出第一帧"，而这只能从窗口侧观测（WS 端口比 showInitialWindow 早开），
+  // 所以留一个查询口；见 e2e/nav_ws.cjs NV-A。
+  'ui.window_shown',
   'ui.canvas_configure',
   'ui.canvas_list',
   'ui.canvas_read',

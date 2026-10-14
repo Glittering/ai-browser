@@ -196,6 +196,15 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
             send({ jsonrpc: '2.0', id, result: { tabs } });
             break;
           }
+          // 窗口首次显示的时刻与当时页面状态。
+          // 存在的理由：白屏类缺陷的根因是"窗口显示了但渲染器还没画出第一帧"，
+          // 而这只能从窗口侧观测 —— WS 端口在 createWindow 中途就开了，比
+          // showInitialWindow 早，从 agent 侧轮询永远测不到那个时序。
+          // 一次性记录：窗口只首次显示一次，之后一直是它。
+          case 'ui.window_shown': {
+            send({ jsonrpc: '2.0', id, result: { shown: pageManager.windowShownAt || null } });
+            break;
+          }
           case 'ui.set_active_tab': {
             const ok = pageManager.setActive(params.tab);
             send({ jsonrpc: '2.0', id, result: { ok } });

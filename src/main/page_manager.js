@@ -2,6 +2,8 @@
 // One Electron process, one WS server, multiple tabs.
 // Agent routes via tab ID. Tab 0 is default.
 import { ipcMain, BrowserView } from 'electron';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { config } from '../shared/config.js';
 import axExtractor from './axExtractor.js';
 import { NetworkMonitor, MAX_POST_DATA_SIZE } from './network_monitor.js';
@@ -14,6 +16,9 @@ import { probeCapabilities } from './capability_probe.js';
 import valueContract from '../shared/value_contract.cjs';
 
 const { expandValueFetchTree } = valueContract;
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // canvas 绘制调用记录：默认开。关闭开关 AI_BROWSER_CANVAS_HOOK=0。
 const CANVAS_BRIDGE_KEY = '__aiCanvasBridge';
@@ -103,6 +108,11 @@ class PageManager {
     this.tabs = new Map();       // tabId -> BrowserView
     this.activeTab = null;
     this.tabCounter = 0;
+    // 窗口首次显示时的那一刻状态（tab / body_len / ready_state）。
+    // 白屏类缺陷的根因是"窗口显示了但渲染器还没画出第一帧"，而这只能从窗口侧
+    // 观测 —— WS 端口在 createWindow 中途就开了，比 showInitialWindow 早。
+    // 由 index.js 的 showInitialWindow 填写，ui.window_shown 读取。
+    this.windowShownAt = null;
     this.subscriptions = new Map();
     this._pendingRequests = new Map();
     this._requestId = 0;
@@ -259,7 +269,12 @@ class PageManager {
 
   _layoutAllViews(bounds) {
     for (const [id, view] of this.tabs) {
-      view.setBounds({ x: 0, y: 36, width: bounds.width, height: bounds.height - 36 });
+      view.setBounds({
+        x: 0,
+        y: config.tabBarHeight,
+        width: bounds.width,
+        height: bounds.height - config.tabBarHeight,
+      });
     }
   }
 
@@ -444,13 +459,34 @@ class PageManager {
     // loadURL resolves at did-finish-load, which is exactly when the old
     // pixels may still be on screen — repaint here as well as from the event
     // hooks, so a programmatic navigate never depends on hook timing.
+    //
+    // 失败时的返回值要说清楚**发生了什么**，而不是笼统的 ok:false。因为
+    // did-fail-load 现在会把页面换成我们自己的错误页（见
+    // _attachLoadFailureHooks），那次 loadURL(error_page) 会以 ERR_ABORTED
+    // 打断当前这次 loadURL 的 Promise —— 如果不区分，agent 收到的就是
+    // {ok:false, error:"ERR_ABORTED (-3) loading 'file://.../error_page.html'"}，
+    // 它会以为自己的导航请求坏了，而实际上错误页已经接管、信息全在那儿。
     try {
       await withDeadline(view.webContents.loadURL(url), 30000, 'navigate');
     } catch (e) {
+      const msg = String((e && e.message) || e);
+      // 错误页已接管：这不是调用方的错，是目标站点不可达。
+      // 两个判据（都不可省）：_failureGuard 里还有这个 tab（错误页刚加载、
+      // did-finish-load 还没来清标记），或者当前 URL 已经是我们的错误页。
+      const onErrorPage = String(view.webContents.getURL() || '').indexOf('error_page.html') >= 0;
+      if ((this._failureGuard && this._failureGuard.has(tid)) || onErrorPage) {
+        return {
+          ok: false,
+          error: msg,
+          error_page: true,
+          hint: '目标站点加载失败，已显示错误页（可重试 / 改网址）。'
+            + ' 失败详情在页面里，用 ui.get_tree 或 ui.evaluate 读取。',
+        };
+      }
       if (e && e.__deadline) {
         return { ok: false, error: `${e.message} — the page never finished loading; it may still be loading in the background` };
       }
-      return { ok: false, error: String((e && e.message) || e).slice(0, 300) };
+      return { ok: false, error: msg.slice(0, 300) };
     }
     this.repaint(tid);
     return { ok: true };
@@ -1952,7 +1988,75 @@ class PageManager {
       // repaint — which was one of the paths that showed a stale view.
       this._attachRepaintHooks(tabId, view);
     }
+
+    this._attachLoadFailureHooks(tabId, view);
     return tabId;
+  }
+
+  /**
+   * 导航失败 → 显示我们自己的错误页，而不是 Chromium 的 chrome-error:// 空白页。
+   *
+   * 为什么必须有：实测（2026-10-14）断网后 ui.navigate 到一个不存在的站点，
+   * 页面停在 chrome-error://chromewebdata/，document.body 长度 0、
+   * 截图 15KB（正常渲染 220KB），**白屏 8 秒不恢复、页面上零个字的提示**。
+   * 这正是用户报的"打开 ai-browser 白屏"：不是启动 bug，是连接失败后
+   * 浏览器给了一个空白文档，而我们对这个事件零监听。
+   *
+   * 不替换成错误页的话，人（产品承诺人可以随时手动介入）看到一块白，
+   * agent（ui.get_tree）也读不到任何东西 —— 两头都瞎。
+   *
+   * 只处理 isMainFrame 的失败：子资源（图片/字体/JS）加载失败太常见，
+   * 不该把整个页面换成错误页。aborted 是页面自己取消的请求（通常是正常的
+   * 跳转竞态），也不算失败。
+   */
+  _attachLoadFailureHooks(tabId, view) {
+    if (!view || !view.webContents || view.webContents.isDestroyed()) return;
+    if (!this._failureHooked) this._failureHooked = new WeakSet();
+    if (this._failureHooked.has(view.webContents)) return;
+    this._failureHooked.add(view.webContents);
+
+    view.webContents.on('did-fail-load', (_e, errorCode, errorDescription, validatedURL, isMainFrame) => {
+      if (!isMainFrame) return;
+      // -3 = ERR_ABORTED：页面自己取消的请求，通常是导航竞态，不是真的失败。
+      if (errorCode === -3) return;
+      // 防重入：错误页自己加载失败时不要无限套娃。
+      // 用普通 Set 而不是 WeakSet —— tabId 是整数，WeakSet.add(整数) 会抛
+      // "Invalid value used in weak set"，而那行异常会从 Electron 的事件回调里
+      // 冒出去，把 loadURL 的 Promise 一起挂死（实测：navigate 到不通的端口，
+      // WS 请求 10s 不返回、页面停在 chrome-error:// 白屏）。
+      if (!this._failureGuard) this._failureGuard = new Set();
+      if (this._failureGuard.has(tabId)) return;
+      this._failureGuard.add(tabId);
+
+      let pagePath = null;
+      try {
+        pagePath = path.join(__dirname, '../renderer/error_page.html');
+      } catch (_) { return; }
+
+      const q = new URLSearchParams({
+        url: String(validatedURL || ''),
+        code: String(errorCode),
+        text: String(errorDescription || ''),
+      });
+      try {
+        view.webContents.loadURL('file://' + pagePath + '?' + q.toString());
+      } catch (e) {
+        console.error('[page_manager] error page load failed:', e.message);
+        this._failureGuard.delete(tabId);
+        return;
+      }
+      // 让 agent 也能读到失败（订阅了事件的会话），而不是只有人看得到。
+      this._broadcast('load_failed', {
+        tab: tabId,
+        url: String(validatedURL || ''),
+        error_code: errorCode,
+        error: String(errorDescription || ''),
+      });
+      // 错误页本身加载成功后清掉防重入标记，否则同 tab 后续失败都不显示。
+      view.webContents.once('did-finish-load', () => {
+        if (this._failureGuard) this._failureGuard.delete(tabId);
+      });
+    });
   }
 
   /**
@@ -2072,6 +2176,9 @@ class PageManager {
       // switch to first remaining tab — must re-addBrowserView
       const first = this.tabs.keys().next();
       this.activeTab = first.done ? null : first.value;
+      // 上面是直接改 activeTab（没走 setActive），monitor 不会自己知道；
+      // 不同步的话它会一直拿已关闭的 tab 当"活跃 tab"，淘汰顺序就反了。
+      this.networkMonitor.setActiveTab(this.activeTab);
       if (!first.done) {
         const nextView = this._getView(this.activeTab);
         this.window.addBrowserView(nextView);
@@ -2129,6 +2236,8 @@ class PageManager {
       try { this.window.removeBrowserView(view); } catch(e) {}
     }
     this.activeTab = tabId;
+    // body / 记录淘汰要"先牺牲后台 tab"，所以必须让它知道谁是活跃的。
+    this.networkMonitor.setActiveTab(tabId);
     const view = this._getView(tabId);
     if (view) {
       this.window.addBrowserView(view);
@@ -2183,8 +2292,12 @@ class PageManager {
 
   _layoutView(view) {
     const bounds = this.window.getContentBounds();
-    const TAB_BAR_HEIGHT = 36;
-    view.setBounds({ x: 0, y: TAB_BAR_HEIGHT, width: bounds.width, height: bounds.height - TAB_BAR_HEIGHT });
+    view.setBounds({
+      x: 0,
+      y: config.tabBarHeight,
+      width: bounds.width,
+      height: bounds.height - config.tabBarHeight,
+    });
   }
 
   addSubscription(sessionId, events) {
@@ -2690,6 +2803,10 @@ class PageManager {
         sensitive_headers_optin: this.networkMonitor.sensitiveAllowed,
       },
       limits: this.networkMonitor.captureInfo(tabId).limits,
+      // 诊断用：淘汰优先级与当前占用。回答"我的 body 为什么是 evicted"。
+      active_tab: this.networkMonitor.captureInfo(tabId).active_tab,
+      body_bytes: this.networkMonitor.captureInfo(tabId).body_bytes,
+      max_body_bytes: this.networkMonitor.captureInfo(tabId).max_body_bytes,
       note: 'retention limits are controlled by AI_BROWSER_NETWORK_* env only, never by this call',
     };
   }

@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>页面无法打开</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    background: #1e1e1e;
+    color: #d4d4d4;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif;
+    font-size: 13px;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding: 48px 24px;
+  }
+  .box { max-width: 560px; width: 100%; }
+  h1 { font-size: 17px; font-weight: 600; color: #f48771; margin-bottom: 4px; }
+  .sub { color: #888; font-size: 12px; margin-bottom: 20px; }
+  .url {
+    background: #252526; border: 1px solid #3c3c3c; border-radius: 4px;
+    padding: 8px 10px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px; color: #9cdcfd; word-break: break-all; margin-bottom: 16px;
+  }
+  .reason { margin-bottom: 20px; line-height: 1.6; }
+  .reason b { color: #ce9178; font-weight: 600; }
+  .hint { color: #858585; font-size: 12px; line-height: 1.7; margin-bottom: 24px; }
+  .hint li { margin-left: 18px; margin-bottom: 4px; }
+  .row { display: flex; gap: 8px; }
+  button {
+    background: #0e639c; color: #fff; border: none; border-radius: 4px;
+    padding: 7px 16px; font-size: 12px; cursor: pointer; font-family: inherit;
+  }
+  button:hover { background: #1177bb; }
+  button.ghost { background: #3a3d41; }
+  button.ghost:hover { background: #4a4d51; }
+  input {
+    flex: 1; background: #3c3c3c; border: 1px solid #3c3c3c; border-radius: 4px;
+    color: #d4d4d4; padding: 7px 10px; font-size: 12px; font-family: inherit;
+    min-width: 0;
+  }
+  input:focus { outline: none; border-color: #0e639c; }
+</style>
+</head>
+<body>
+<div class="box">
+  <h1>这个页面打不开</h1>
+  <div class="sub">网络请求失败，浏览器没有拿到任何内容</div>
+
+  <div class="url" id="url"></div>
+
+  <div class="reason" id="reason"></div>
+
+  <div class="hint">
+    常见原因：
+    <li>网络不通，或 DNS 解析失败</li>
+    <li>站点本身不可达 / 已下线</li>
+    <li>公司网络或代理拦截了该域名</li>
+  </div>
+
+  <div class="row">
+    <button id="retry">重试</button>
+    <button id="back" class="ghost">返回上一页</button>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <input id="go" type="text" placeholder="输入网址后按回车打开">
+  </div>
+</div>
+
+<script>
+  // 主进程通过 query 把失败信息带进来。这个页面本身也在 renderer 里跑，
+  // 但它是**我们自己**的页面，不是站点内容 —— 所以人能在这里手动重试 /
+  // 改网址，这正是产品承诺的"随时可以手动介入"。
+  var q = new URLSearchParams(location.search);
+  var failedUrl = q.get('url') || '';
+  var errCode = q.get('code') || '';
+  var errText = q.get('text') || '';
+  document.getElementById('url').textContent = failedUrl || '(未知网址)';
+
+  var REASONS = {
+    '-3': '网络中断（ERR_INTERNET_DISCONNECTED）',
+    '-102': '连接被拒绝（ERR_CONNECTION_REFUSED）',
+    '-105': 'DNS 解析失败，找不到这个域名（ERR_NAME_NOT_RESOLVED）',
+    '-106': '网络不可达（ERR_INTERNET_DISCONNECTED）',
+    '-109': '连接超时，站点没有响应（ERR_CONNECTION_TIMED_OUT）',
+    '-118': '连接超时（ERR_CONNECTION_TIMED_OUT）',
+    '-130': '代理连接失败（ERR_PROXY_CONNECTION_FAILED）',
+    '-200': '证书错误，站点证书无效（ERR_CERT_AUTHORITY_INVALID）',
+    '-201': '证书已过期（ERR_CERT_DATE_INVALID）',
+    '-202': '证书包含错误的主机名（ERR_CERT_COMMON_NAME_INVALID）',
+    '-501': '服务器不支持安全连接（ERR_SSL_PROTOCOL_ERROR）',
+    '-324': '服务器响应为空（ERR_EMPTY_RESPONSE）',
+    '-329': '内容被阻止（ERR_BLOCKED_BY_CLIENT）',
+  };
+  var r = document.getElementById('reason');
+  var known = REASONS[errCode];
+  if (known) {
+    r.innerHTML = '错误类型：<b>' + known + '</b><br>错误码：' + errCode;
+  } else if (errText) {
+    r.innerHTML = '错误类型：<b>' + errText.replace(/</g, '&lt;') + '</b><br>错误码：' + errCode;
+  } else {
+    r.textContent = '错误码：' + (errCode || '(未知)');
+  }
+
+  // 这些按钮要能真的动：走 setWindowOpenHandler 拦不住的本地协议，
+  // 所以用 webContents 回主进程的 ipc。
+  var { ipcRenderer } = require('electron');
+  document.getElementById('retry').addEventListener('click', function () {
+    if (failedUrl) ipcRenderer.send('error-page:navigate', failedUrl);
+  });
+  document.getElementById('back').addEventListener('click', function () {
+    ipcRenderer.send('error-page:back');
+  });
+  var go = document.getElementById('go');
+  go.value = failedUrl;
+  go.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && go.value.trim()) {
+      ipcRenderer.send('error-page:navigate', go.value.trim());
+    }
+  });
+</script>
+</body>
+</html>

@@ -16,8 +16,9 @@ export const config = {
   userDataDir: process.env.AI_BROWSER_USER_DATA || path.join(os.homedir(), '.ai-browser'),
   // Spoofed UA to mask the automation fingerprint
   userAgent: process.env.AI_BROWSER_UA || DEFAULT_UA,
-  // Height of the in-app tab strip below the window title bar
-  tabBarHeight: 36,
+  // Height of the in-app tab strip below the window title bar.
+  // 36px = tab row, 38px = toolbar row (address bar + back/forward/reload/stop).
+  tabBarHeight: 36 + 38,
   // The session every tab's BrowserView uses. **Must stay a single source of
   // truth**: session-level hooks (will-download, permission requests) are
   // installed on `session.fromPartition(viewPartition)`. Hooking

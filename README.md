@@ -11,7 +11,7 @@
   <img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue.svg">
   <img alt="Electron" src="https://img.shields.io/badge/built%20with-Electron%2033-9cf">
   <img alt="Platforms" src="https://img.shields.io/badge/platforms-macOS%20%E2%80%A2%20Linux-blueviolet">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-411%20unit%20%2B%20409%20e2e-2ea043">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-415%20unit%20%2B%20427%20e2e-2ea043">
   <img alt="MCP" src="https://img.shields.io/badge/spec-MCP%20(stdio)-f5b23b">
 </p>
 
@@ -565,6 +565,7 @@ npm run value        # value truncation contract + read-only get_value — 15 ch
 npm run canvas       # canvas draw-call capture — 13 checks
 npm run modeldiff    # canvas app data-model diff (the "unchanged" false green) — 12 checks
 npm run audit        # every advertised action must exist; wait/downloads/permissions/quit — 35 checks
+npm run nav          # address bar + load-failure error page (the "white screen" report) — 18 checks
 npm run focus        # no focus stealing + full capability while backgrounded — 32 checks
 npm run interact     # trusted drag / key press / wheel (pointer gestures) — 31 checks
 npm run view         # viewport repaint + snapshot/diff verification — 28 checks
@@ -635,7 +636,13 @@ Two things it changed in the product:
 the page through `ui.evaluate`.
 
 **`npm run network`** — that a POST can be captured with its full request body, that headers are
-redacted by default, and that bodies paginate instead of being silently truncated.
+redacted by default, and that bodies paginate instead of being silently truncated. It also pins the
+eviction rule: the retained byte budget is **global across tabs**, so a background tab quietly
+filling it used to evict the body the agent was about to read on the *active* tab — the request
+really happened and the body really was captured, it just got pushed out by someone else's noise.
+Eviction now sacrifices non-active tabs first (including the background body being stored), and
+`ui.network_configure` reports `active_tab` / `body_bytes` so a future `evicted` can be attributed
+instead of guessed at.
 
 **`npm run modeldiff`** — the suite for the one place `ui.diff` used to lie. A canvas-rendered app's
 DOM is a still photograph: dragging a node or editing a widget repaints `<canvas>` and moves
