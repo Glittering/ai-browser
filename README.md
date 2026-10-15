@@ -16,9 +16,9 @@
 </p>
 
 <p align="center">
-  <em>One agent, no coordinates: open Bing → type through trusted key events (live suggestions) → scroll the results → open page 2 → back to page 1 → open the project site in a new tab → keep scrolling there. Every target was found in the semantic tree by role/label.</em><br>
-  <a href="docs/marketing/demo.gif"><img src="docs/marketing/demo.gif" alt="AI Browser demo: search, paginate, and open a website — all driven by the semantic tree" width="860"></a><br>
-  Reproduce: <code>npm start</code> then <code>node examples/demo.mjs</code>
+  <em>A noisy real-world feed (300+ accessibility nodes) becomes a typed structure — then one <code>ui.act</code> switches the feed and the tree changes with it. Every call is a raw JSON-RPC message over one WebSocket: no SDK, no coordinates.</em><br>
+  <a href="docs/marketing/demo.gif"><img src="docs/marketing/demo.gif" alt="AI Browser demo: navigate a crowded feed page, get the whole page as one semantic tree, extract typed items, and act on an element id — all over raw WebSocket JSON-RPC" width="860"></a><br>
+  Reproduce: <code>npm start</code> then <code>node examples/feed-tree.mjs</code>
 </p>
 
 **What it is.** An Electron app that exposes its tabs over two equivalent interfaces — an MCP server
