@@ -104,7 +104,7 @@ WebPage → 语义树（全程无一张截图）
 
 **一个进程、一个端口、一条 preload 桥。** 无微服务、无截图管线、无视觉模型账单。每步都是纯文本 token，便宜。
 
-安全防护：`contextIsolation` + `nodeIntegration:false`；`browse_evaluate` 限 5000 字符并拒绝 `process.`/`require`/`child_process`。
+安全防护：`contextIsolation` + `nodeIntegration:false`；`browse_evaluate` 限 5000 字符并拒绝 `process.`/`require`/`child_process`；控制端口只绑 `127.0.0.1`（协议本身无鉴权，请勿转发/暴露 9223）。
 
 ## 快速开始
 
@@ -126,4 +126,4 @@ AI Browser 给 Agent 真正的 Web 感官：**DOM 精度的感知，像人一样
 ---
 
 **项目地址：https://github.com/Glittering/ai-browser**
-**411 单测 + 409 个 Electron e2e 断言（11 套件）全绿 · 17 个 MCP 工具 · MCP/WS 双原生**
+**428 单测（28 文件）+ 428 个 Electron e2e 断言（12 套件）全绿 · 17 个 MCP 工具 · 已收录官方 MCP Registry（io.github.Glittering/ai-browser）· MCP/WS 双原生**

@@ -95,11 +95,17 @@ PRACTICAL DETAILS
   subscription; auth/cookie headers redacted by default.
 - Safety: contextIsolation + nodeIntegration:false; evaluate is capped at 5000
   chars and rejects process./require/child_process, identically on both
-  transports.
+  transports. The control port binds loopback only (127.0.0.1) and carries no
+  authentication — that is fine on your own machine, but don't tunnel or expose
+  port 9223; anything that can reach it can drive the browser.
+- Published in the official MCP Registry as `io.github.Glittering/ai-browser`;
+  npm `@glittering0717/ai-browser`, current v1.2.2.
 - macOS and Linux; Windows is untested (plain Electron + CDP, ought to work).
-- 411 unit tests (27 files) plus 11 Electron e2e suites / 409 assertions that
+- 428 unit tests (28 files) plus 12 Electron e2e suites / 428 assertions that
   boot a real browser against offline fixtures — focus behavior, trusted
-  gestures, rich-text editors, canvas, network, diff false-greens. All green.
+  gestures, rich-text editors, canvas, network, diff false-greens. All green
+  (suites run in isolation; the focus suite measures the real foreground app
+  from outside via macOS lsappinfo).
 
 INSTALL (Node ≥ 18)
 
@@ -110,9 +116,23 @@ dependency install scripts by default; the launcher self-heals that. China
 network: ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ helps with
 the binary download. git clone still works too.
 
-Happy to answer anything — especially "how is this different from Playwright
-MCP" (short version: ephemeral test instance vs persistent human-shared
-browser; selectors/AX tree vs semantic tree with a verification contract;
-nothing vs human hand-off). MIT licensed.
+Happy to answer anything — especially "how is this different from X" (short
+version):
+
+- vs Playwright MCP: ephemeral test instance vs persistent human-shared
+  browser; selectors/AX tree vs semantic tree with a verification contract;
+  nothing vs human hand-off.
+- vs chrome-devtools-mcp: it is the DevTools-flavored driver for the Chrome you
+  already have — snapshot/ref AX model, traces and performance panels, great if
+  your target is literally Chrome debugging. The overlap is real and it's a
+  solid tool. The differences I built for: (a) a persistently resident window
+  designed to be shared with a human mid-task without focus theft, (b)
+  verification as a tool primitive (explicit changed/unchanged verdicts and
+  page-data fingerprints rather than re-querying the DOM yourself), and (c)
+  canvas text captured at the draw-call layer instead of pixels. If you want
+  DevTools depth on stock Chrome, use theirs; if you want a always-on co-pilot
+  browser you can grab the wheel of, try this one.
+
+MIT licensed.
 
 URL: https://github.com/Glittering/ai-browser
