@@ -88,7 +88,7 @@ note-gen（8 个月 5k stars）作者的一手经验[cite:2]：
 - [x] **npm 发布**：`@glittering0717/ai-browser` latest=1.2.1（1.1.10 首版→1.2.0 首发 Release→1.2.1 带 mcpName），干净环境真实 npx 全链路实测通过
 - [x] 打 tag 发 **GitHub Release v1.2.0**（已发，含演示 GIF）；v1.2.1 作为 Registry 元数据版本同步发 Release。CI 徽章待用户解封账号 Actions
 - [x] README 安装命令全部指向新包名；确认 About/Topics（social preview 图仍待补）
-- [x] **MCP 官方 Registry 已发布** `io.github.Glittering/ai-browser`（active）；punkpeye/awesome-mcp-servers PR #16354 待合并；wong2 已转 mcpservers.org 表单制，免费通道已提交待审；mcp.so 待登录提交
+- [x] **MCP 官方 Registry 已发布** `io.github.Glittering/ai-browser`（active）；punkpeye/awesome-mcp-servers PR #16354 待合并；wong2 已转 mcpservers.org 表单制，免费通道已提交待审；mcp.so 已登录但免费通道下线、仅 $39 付费提交，待决策
 - [ ] 补 2 个 GIF；SHOW_HN.md 终稿（首评含：为什么做、与 Playwright MCP/chrome-devtools-mcp 的差异、Windows 未测、localhost 无鉴权声明）
 - [ ] 定向邀请 10–20 位真实用户试用（MCP 群、身边 agent 开发者），收集 issue 与第一批 star
 - [ ] 注册/养号：Reddit 主账号提前在 r/mcp 正常互动几条；确认 V2EX/linux.do 账号可发帖
