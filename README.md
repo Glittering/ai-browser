@@ -21,6 +21,12 @@
   Reproduce: <code>npm start</code> then <code>node examples/feed-tree.mjs</code>
 </p>
 
+<p align="center">
+  <em>Human + agent, same browser, same socket. The agent drives, then simply stops and watches; a person clicks an article in the real window, the agent notices the new tab on its next read, and continues on the page the human chose. No lock, no hand-off API.</em><br>
+  <a href="docs/marketing/demo2.gif"><img src="docs/marketing/demo2.gif" alt="Human takeover demo: the agent lists a feed and pauses; a human clicks an article in the real browser window; the agent detects the new tab and resumes scrolling on the chosen page" width="860"></a><br>
+  Try it yourself: <code>npm start</code> then <code>node examples/human-takeover.mjs</code> — click anything when it says <em>YOUR TURN</em>.
+</p>
+
 **What it is.** An Electron app that exposes its tabs over two equivalent interfaces — an MCP server
 (17 `browse_*` tools) and a raw WebSocket JSON-RPC API (`ws://localhost:9223`, methods `ui.*`). Your
 agent navigates, reads a structured semantic tree (`role` / `label` / `value` / `states` / `actions`),
@@ -462,7 +468,9 @@ Runnable scripts live in [`examples/`](examples/) and connect straight to `ws://
 | [`AGENT_INSTRUCTIONS.md`](examples/AGENT_INSTRUCTIONS.md) | Copy-paste instructions for your agent, incl. the human hand-off protocol. |
 | [`raw-ws.mjs`](examples/raw-ws.mjs) | Smallest possible raw WebSocket client. |
 | [`read-page.mjs`](examples/read-page.mjs) | Load one page, print its interactive elements. |
+| [`feed-tree.mjs`](examples/feed-tree.mjs) | Crowded feed → typed structure → act, all over raw JSON-RPC (top demo). |
 | [`with-human.mjs`](examples/with-human.mjs) | Full flow for when a human has to step in. |
+| [`human-takeover.mjs`](examples/human-takeover.mjs) | Agent pauses, you click, agent resumes on your page (second demo). |
 
 ```bash
 node examples/read-page.mjs
