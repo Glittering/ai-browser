@@ -87,8 +87,8 @@ note-gen（8 个月 5k stars）作者的一手经验[cite:2]：
 
 - [x] **npm 发布**：`@glittering0717/ai-browser` latest=**1.2.2**（1.1.10 首版→1.2.0 首发 Release→1.2.1 带 mcpName→1.2.2 安全修复：控制端口强制 loopback），干净环境真实 npx 全链路实测通过
 - [x] 打 tag 发 **GitHub Release v1.2.0 / v1.2.1 / v1.2.2**（v1.2.2 notes 强调安全修复）。CI 徽章待 GitHub Support 工单 #4860380 解封账号 Actions（详见 SUPPORT_ACTIONS.md）
-- [x] README 安装命令全部指向新包名；确认 About/Topics；**social-preview.png 已生成（1280×640@2x），待上传仓库 Settings**
-- [x] **MCP 官方 Registry 已发布** `io.github.Glittering/ai-browser`（1.2.1 active；1.2.2 待 publisher token 刷新后补发布）；punkpeye/awesome-mcp-servers PR #16354 待合并；wong2 已转 mcpservers.org 表单制，免费通道已提交待审；mcp.so 免费通道下线、仅 $39 付费提交，暂缓
+- [x] README 安装命令全部指向新包名；确认 About/Topics；**social-preview.png 已上传并生效**（og:image 已指向 repository-images CDN，2560×1280）
+- [x] **MCP 官方 Registry 已发布** `io.github.Glittering/ai-browser`（**1.2.2 active**）；punkpeye/awesome-mcp-servers PR #16354 待合并；wong2 已转 mcpservers.org 表单制，免费通道已提交待审；mcp.so 免费通道下线、仅 $39 付费提交，暂缓
 - [x] **SHOW_HN.md 终稿**（首评含：为什么做、与 Playwright MCP/chrome-devtools-mcp 双对标、Windows 未测、loopback 无鉴权声明、428/428 数字）；五篇渠道即贴终稿见 CHANNEL_POSTS.md；定向邀请包见 OUTREACH.md；账号自查见 ACCOUNT_CHECKLIST.md
 - [x] 周刊/月刊投稿三篇**已实际提交**：阮一峰周刊 #12388、HelloGitHub #3978、GitHubDaily #1213（终稿见 SUBMISSIONS.md）
 - [ ] 补 2 个 GIF（演员脚本已备，待屏幕录制权限）；定向邀请 10–20 位真实用户试用（OUTREACH.md D-Day 执行）
