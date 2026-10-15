@@ -93,7 +93,7 @@ cd ai-browser && npm install
 
 ## 最后，为什么值得你点个 Star
 
-这是我在 Star 数极少的**宝藏项目**里挖到的——`Glittering/ai-browser`，MIT 开源，411 个单元测试 + 11 个 Electron e2e 套件（409 个断言）全绿。**Star 现在还不多，趁它还没火，先藏好。**
+这是我在 Star 数极少的**宝藏项目**里挖到的——`Glittering/ai-browser`，MIT 开源，428 个单元测试（28 文件）+ 12 个 Electron e2e 套件（428 个断言）全绿。**Star 现在还不多，趁它还没火，先藏好。**
 
 一句话形容它：**这可能是 Agent 第一次真正"看懂"网页。** 装了它，你的助手从一个"睁眼瞎"，变成几乎"无所不能"。
 

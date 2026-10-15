@@ -50,6 +50,7 @@
 
 ## 配套建议
 
+- **已备好竖屏短片**：[demo_vertical.mp4](demo_vertical.mp4)（1080×1920，46s，1.1MB，静音轨），demo①+demo② 双段拼接，已烧录中文字幕卡（开场 slogan / ① 语义树 / ② 人机共驾 / 结尾 GitHub+npx）。D+1 可直接传，或按上口播脚本配音后传完整版。
 - **主视觉/KV**：用"截图路线 ✕ 淘汰，语义树路线 ✓ 胜出"的对比图，信息密度高、抓眼球。
 - **统一记忆点**：所有平台都用 `人类看像素，AI 看语义树` 这句 slogan。
 - **评论区引导**：置顶评论已含项目地址 + 求 Star，帮助沉淀。
@@ -58,6 +59,6 @@
 
 - MIT 开源，主仓库：https://github.com/Glittering/ai-browser
 - 17 个 MCP 工具（`browse_navigate` / `browse_get_tree` / `browse_act` / `browse_diff` / `browse_evaluate` / `browse_wait` 为核心）
-- 411 单元测试 + 11 个 Electron e2e 套件（409 个断言）全绿
+- 428 单元测试（28 文件）+ 12 个 Electron e2e 套件（428 个断言）全绿
 - 实测站点：知乎（Draft.js 全流程）、CSDN（发布）、百度、东方财富（2458 节点）、同花顺、魔塔
 - MCP 自动拉起/自动关闭 Electron，Agent 全托管浏览器生命周期
