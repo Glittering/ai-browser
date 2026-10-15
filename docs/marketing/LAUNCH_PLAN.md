@@ -58,7 +58,7 @@ note-gen（8 个月 5k stars）作者的一手经验[cite:2]：
 | 仓库元信息 | description/topics/MIT/Discussions 已就绪；homepage 指回仓库 | 补独立官网或 GitHub Pages 落地页（可选，提升信任）；确认仓库 Settings 里的 social preview 图（1280×640）已上传 |
 | 平台支持 | README 徽章 macOS • Linux | Show HN 首评主动声明"Windows 未测试"，管理预期，避免评论区被 Windows 问题淹没 |
 | 初始信任 | 1 star、0 fork | 发布前定向邀请 10–20 位真实目标用户（MCP/agent 开发者）试用拿第一批真实 star 与 issue；**严禁买 star** |
-| 物料 | demo.gif（Bing 搜索→翻页→开 GitHub 全链）、SHOW_HN 稿、RELEASE v1.2.0、中文稿/知乎稿/B 站稿已备 | 再补 2 个短 GIF：① WS 原始 JSON-RPC 往返（给想看协议的工程师）② 人机共驾：agent 操作中途人接管鼠标 |
+| 物料 | demo.gif 已换为「复杂信息页→规整语义树」（掘金前端频道 300 节点，navigate/get_tree/act 三调用，examples/feed-tree.mjs 可复现）、SHOW_HN 稿、RELEASE v1.2.2、中文稿/知乎稿/B 站稿已备 | 再补 1 个短 GIF：② 人机共驾：agent 操作中途人接管鼠标（需真人配合） |
 | 安全声明 | WS 9223 无鉴权仅监听 localhost，README 已声明 | Show HN 首评再次主动说明——主动披露是 HN 文化加分项[cite:8] |
 
 ## 四、渠道地图（按点火顺序）
@@ -91,7 +91,7 @@ note-gen（8 个月 5k stars）作者的一手经验[cite:2]：
 - [x] **MCP 官方 Registry 已发布** `io.github.Glittering/ai-browser`（**1.2.2 active**）；punkpeye/awesome-mcp-servers PR #16354 待合并；wong2 已转 mcpservers.org 表单制，免费通道已提交待审；mcp.so 免费通道下线、仅 $39 付费提交，暂缓
 - [x] **SHOW_HN.md 终稿**（首评含：为什么做、与 Playwright MCP/chrome-devtools-mcp 双对标、Windows 未测、loopback 无鉴权声明、428/428 数字）；五篇渠道即贴终稿见 CHANNEL_POSTS.md；定向邀请包见 OUTREACH.md；账号自查见 ACCOUNT_CHECKLIST.md
 - [x] 周刊/月刊投稿三篇**已实际提交**：阮一峰周刊 #12388、HelloGitHub #3978、GitHubDaily #1213（终稿见 SUBMISSIONS.md）
-- [ ] 补 2 个 GIF（演员脚本已备，待屏幕录制权限）；定向邀请 10–20 位真实用户试用（OUTREACH.md D-Day 执行）
+- [ ] 补人机共驾 GIF（①语义树 GIF 已完成，②需真人接管鼠标）；定向邀请 10–20 位真实用户试用（OUTREACH.md D-Day 执行）
 - [ ] 注册/养号：按 ACCOUNT_CHECKLIST.md 逐项验证（Reddit karma、V2EX/linux.do 发帖权限、HN 账号）
 - [ ] 准备好 D-Day 当晚 8 小时不被打断的整块时间
 
