@@ -85,13 +85,14 @@ note-gen（8 个月 5k stars）作者的一手经验[cite:2]：
 
 ### D-7 ~ D-1（10/13–10/19）准备周
 
-- [x] **npm 发布**：`@glittering0717/ai-browser` latest=1.2.1（1.1.10 首版→1.2.0 首发 Release→1.2.1 带 mcpName），干净环境真实 npx 全链路实测通过
-- [x] 打 tag 发 **GitHub Release v1.2.0**（已发，含演示 GIF）；v1.2.1 作为 Registry 元数据版本同步发 Release。CI 徽章待用户解封账号 Actions
-- [x] README 安装命令全部指向新包名；确认 About/Topics（social preview 图仍待补）
-- [x] **MCP 官方 Registry 已发布** `io.github.Glittering/ai-browser`（active）；punkpeye/awesome-mcp-servers PR #16354 待合并；wong2 已转 mcpservers.org 表单制，免费通道已提交待审；mcp.so 已登录但免费通道下线、仅 $39 付费提交，待决策
-- [ ] 补 2 个 GIF；SHOW_HN.md 终稿（首评含：为什么做、与 Playwright MCP/chrome-devtools-mcp 的差异、Windows 未测、localhost 无鉴权声明）
-- [ ] 定向邀请 10–20 位真实用户试用（MCP 群、身边 agent 开发者），收集 issue 与第一批 star
-- [ ] 注册/养号：Reddit 主账号提前在 r/mcp 正常互动几条；确认 V2EX/linux.do 账号可发帖
+- [x] **npm 发布**：`@glittering0717/ai-browser` latest=**1.2.2**（1.1.10 首版→1.2.0 首发 Release→1.2.1 带 mcpName→1.2.2 安全修复：控制端口强制 loopback），干净环境真实 npx 全链路实测通过
+- [x] 打 tag 发 **GitHub Release v1.2.0 / v1.2.1 / v1.2.2**（v1.2.2 notes 强调安全修复）。CI 徽章待 GitHub Support 工单 #4860380 解封账号 Actions（详见 SUPPORT_ACTIONS.md）
+- [x] README 安装命令全部指向新包名；确认 About/Topics；**social-preview.png 已生成（1280×640@2x），待上传仓库 Settings**
+- [x] **MCP 官方 Registry 已发布** `io.github.Glittering/ai-browser`（1.2.1 active；1.2.2 待 publisher token 刷新后补发布）；punkpeye/awesome-mcp-servers PR #16354 待合并；wong2 已转 mcpservers.org 表单制，免费通道已提交待审；mcp.so 免费通道下线、仅 $39 付费提交，暂缓
+- [x] **SHOW_HN.md 终稿**（首评含：为什么做、与 Playwright MCP/chrome-devtools-mcp 双对标、Windows 未测、loopback 无鉴权声明、428/428 数字）；五篇渠道即贴终稿见 CHANNEL_POSTS.md；定向邀请包见 OUTREACH.md；账号自查见 ACCOUNT_CHECKLIST.md
+- [x] 周刊/月刊投稿三篇**已实际提交**：阮一峰周刊 #12388、HelloGitHub #3978、GitHubDaily #1213（终稿见 SUBMISSIONS.md）
+- [ ] 补 2 个 GIF（演员脚本已备，待屏幕录制权限）；定向邀请 10–20 位真实用户试用（OUTREACH.md D-Day 执行）
+- [ ] 注册/养号：按 ACCOUNT_CHECKLIST.md 逐项验证（Reddit karma、V2EX/linux.do 发帖权限、HN 账号）
 - [ ] 准备好 D-Day 当晚 8 小时不被打断的整块时间
 
 ### D-Day（10/20 周二）
@@ -154,7 +155,7 @@ note-gen（8 个月 5k stars）作者的一手经验[cite:2]：
 - **不拉 HN 票**：不在群里发"求 upvote"，HN 反投票环机制会检测同质来源流量；可以分享"我写了篇东西"，让人自然点开。
 - **不重复通稿**：每个平台独立成稿，角度/标题/开头不同[cite:2]。
 - **不碰禁自荐板块**（r/claude 等），发前逐版读规则[cite:13]。
-- **不吹不存在的数字**：README/官网所有数字与仓库一致（17 工具、411 单测 + 409 e2e），对比竞品只讲可验证事实。
+- **不吹不存在的数字**：README/官网所有数字与仓库一致（17 工具、428 单测 + 428 e2e 断言），对比竞品只讲可验证事实。
 - **不在周五下午点火**（周末流量衰减，等周一重算时速度已泄）[cite:3]。
 
 ## Sources
