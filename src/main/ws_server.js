@@ -38,7 +38,22 @@ function findWaitTarget(tree, target) {
 const serverStartedAt = Math.floor(Date.now() / 1000);
 
 export function startWSServer(pageManager, port = config.wsPort, onQuit = null) {
-  const wss = new WebSocketServer({ port });
+  // Bind loopback only — the protocol carries no auth. ws' default (host
+  // omitted) is 0.0.0.0, which would expose the browser — including all its
+  // persisted logins — to the entire local network. Override via
+  // AI_BROWSER_WS_HOST only with eyes open.
+  const wss = new WebSocketServer({ port, host: config.wsBindHost });
+
+  // Passing a host pushes Node onto the async DNS-lookup listen path, so
+  // wss.address() is null until 'listening'. Cache it and let callers await.
+  let bound = null;
+  const ready = new Promise((resolve, reject) => {
+    wss.once('listening', () => { bound = wss.address(); resolve(bound); });
+    wss.once('error', reject);
+  });
+  ready.then(() => {
+    console.log(`AI Browser WS server listening on ws://${bound.address}:${bound.port}`);
+  }).catch(() => {});
 
   wss.on('connection', (ws, _req) => {
     const sessionId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -458,10 +473,13 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
     });
   });
 
-  console.log('AI Browser WS server listening on ws://localhost:' + port);
   return {
-    // Actual bound port (for tests that pass port 0 to grab an ephemeral one).
-    port: wss.address().port,
+    // Resolves once the socket is actually bound (port 0 → ephemeral port known).
+    ready,
+    // Actual bound port/address; null until ready.
+    get port() { return bound ? bound.port : null; },
+    // Security invariant: must be a loopback literal.
+    get host() { return bound ? bound.address : null; },
     close: () => {
       for (const client of wss.clients) {
         try { client.terminate(); } catch (e) {}

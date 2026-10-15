@@ -72,12 +72,21 @@ function rawSend(ws, text) {
 beforeAll(async () => {
   pm = makePageManager();
   server = startWSServer(pm, 0);
+  await server.ready;
   client = await openClient(server.port);
 });
 
 afterAll(async () => {
   client.close();
   server.close();
+});
+
+describe('ws_server transport security', () => {
+  it('W-SEC-1 binds loopback only — the unauthenticated JSON-RPC port must never listen on 0.0.0.0', () => {
+    // Regression: new WebSocketServer({ port }) defaults to 0.0.0.0, which
+    // exposed the browser and its persisted sessions to the whole LAN.
+    expect(['127.0.0.1', '::1', '::ffff:127.0.0.1']).toContain(server.host);
+  });
 });
 
 describe('ws_server ui.wait', () => {

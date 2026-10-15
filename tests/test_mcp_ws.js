@@ -77,7 +77,8 @@ let client;
 beforeAll(async () => {
   pm = makeMockPM();
   serverInfo = makeServer(pm);
-  client = createWsClient({ url: `ws://127.0.0.1:${serverInfo.port}`, timeout: 800 });
+  await serverInfo.server.ready;
+  client = createWsClient({ url: `ws://127.0.0.1:${serverInfo.server.port}`, timeout: 800 });
 });
 
 afterAll(() => {
@@ -191,8 +192,9 @@ describe('mcp_ws launch failure diagnosability', () => {
 describe('mcp_ws timeout', () => {
   it('MW-5 rejects with WS timeout when the server never responds', async () => {
     const hpm = makeHangingPM();
-    const { server, port } = makeServer(hpm);
-    const slow = createWsClient({ url: `ws://127.0.0.1:${port}`, timeout: 200 });
+    const server = makeServer(hpm).server;
+    await server.ready;
+    const slow = createWsClient({ url: `ws://127.0.0.1:${server.port}`, timeout: 200 });
     try {
       await expect(slow.call('ui.evaluate', { js: 'hang' })).rejects.toThrow('WS timeout');
     } finally {

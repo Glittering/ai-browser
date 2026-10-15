@@ -12,6 +12,11 @@ const DEFAULT_UA =
 export const config = {
   // WebSocket JSON-RPC server + MCP auto-launch probe port
   wsPort: Number(process.env.AI_BROWSER_PORT) || 9223,
+  // Loopback-only by default: the JSON-RPC port has NO authentication, so
+  // binding 0.0.0.0 would let every host on the local network drive the
+  // browser and its logged-in sessions. Set AI_BROWSER_WS_HOST=0.0.0.0 only
+  // behind a firewall you trust, and know that the protocol itself is open.
+  wsBindHost: process.env.AI_BROWSER_WS_HOST || '127.0.0.1',
   // Electron userData dir — session/cookie persistence survives restart
   userDataDir: process.env.AI_BROWSER_USER_DATA || path.join(os.homedir(), '.ai-browser'),
   // Spoofed UA to mask the automation fingerprint
