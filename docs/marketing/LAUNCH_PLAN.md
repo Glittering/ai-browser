@@ -92,6 +92,7 @@ note-gen（8 个月 5k stars）作者的一手经验[cite:2]：
 - [x] **SHOW_HN.md 终稿**（首评含：为什么做、与 Playwright MCP/chrome-devtools-mcp 双对标、Windows 未测、loopback 无鉴权声明、428/428 数字）；五篇渠道即贴终稿见 CHANNEL_POSTS.md；定向邀请包见 OUTREACH.md；账号自查见 ACCOUNT_CHECKLIST.md
 - [x] 周刊/月刊投稿三篇**已实际提交**：阮一峰周刊 #12388、HelloGitHub #3978、GitHubDaily #1213（终稿见 SUBMISSIONS.md）
 - [x] 两个演示 GIF 均完成（语义树 + 人机共驾，入 README）；定向邀请 10–20 位真实用户试用（OUTREACH.md D-Day 执行）
+- [x] **D-4 终检（2026-10-16）**：单测实测 **428（28 文件）**、e2e **12 套件 428 断言全绿**，README 徽章 427→428 已修正；npm latest=v1.2.2 / git tag / GitHub Release 三者一致；Show HN 标题三处文档统一以 SHOW_HN.md 为准；4 个 A 类触点全部 OPEN 有效（A4 因 playwright-mcp #1773 被 NOT_PLANNED 关闭，替换为 stagehand #1250，新草稿见 OUTREACH.md）；PR #16354 与周刊三 issue 均 OPEN 在审
 - [ ] 注册/养号：按 ACCOUNT_CHECKLIST.md 逐项验证（Reddit karma、V2EX/linux.do 发帖权限、HN 账号）
 - [ ] 准备好 D-Day 当晚 8 小时不被打断的整块时间
 
@@ -123,9 +124,9 @@ note-gen（8 个月 5k stars）作者的一手经验[cite:2]：
 
 ## 六、话术模板（定稿方向，发布前再润色）
 
-**Show HN 标题**（平实、一句话功能，参照 [SHOW_HN.md](SHOW_HN.md)）：
+**Show HN 标题**（以 [SHOW_HN.md](SHOW_HN.md) 第 1 行为唯一定稿）：
 
-> Show HN: A persistent, visible browser for AI agents – semantic tree API instead of screenshots
+> Show HN: AI Browser — a persistent co-pilot browser your agent drives over MCP
 
 **Show HN 首评骨架**（5 分钟内发）：
 

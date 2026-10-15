@@ -30,12 +30,14 @@ URL: https://github.com/ChromeDevTools/chrome-devtools-mcp/issues/3020
 
 > FWIW, the persistent-shared-profile direction solves this class of issue by construction, at the cost of explicit human hand-off: I built a browser where sessions live in one persistent `persist:` partition shared by all clients, so logins survive restarts and concurrent agents never fight over profile locks — and when auth needs a human (QR, slider, SSO), the person just uses the same visible window mid-task. The trade-off vs isolated copies is worth stating: you give up per-session isolation. Reference implementation: https://github.com/Glittering/ai-browser (I'm the author).
 
-### A4. microsoft/playwright-mcp #1773 — "Recommended setup for several agents sharing one Playwright MCP"
-URL: https://github.com/microsoft/playwright-mcp/issues/1773
+### A4. browserbase/stagehand #1250 — "Storage state persistence broken in v3: userDataDir doesn't work, storageState() missing"
+URL: https://github.com/browserbase/stagehand/issues/1250
+状态（D-4 核查）：OPEN，8 条评论，2026-09-08 仍活跃。与 A3 主题相近但受众不同（Stagehand 用户），角度聚焦"不做 storageState 存取的另一种活法"。
+> 注：原 A4 目标 playwright-mcp #1773 已于 2026-09-25 被以 NOT_PLANNED 关闭，关闭 issue 下发自荐观感差，已替换为本条（D-4 核查，2026-10-16）。
 
 **评论草稿：**
 
-> Not a Playwright config answer, but a neighboring data point: if the goal is "many agents, one logged-in browser", a persistent visible-window architecture fits better than configuring multiple ephemeral instances — the trade-off is you leave Playwright's test-instance model. I built exactly that shape (single long-running Electron window over MCP, all clients attach, human keeps the logins and can grab the mouse): https://github.com/Glittering/ai-browser. Playwright MCP remains the right choice for isolated/scripted runs; this is for the shared-daily-browser case. (Author disclosure.)
+> Author of a neighboring project here — hit the same class of problem and ended up with a different shape. Instead of snapshotting/restoring storage state, the browser just runs against one persistent `persist:` partition (Electron's session API) for its whole lifetime: every client attaches to the same window and profile, so cookies / IndexedDB / localStorage accumulate in place and there is no save-or-restore step that can break. When a site needs an interactive login (2FA, slider, SSO), the human does it once in the visible window and it sticks across restarts. Honest trade-offs: no per-session isolation, you can't ship the profile into CI, and it assumes a single-user desktop — for ephemeral parallel runs, storageState is still the right model. MIT reference implementation: https://github.com/Glittering/ai-browser (I'm the author; happy to share the session-lifecycle code if useful).
 
 ---
 
@@ -87,11 +89,13 @@ URL: https://github.com/microsoft/playwright-mcp/issues/1773
 
 ## 执行记录
 
+> D-4（2026-10-16）触点核查：A1 #2148 OPEN（1 评，7 月后沉寂）；A1b #2918 OPEN；A2 #2856 OPEN（10-14 仍活跃）；A3 #3020 OPEN（10-09 活跃）；A4 已从关闭的 playwright-mcp #1773 换为 stagehand #1250（OPEN，8 评）。punkpeye PR #16354 仍 OPEN（10-13 更新）。周刊三 issue 均 OPEN 无回复（ruanyf/weekly #12388、HelloGitHub #3978、GitHubDaily #1213）。
+
 | 触点 | 计划 | 状态/链接 |
 |---|---|---|
-| A1 stagehand #2148 | D+1 | |
-| A2 cdp-mcp #2856 | D+1 | |
-| A3 cdp-mcp #3020 | D+1 | |
-| A4 playwright-mcp #1773 | D+1 | |
+| A1 stagehand #2148 | D+1 | OPEN 已核查，草稿就绪 |
+| A2 cdp-mcp #2856 | D+1 | OPEN 已核查，草稿就绪 |
+| A3 cdp-mcp #3020 | D+1 | OPEN 已核查，草稿就绪 |
+| A4 stagehand #1250（替换 #1773） | D+1 | OPEN 已核查，草稿就绪 |
 | B HN 旧帖×1 | D+1 | |
 | C 中文 KOL | D-3 ~ D+3（你定名单） | |

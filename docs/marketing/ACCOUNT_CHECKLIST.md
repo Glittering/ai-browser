@@ -7,8 +7,8 @@
 - [ ] 能登录 https://news.cc/login （news.ycombinator.com）
 - [ ] 查看账号 karma 与年龄：点自己用户名；Show HN 对新号无硬门槛但 **<1 天的账号帖子会被反垃圾系统降权**，D-3 前务必登录一次并保留会话
 - [ ] 在 https://news.ycombinator.com/submit 提前把标题粘进去预览（不要提交）：
-  `Show HN: AI Browser – a persistent co-pilot browser your agent drives over MCP`
-  （≤60 词左右的正文从 SHOW_HN.md 复制；URL 填 GitHub 仓库；首评从 SHOW_HN.md 末尾的"对比"段发）
+  `Show HN: AI Browser — a persistent co-pilot browser your agent drives over MCP`
+  （标题以 SHOW_HN.md 第 1 行为准；≤60 词左右的正文从 SHOW_HN.md 复制；URL 填 GitHub 仓库；首评从 SHOW_HN.md 末尾的"对比"段发）
 - [ ] 不做投票交换、不在同一网络环境多账号；发帖后别自己刷榜
 
 ## 2. Reddit（两个子版，账号年龄/karma 是硬门槛）
