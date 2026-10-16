@@ -29,8 +29,20 @@ CLONEU14=$(jqf "repos/Glittering/ai-browser/traffic/clones" '.uniques' '?')
 NPM_VER=$(curl -s --max-time 15 "https://registry.npmjs.org/@glittering0717%2Fai-browser" 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['dist-tags']['latest'])" 2>/dev/null || echo '?')
 NPM_DL=$(curl -s --max-time 15 "https://api.npmjs.org/downloads/point/last-week/@glittering0717/ai-browser" 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('downloads','N/A'))" 2>/dev/null || echo 'N/A')
 
-# --- MCP Registry（取 isLatest 条目）---
-MCP_INFO=$(curl -s --max-time 15 "https://registry.modelcontextprotocol.io/v0/servers?search=ai-browser" 2>/dev/null | python3 -c "
+# --- MCP Registry（取 isLatest 条目；API 偶发超时，带重试）---
+mcp_fetch() {
+  for i in 1 2 3; do
+    local out
+    out=$(curl -s --max-time 20 "https://registry.modelcontextprotocol.io/v0/servers?search=ai-browser" 2>/dev/null)
+    if [ -n "$out" ] && echo "$out" | python3 -c "import json,sys; json.load(sys.stdin)" 2>/dev/null; then
+      echo "$out"
+      return 0
+    fi
+    sleep 2
+  done
+  echo ""
+}
+MCP_INFO=$(mcp_fetch | python3 -c "
 import json,sys
 try:
     d=json.load(sys.stdin)

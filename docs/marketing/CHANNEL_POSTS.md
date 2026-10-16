@@ -125,5 +125,7 @@ macOS/Linux 已测，Windows 还没测。欢迎拍砖，也特别想听听你们
 | 掘金长文 | D+2 | https://juejin.cn/post/7697024318929633320 | ✅ 2026-10-16 21:00 已发布（分类"人工智能"+标签"人工智能"）；草稿箱已无该文；踩坑：发布弹窗"添加标签"为必填（红*），缺标签时前端静默失败、仅弹行内错误"至少添加一个标签"，曾误判"发布成功" |
 | B 站视频 | D+2 | | 46s 竖屏已就绪 |
 | 头条 | D+3 | | 账号已登录 |
+| CSDN 博客 | D+1 | （草稿已存，未发布） | ⚠️ 2026-10-17：账号已登录、全文 5086 字已写入编辑器并自动存草稿，但**发布按钮无响应**。根因：编辑器 Vue 应用自身报 TypeError（statistic.csdn.net 收到 VueErrorHandler 上报），bizapi.csdn.net 的 getBaseInfo/list-permission 返回 401 "X-Ca-Key is not exist"——控制台 API 签名在此环境失败，应用数据加载不全导致发布链路断裂。另发现 markdown-highlighting class 会导致编辑器主线程随时间退化卡死（剥掉该 class 可稳定）。**建议本人登录 CSDN 创作中心一键发布该草稿** |
+| 头条文章 | D+3 | https://www.toutiao.com/article/7697326423064773160/ | ✅ 2026-10-17 01:59 已提交（pgc_id=7697326423064773160，审核中）；走通「预览并发布→确认发布」两段式流程；ProseMirror 合成 paste（text/html）注入成功 |
 | ~~linux.do~~ | — | — | ❌ 放弃（需推荐码） |
 | ~~NodeSeek~~ | — | — | ❌ 放弃（需推荐码） |
