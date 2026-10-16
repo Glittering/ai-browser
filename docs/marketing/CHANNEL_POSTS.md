@@ -2,6 +2,7 @@
 
 > 纪律：每篇都是可直接粘贴的终稿；标题给 2 个候选；发帖时间为北京时间。
 > 发帖后把真实链接回填到文末"投放记录"。
+> 渠道变更（2026-10-16）：**linux.do / NodeSeek 放弃**（均需推荐码，本人没有）——原第 4、5 节作废，火力并入知乎/掘金技术长文（见 PR_ZHIHU.md / PR_JUEJIN.md）；B 站视频与头条稿见 PR_BILIBILI.md / PR_TOUTIAO.md。
 
 ---
 
@@ -90,66 +91,26 @@ macOS/Linux 已测，Windows 还没测。欢迎拍砖，也特别想听听你们
 
 ---
 
-## 4. linux.do（D+2 周三 21:00 晚高峰）
+## 4. ~~linux.do~~ —— ❌ 已放弃（2026-10-16）
 
-**分类：** 开发调优（没有合适的就放 资源荟萃，标题不加【引流】等标签）
-
-**标题：** [开源] 一个不截图、用语义树驱动的常驻浏览器，给 MCP Agent 当"副驾"
-
-**正文：**
-
-各位好，分享一个自用转开源的项目，先说清楚它解决什么问题，不做夸大宣传。
-
-**痛点**：用 Claude Code / Cursor 配浏览器类 MCP 时，现成方案（Playwright MCP 等）起的是临时干净实例，登录态、人机验证都得重来；而纯截图+坐标的方案又慢又脆。
-
-**AI Browser 的做法**：
-
-1. Electron 常驻可见窗口，独立持久分区，扫码登录一次长期有效
-2. Agent 侧拿语义树（role/label/states/稳定元素 ID），全程不需要截图和 OCR
-3. 操作走 CDP 受信输入，富文本编辑器不做框架适配
-4. browse_diff 原语返回显式的变更判定，避免"返回 success 但实际没点上"
-5. 人随时可以接管鼠标，agent 操作时窗口不抢焦点
-6. 端口只绑 127.0.0.1（无鉴权，安全上别转发该端口）
-
-**接入**（stdio）：
-
-```json
-{ "mcpServers": { "ai-browser": { "command": "npx",
-  "args": ["-y", "@glittering0717/ai-browser", "mcp"] } } }
-```
-
-Node ≥ 18；Linux 已在 e2e 覆盖（X11/Wayland 下 Electron 常规要求）。也可以走 `ws://127.0.0.1:9223` 原始 JSON-RPC，不用 SDK。
-
-仓库：https://github.com/Glittering/ai-browser （MIT，428 单测 + 12 套 Electron e2e 全绿，已收录 MCP 官方 Registry）
-
-不确定的地方也如实说：Windows 未测；和 chrome-devtools-mcp 定位有重叠，README 里写了对比和各自适用场景。欢迎试用反馈。
+注册需推荐码/邀请制，本人没有。原帖文已删除，火力并入掘金技术长文（PR_JUEJIN.md）与知乎稿（PR_ZHIHU.md）。
 
 ---
 
-## 5. NodeSeek（D+3 周四 21:30）
+## 5. ~~NodeSeek~~ —— ❌ 已放弃（2026-10-16）
 
-**标题：** 开源个 Electron 浏览器：AI Agent 走 MCP/WS 驱动，不截图直接读 DOM 语义树
+注册需推荐码，本人没有。原帖文已删除，火力并入掘金技术长文（PR_JUEJIN.md）。
 
-**正文：**
+---
 
-给折腾 Agent 的哥们分享个工具，MIT 开源。
+## 6. 国内平台（终稿见各自文件）
 
-一句话：桌面上常驻一个可见浏览器，Agent（Claude Code/Cursor/Codex）通过 17 个 MCP 工具或裸 WebSocket JSON-RPC 操作它，读的是语义树不是截图，扫码/人机验证时你自己伸手接管就行。
-
-几个实用点：
-
-- npx 一条命令接入，首次自动准备 Electron 引擎（国内可 ELECTRON_MIRROR 走 npmmirror）
-- 持久登录分区，不用每次重新扫码
-- CDP 受信输入，知乎 Draft.js / CSDN 的 CKEditor 都实测过发布全流程
-- 网络抓包自带 POST body，authorization/cookie 默认打码
-- browse_diff 能证明操作真的生效，不会"假装成功"
-- 控制端口默认只听 127.0.0.1，注意别把 9223 转发出去（协议没鉴权）
-
-`npx -y @glittering0717/ai-browser mcp`
-
-https://github.com/Glittering/ai-browser
-
-macOS/Linux 可跑，Windows 未测。有问题直接 issue。
+| 平台 | 终稿 | 物料 | 计划 |
+|---|---|---|---|
+| 知乎 | PR_ZHIHU.md | img_cover_zhihu.jpg | D+1～D+2 |
+| B 站 | PR_BILIBILI.md | demo_vertical.mp4（46s 竖屏）+ img_cover_bilibili.jpg | D+2 |
+| 掘金 | PR_JUEJIN.md（技术长文） | 语义树 JSON 片段 | D+2（中文长尾主件） |
+| 头条 | PR_TOUTIAO.md | img_cover_toutiao.jpg | D+3 |
 
 ---
 
@@ -157,8 +118,12 @@ macOS/Linux 可跑，Windows 未测。有问题直接 issue。
 
 | 渠道 | 计划时间 | 实际链接 | 备注 |
 |---|---|---|---|
-| r/ModelContextProtocol | D+1 22:00 | | |
+| r/ModelContextProtocol | D+1 22:00 | | showcase flair + 披露作者身份 |
 | r/ClaudeAI | D+2 22:00 | | 注意账号 karma 门槛 |
-| V2EX 分享创造 | D+1 12:30 | | |
-| linux.do | D+2 21:00 | | 需 trust level 1 |
-| NodeSeek | D+3 21:30 | | |
+| V2EX 分享创造 | D+1 12:30 | | 老账号 No.20622 |
+| 知乎文章 | D+1～D+2 | | 账号已登录 |
+| 掘金长文 | D+2 | | **需先完成掘金登录** |
+| B 站视频 | D+2 | | 46s 竖屏已就绪 |
+| 头条 | D+3 | | 账号已登录 |
+| ~~linux.do~~ | — | — | ❌ 放弃（需推荐码） |
+| ~~NodeSeek~~ | — | — | ❌ 放弃（需推荐码） |

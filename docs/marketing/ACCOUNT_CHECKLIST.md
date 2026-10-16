@@ -9,14 +9,15 @@
 | Hacker News | glittering0717 | ✅ 已登录 | **账号创建于巡检前 1 小时，karma 1，未设置邮箱**（profile 页有邮箱设置提示） | 🔴 高：<1 天新号发 Show HN 会被反垃圾降权，距 D-Day 仅 4 天，需立即养号 |
 | Reddit | u/glittering0717 | ✅ 已登录（已过 JS 挑战） | karma 1（0 评论 + 1 帖子）；r/mcp 规则实测："Self-promotion is allowed with proper disclosure" + rule 4 "Use showcase" flair | 🟡 中：评论 karma 为 0，需在 r/ClaudeAI / r/ModelContextProtocol / r/LocalLLaMA 真实互动攒 karma |
 | V2EX | Glittering（No.20622） | ✅ 已登录 | 老账号（会员号 20622，约 2013 年注册）；/go/create 打开发帖表单正常 | 🟢 低 |
-| linux.do | — | ❌ 未登录 | 登录页已在 ai-browser 打开，等本人登录后复检 trust level 1 | 待用户 |
-| NodeSeek | — | ⚠️ 无法检查 | **全站维护中**（2026-10-16 访问返回维护页），D+3 发帖计划需复检站点恢复情况 | 站点侧 |
+| linux.do | — | ❌ 放弃 | 注册需推荐码/邀请制，本人没有 | — |
+| NodeSeek | — | ❌ 放弃 | 注册需推荐码；且 10-16 访问时全站维护中 | — |
+
+**国内平台（2026-10-16 实测）**：知乎 ✅、B 站 ✅（含大会员）、头条 ✅ 均已登录；掘金 ❌ 未登录（需本人登录）；即刻仅 App。
 
 **养号行动项（D-Day 前必须）**：
 1. HN：立刻在 profile 设置有效邮箱；随后 4 天在 HN 真实评论 5–10 条技术内容攒 karma（账号年龄本身就是信号）
 2. Reddit：每天在 r/ClaudeAI / r/ModelContextProtocol / r/LocalLLaMA 留 3–5 条与产品无关的真实技术评论（checklist 第 2 节原计划，现升级为必做）
-3. linux.do：本人在 ai-browser 窗口完成登录，我复检 trust level
-4. NodeSeek：D+1 复检维护是否结束
+3. 掘金：本人在 ai-browser 窗口登录（PR_JUEJIN.md 技术长文待发）
 
 ---
 
@@ -48,26 +49,29 @@
 - [x] 标题用 CHANNEL_POSTS.md 的候选 A（[开源] 前缀在 V2EX 是惯例不是硬格式）
 - [ ] 每日主题数有限（通常 3 个），D 日只发这 1 个
 
-## 4. linux.do
+## 4. linux.do —— ❌ 已放弃（2026-10-16）
 
-- [ ] 登录后点头像 → 徽章，确认有 **"基本用户"（trust level 1）** 徽章
-  没有的话：浏览 ≥10 个主题、总阅读 ≥5 分钟、点开若干帖子滚动到底，系统自动升级（通常几分钟～1 小时）
-  → 2026-10-16 实测：**未登录**，登录页已在 ai-browser 窗口打开，等本人登录后复检
-- [ ] 新注册 24 小时内不能在部分分类发主题/带外链——D-3 前注册并挂机阅读
-- [ ] 发"开发调优"或"资源荟萃"分类，不要用任何引流标签
-- [ ] 正文里链接保留 1 个（GitHub）即可，多链接触发审核
+**放弃原因：注册需推荐码/邀请制，本人没有。** 原"资源荟泽 + 公益推广标签"渠道作废，火力并入知乎/掘金长文。
 
-## 5. NodeSeek
+## 5. NodeSeek —— ❌ 已放弃（2026-10-16）
 
-- [ ] 登录后能在 https://www.nodeseek.com/post-create 选择分类
-- [ ] 完成邮箱验证；新号首帖带外链会进人工审核（正常现象，不要重复发）
-- [ ] 分类选"技术交流"或"资源分享"
-  → 2026-10-16 实测：**全站维护中**（返回"我们正在维护中"维护页），D+1 复检
+**放弃原因：注册需推荐码，本人没有。**（另：2026-10-16 访问发现全站维护中，双重不可用。）D+3  NodeSeek 简版帖作废。
 
-## 6. 知乎 / B 站（PR_ZHIHU.md / PR_BILIBILI.md 已备好）
+## 6. 国内平台（2026-10-16 经 ai-browser 实测）
 
-- [ ] 知乎：用已有内容账号发"文章"而不是"想法"（文章可带引用链接）；新号先答 2 个相关问题养盐值
-- [ ] B 站：demo.gif 可转成 30–50 秒竖屏短视频（ffmpeg 一条命令，需要时我做）；标题里带 Claude Code / MCP 关键词
+| 平台 | 登录态 | 证据 | 用途 |
+|---|---|---|---|
+| 知乎 | ✅ 已登录 | 首页显示"写文章/消息/私信/创作中心" | PR_ZHIHU.md 文章稿 |
+| B 站 | ✅ 已登录（含大会员） | 首页显示"投稿/大会员/创作中心" | PR_BILIBILI.md + demo_vertical.mp4（46s 竖屏） |
+| 头条 | ✅ 已登录 | 首页显示"发布/消息/粉丝" | PR_TOUTIAO.md |
+| 掘金 | ❌ **未登录** | 导航有"登录/注册"按钮、无头像 | PR_JUEJIN.md 技术长文——**需本人先在 ai-browser 窗口登录** |
+| 即刻 | ⚠️ 仅 App | web.okjike.com 只提供扫码，无 web 登录 | D-Day"正在 Show HN"实况需在 App 内手动发 |
+
+- [ ] 掘金：本人在 ai-browser 打开 https://juejin.cn/ 完成登录，我复检后 PR_JUEJIN.md 才能发布
+- [ ] 知乎：用已有内容账号发"文章"而不是"想法"（文章可带引用链接）
+- [ ] B 站：demo_vertical.mp4 已就绪（46s，1080×1920，中文烧录字幕）；标题带 Claude Code / MCP 关键词
+- [ ] 头条：PR_TOUTIAO.md 已就绪
+- [ ] 公众号（如后续要做）：需微信扫码，只能人工发布，未纳入本轮
 
 ## 7. 统一收口
 

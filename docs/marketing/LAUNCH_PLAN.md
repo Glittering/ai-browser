@@ -70,14 +70,14 @@ note-gen（8 个月 5k stars）作者的一手经验[cite:2]：
 | **Reddit r/ClaudeAI** | 规则允许自荐[cite:13]；r/claude **禁止自荐不要发**[cite:13] | 角度："给 Claude Code/Cursor 配一个看得见、能接管的持久浏览器" | 中 |
 | **Product Hunt** | 与 HN 错峰；00:01 PT 上线，需猎手/朋友首日真实互动 | HN 后第 5–7 天上线，用 HN/Reddit 收集的反馈打磨 landing；找 maker 社区互支持（PH 亚太时间劣势：准备好凌晨跟进） | 中 |
 | **V2EX** | 首发`分享创造`（首次友好），后续`推广`节点[cite:2] | HN 当晚或次晚发，技术向噱头标题；评论区亲自答 | 中（中文流量最大） |
-| **linux.do** | `资源荟萃`板块 + 公益推广标签，对开源最友好[cite:2] | 与 V2EX 不同文案；可连载"上 HN 实况"后续帖 | 中 |
-| **NodeSeek** | 推广容忍度高[cite:2] | 简短技术帖，避免营销腔 | 低中 |
+| ~~linux.do~~ | ~~`资源荟萃`板块 + 公益推广标签~~ | **❌ 已放弃（2026-10-16）：注册需推荐码，本人没有** | — |
+| ~~NodeSeek~~ | ~~推广容忍度高~~ | **❌ 已放弃（2026-10-16）：注册需推荐码；且全站维护中** | — |
 | **周刊投稿（issue）** | 阮一峰周刊、HelloGitHub、GithubDaily[cite:2] | D+2 起投；HelloGitHub 需中文项目介绍；被任意一家收录 = 长期长尾 | 中（零成本高杠杆） |
 | **MCP 官方 Registry** | 只存元数据，npm 上的 stdio 包可发布，`mcp-publisher publish`[cite:14][cite:15] | npm 发布当天同步注册：Claude/Cursor 生态内可被搜索安装 | 高（长期长尾） |
 | **mcp.so** | 表单自助注册，无需审核，受众含 Claude/Cursor 用户[cite:16] | 发布当天登记 | 高 |
 | **Smithery** | 需 MCPB 打包或 HTTPS endpoint[cite:17] | stdio 本地服务用 MCPB 方式提交；若打包成本高可放第二周 | 中 |
 | **awesome 列表 PR** | punkpeye/awesome-mcp-servers、wong2/awesome-mcp-servers（Cline 文档直接推荐前者[cite:18]） | 按各表格式提 PR 到 browser automation 分类；PR 描述写清差异 | 中高（持久反链） |
-| **掘金/知乎/B 站/头条** | 已有 PR 草稿在库；掘金算法流量已倾向合作内容，自然量有限[cite:2] | 发**技术长文**（"不用截图/OCR：给 Agent 喂语义树的浏览器怎么设计"），非通稿；B 站用录屏配音 3–5 分钟 | 中 |
+| **掘金/知乎/B 站/头条** | 掘金自然流量有限但长尾强[cite:2]；知乎/B 站/头条账号均已实测登录（2026-10-16，掘金待本人登录） | 发**技术长文**（掘金 PR_JUEJIN.md："不用截图/OCR：给 Agent 喂语义树的浏览器怎么设计"），非通稿；B 站用 demo_vertical.mp4（46s 竖屏，已就绪）；知乎 PR_ZHIHU.md；头条 PR_TOUTIAO.md | 中高（中文渠道现在是第二主战场，见下） |
 | **X / 即刻** | browser-use 证实人个账号 > 品牌号[cite:1] | 0 粉丝基线不押注；发 build-in-public 记录（star 里程碑、HN 实况、踩坑），@ MCP/agent 生态账号，作为其他渠道的放大器而非主战场 | 低（基线弱时） |
 | **GitHub Blog 官方建议** | 官方鼓励自荐到 HN/Reddit/PH，并主动到有该痛点的帖子下回复[cite:19] | 在 Reddit/Stack Overflow/V2EX 搜"browser automation for AI agent""MCP browser"类问题，有用回答中提及（不硬广） | 中 |
 
@@ -94,22 +94,40 @@ note-gen（8 个月 5k stars）作者的一手经验[cite:2]：
 - [x] 两个演示 GIF 均完成（语义树 + 人机共驾，入 README）；定向邀请 10–20 位真实用户试用（OUTREACH.md D-Day 执行）
 - [x] **D-4 终检（2026-10-16）**：单测实测 **428（28 文件）**、e2e **12 套件 428 断言全绿**，README 徽章 427→428 已修正；npm latest=v1.2.2 / git tag / GitHub Release 三者一致；Show HN 标题三处文档统一以 SHOW_HN.md 为准；4 个 A 类触点全部 OPEN 有效（A4 因 playwright-mcp #1773 被 NOT_PLANNED 关闭，替换为 stagehand #1250，新草稿见 OUTREACH.md）；PR #16354 与周刊三 issue 均 OPEN 在审
 - [ ] 注册/养号：按 ACCOUNT_CHECKLIST.md 逐项验证（Reddit karma、V2EX/linux.do 发帖权限、HN 账号）
-  → **D-3 实测进度（2026-10-16，经 ai-browser）**：V2EX ✅ 老账号已登录可发帖；Reddit ✅ 已登录但评论 karma 0（r/mcp 规则：自荐需披露 + showcase flair）；HN ✅ 已登录但**账号 1 小时前刚注册、karma 1**（🔴 D-Day 最大单点风险，须立即养号：设邮箱 + 4 天真实评论）；linux.do ❌ 未登录（登录页已开，等本人）；NodeSeek ⚠️ 全站维护中，D+1 复检
+  → **D-3 实测进度（2026-10-16，经 ai-browser）**：V2EX ✅ 老账号已登录可发帖；Reddit ✅ 已登录但评论 karma 0（r/mcp 规则：自荐需披露 + showcase flair）；HN ✅ 已登录但**账号 1 小时前刚注册、karma 1**（🔴 D-Day 最大单点风险，须立即养号：设邮箱 + 4 天真实评论）
+  → **策略调整**：HN 新号降权风险下，中文渠道从"D+1 跟发"升格为"第二主战场"——掘金技术长文 + 知乎文章前置到 D-2（周日）发布（长尾资产，与 HN 受众零重叠，提前 2 天开始累积 star 与 referral，也让 D-Day 的 Show HN 帖显得有备而来）
 - [ ] 准备好 D-Day 当晚 8 小时不被打断的整块时间
+
+### D-3（10/17 周六）养号与预热日
+
+- [ ] HN：profile 设置有效邮箱；在 3–5 个技术 thread 留真实评论（草稿由我检索相关 thread 后拟定，你审后发）
+- [ ] Reddit：r/ClaudeAI / r/ModelContextProtocol / r/LocalLLaMA 各 1–2 条真实技术评论（同样先审后发）
+- [ ] OUTREACH A 类 4 条竞品 issue 评论（stagehand #2148 / #1250、chrome-devtools-mcp #2856 / #3020）——**拟从 D+1 提前至今天**：GitHub 账号 9 年 170+ 仓库无风险，评论本身有信息价值，提前 4 天给项目带早期 referral 与反链（需你批准后由我经 gh 执行）
+- [ ] 掘金：本人在 ai-browser 窗口完成登录
+
+### D-2（10/18 周日）中文长文前置日
+
+- [ ] 掘金技术长文（PR_JUEJIN.md）发布——中文长尾主件，技术设计向非通稿
+- [ ] 知乎文章（PR_ZHIHU.md）发布
+- [ ] HN/Reddit 继续养号（各 2–3 条评论）
+- [ ] D-Day 终检：SHOW_HN 稿、CHANNEL_POSTS 三篇、V2EX 稿就位；HN 标题已在 /submit 预览（不提交）
 
 ### D-Day（10/20 周二）
 
 - **20:50 北京**：发 Show HN（标题与首评定稿见第六节）；5 分钟内贴自评；前 3 小时秒回所有评论，8 小时内不断档
+- **对冲预案**：HN 账号仅 4 天龄 + 低 karma，若发帖 1 小时内分数 < 3 且无评论，按第七节 D+2 决策门提前执行——不删帖，火力立即转 V2EX（当晚）+ 中文渠道二轮（知乎回答、头条），3–4 周后靠工程长文再打 HN
 - **22:00**：朋友圈/即刻/X 发"正在 Show HN"实况（只陈述，不喊票；HN 投票环禁止拉票，直接求 upvote 有反效果，分享链接给朋友看评论即可）
 - **次日早晨**：无论分数多少，继续回复欧美早高峰评论（HN 帖子 24–48h 仍有二次爬坡机会）
 
 ### D+1 ~ D+3（10/21–10/23）多源点火
 
 - 周二晚北京 = 美东周二早：**r/mcp 发 [showcase] 帖**（披露作者身份），2 小时逐楼回复；**r/ClaudeAI** 不同文案第二弹
-- 周三晚：**V2EX `分享创造`**、**linux.do `资源荟萃`**（两篇文案不同；可埋"HN 实况"角度）
-- NodeSeek 简版；B 站视频上传（用录屏 + 配音）
-- 投**阮一峰周刊、HelloGitHub、GithubDaily** 三个 issue
-- 掘金技术长文（以架构设计为主，项目作为载体）；知乎回答 2–3 个"AI 如何操作网页/MCP browser 选型"类已有问题
+- 周三 12:30：**V2EX `分享创造`**（老账号 No.20622，标题候选 A）
+- 周三晚：**B 站视频上传**（demo_vertical.mp4 46s 竖屏 + 配音稿 PR_BILIBILI.md）
+- 周四晚：**头条**（PR_TOUTIAO.md）
+- 知乎回答 2–3 个"AI 如何操作网页/MCP browser 选型"类已有问题（文章已在 D-2 发过，回答是第二触点）
+- （周刊三投已于 D-6 提交；A 类竞品评论已于 D-3 执行）
+- ~~linux.do / NodeSeek~~：放弃（需推荐码）
 
 ### D+5 ~ D+7（10/25–10/27）第二波
 
