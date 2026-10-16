@@ -126,7 +126,7 @@ macOS/Linux 已测，Windows 还没测。欢迎拍砖，也特别想听听你们
 | B 站视频 | D+2 | | 46s 竖屏已就绪 |
 | 头条 | D+3 | | 账号已登录 |
 | CSDN 博客 | D+1 | （草稿已存，未发布） | ⚠️ 2026-10-17：账号已登录、全文 5086 字已写入编辑器并自动存草稿，但**发布按钮无响应**。根因：编辑器 Vue 应用自身报 TypeError（statistic.csdn.net 收到 VueErrorHandler 上报），bizapi.csdn.net 的 getBaseInfo/list-permission 返回 401 "X-Ca-Key is not exist"——控制台 API 签名在此环境失败，应用数据加载不全导致发布链路断裂。另发现 markdown-highlighting class 会导致编辑器主线程随时间退化卡死（剥掉该 class 可稳定）。**建议本人登录 CSDN 创作中心一键发布该草稿** |
-| 头条文章 | D+3 | https://www.toutiao.com/article/7697326423064773160/ | ✅ 2026-10-17 01:59 已提交（pgc_id=7697326423064773160，审核中）；走通「预览并发布→确认发布」两段式流程；ProseMirror 合成 paste（text/html）注入成功 |
-| B 站视频 | D+2 | （BV 号待处理完成后分配） | ✅ 2026-10-17 02:30 已投递成功（demo_vertical.mp4 + img_cover_bilibili.jpg 封面 + 标题/简介/6 标签/创作声明"内容无需标注"）；提示"个人空间封面 16:9 未修"（4:3 已确认，16:9 待修，不影响审核）；BV 号关注 upload-manager/video |
+| 头条文章 | D+3 | https://www.toutiao.com/article/7697326423064773160/ | ✅ 2026-10-17 01:59 已提交，**02:40 已过审变为"已发布"**（pgc_id=7697326423064773160，首发标记）；走通「预览并发布→确认发布」两段式流程；ProseMirror 合成 paste（text/html）注入成功 |
+| B 站视频 | D+2 | https://www.bilibili.com/video/BV15RJb6oERJ/ | ✅ 2026-10-17 02:30 已投递成功（demo_vertical.mp4 + img_cover_bilibili.jpg 封面 + 标题/简介/6 标签/创作声明"内容无需标注"）；BV15RJb6oERJ 已分配、页面已上线（转码中，标题待同步）；提示"个人空间封面 16:9 未修"（4:3 已确认，可后续编辑修补） |
 | ~~linux.do~~ | — | — | ❌ 放弃（需推荐码） |
 | ~~NodeSeek~~ | — | — | ❌ 放弃（需推荐码） |
