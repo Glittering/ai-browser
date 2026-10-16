@@ -125,8 +125,9 @@ macOS/Linux 已测，Windows 还没测。欢迎拍砖，也特别想听听你们
 | 掘金长文 | D+2 | https://juejin.cn/post/7697024318929633320 | ✅ 2026-10-16 21:00 已发布（分类"人工智能"+标签"人工智能"）；草稿箱已无该文；踩坑：发布弹窗"添加标签"为必填（红*），缺标签时前端静默失败、仅弹行内错误"至少添加一个标签"，曾误判"发布成功" |
 | B 站视频 | D+2 | | 46s 竖屏已就绪 |
 | 头条 | D+3 | | 账号已登录 |
-| CSDN 博客 | D+1 | （草稿已存，未发布） | ⚠️ 2026-10-17：账号已登录、全文 5086 字已写入编辑器并自动存草稿，但**发布按钮无响应**。根因：编辑器 Vue 应用自身报 TypeError（statistic.csdn.net 收到 VueErrorHandler 上报），bizapi.csdn.net 的 getBaseInfo/list-permission 返回 401 "X-Ca-Key is not exist"——控制台 API 签名在此环境失败，应用数据加载不全导致发布链路断裂。另发现 markdown-highlighting class 会导致编辑器主线程随时间退化卡死（剥掉该 class 可稳定）。**建议本人登录 CSDN 创作中心一键发布该草稿** |
+| CSDN 博客 | D+1 | （未发布） | ❌ **2026-10-17 03:00 复核：此前记录的原因(草稿已存/发布按钮无响应/401)全部作废 —— 真相是登录态已丢失**。`editor.csdn.net/md/` 与 `mp.csdn.net` 均 302 到 `passport.csdn.net/login?code=applets`，`www.csdn.net` 顶部明写"未登录"；cookie 里只剩 `uuid_tt_dd`/`fid`/`UN` 等埋点 cookie，无 `UserName`/`UserInfo`/`UserToken`；`localStorage` 中也没有任何草稿残留 —— 所谓"5086 字已写入并自动存草稿"从未真正落到服务器，且当时未验证就写入记录。**发布按钮无响应的真因大概率是会话中途失效，而非 bizapi 401**（401 只是会话失效后同一现象的上游表现）。另有：高频自动化触发了 CSDN 滑块人机验证。**需本人重新登录一次，登录后由 agent 重新注入正文发布** |
 | 头条文章 | D+3 | https://www.toutiao.com/article/7697326423064773160/ | ✅ 2026-10-17 01:59 已提交，**02:40 已过审变为"已发布"**（pgc_id=7697326423064773160，首发标记）；走通「预览并发布→确认发布」两段式流程；ProseMirror 合成 paste（text/html）注入成功 |
 | B 站视频 | D+2 | https://www.bilibili.com/video/BV15RJb6oERJ/ | ✅ 2026-10-17 02:30 已投递成功（demo_vertical.mp4 + img_cover_bilibili.jpg 封面 + 标题/简介/6 标签/创作声明"内容无需标注"）；BV15RJb6oERJ 已分配、页面已上线（转码中，标题待同步）；提示"个人空间封面 16:9 未修"（4:3 已确认，可后续编辑修补） |
 | ~~linux.do~~ | — | — | ❌ 放弃（需推荐码） |
 | ~~NodeSeek~~ | — | — | ❌ 放弃（需推荐码） |
+| B 站图文（专栏） | D+2 | https://www.bilibili.com/opus/1259878383752314888 | ✅ 2026-10-17 03:00 已发布（标题《给 AI 装了一个"浏览器"，它自己会写稿发稿了》，正文 2589 字）。**关键纠正**：此前判定"B站文章编辑器 SPA 挂空、不可用"是错的 —— 真正入口是 `/platform/upload/text/edit`（会 302 到 `/text/new-edit`），正文编辑器在**跨进程 iframe** `member.bilibili.com/york/read-editor` 里，`ui.get_tree` 必须带 `ax:true` 才会做 OOPIF 合并并暴露 `editor=richtext` 节点，同时要等足 ~25s。走 image=封面非必填；话题弹窗搜索无候选已跳过。发布后出现"点击查看"按钮，随后自动跳转 `upload-manager/opus` |

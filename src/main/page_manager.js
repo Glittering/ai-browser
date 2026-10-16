@@ -14,6 +14,9 @@ import { withDeadline, actionDeadlineMs } from '../shared/deadline.js';
 import { DownloadMonitor } from './download_monitor.js';
 import { probeCapabilities } from './capability_probe.js';
 import valueContract from '../shared/value_contract.cjs';
+// 输入成功与否的判定口径（纯函数，独立模块便于单测）。详见文件内注释：
+// 富文本编辑器会把一个语义换行渲染成一串 \n，逐字比对会把成功的输入误判成失败。
+import { normalizeInputText, skeletalInputText } from '../shared/input_verify.js';
 
 const { expandValueFetchTree } = valueContract;
 
@@ -1681,10 +1684,18 @@ class PageManager {
     // clear 时先拆一遍：编辑器可能已经是"空但带外壳"的状态，不拆的话下面的
     // 幂等短路会把它当成"已经是空的"直接返回，外壳就永远留在那儿。
     if (!text) await stripEmptyShells();
-    // 校验用的归一化。\r\n 统一成 \n，再压掉"排版空白"（空格/tab），但换行
-    // 本身必须参与比对：把 \s 全剥掉会让 "a\nb\nc" 与 "abc" 等价，段落结构
-    // 丢失就被判成成功 —— 那是对调用方的谎报，出了问题无从察觉。
-    const norm = (s) => String(s || '').replace(/\r\n?/g, '\n').replace(/[^\S\n]+/g, '');
+    // 校验用的归一化，依次做三件事：
+    //   1. \r\n 统一成 \n（Windows 换行与受信 Enter 产出的 \r 不该算差异）；
+    //   2. 压掉"排版空白"（空格/tab），但换行本身必须参与比对 —— 把 \s 全剥掉
+    //      会让 "a\nb\nc" 与 "abc" 等价，段落结构丢了还判成功，那是谎报；
+    //   3. 连续换行压成一个。
+    // 第 3 条来自实测：contenteditable 编辑器（Quill/ProseMirror/Slate…）普遍把
+    // 一个语义换行渲染成一串 \n —— 往 B站 read-editor 输入 "AA\nBB"，读回是
+    // "AA\n\nBB"。逐字比对必然失配，于是**内容明明写进去了却回 success:false /
+    // cdp-input-failed**，调用方据此重试或放弃，而页面其实已经是想要的样子。
+    // 压缩换行仍然保留"有没有分段"这一层信息，只是不再纠结分了几层。
+    const norm = normalizeInputText;
+    const skeletal = skeletalInputText;
     // 幂等短路：若可编辑区当前内容已恰好等于目标文本，直接返回而不做清空+重打。
     // 每次全量重写都会把草稿标脏，重新触发编辑器自身的"草稿备份"/版本气泡——对
     // 相同文本的重复调用（重试/校正）不应让它反复闪烁。
@@ -1805,12 +1816,25 @@ class PageManager {
     );
     const want = norm(text);
     const got = norm(after && after.text);
-    const ok = want
-      ? got.includes(want)
-      : got === '';
-    return ok
-      ? { success: true, method: 'cdp-input', chars: (after && after.text) ? after.text.length : 0 }
-      : { success: false, error: 'Input not verified — please re-read the tree and retry', method: 'cdp-input-failed' };
+    // clear（空目标）：允许残留空块外壳 —— 编辑器永远乐于留下一个空 <p>。
+    const ok = want ? got.includes(want) : skeletal(got) === '';
+    if (ok) {
+      return { success: true, method: 'cdp-input', chars: (after && after.text) ? after.text.length : 0 };
+    }
+    // 诊断：忽略全部空白后再比一次。相等说明东西其实打进去了、只是被编辑器
+    // 重新排了版；不等说明大概率压根没落上去。两者的处置方式完全相反。
+    const landed = want ? skeletal(after && after.text) === skeletal(text) : false;
+    return {
+      success: false,
+      error: 'Input not verified — please re-read the tree and retry',
+      method: 'cdp-input-failed',
+      expected_chars: want.length,
+      actual_chars: got.length,
+      content_landed_ignoring_whitespace: landed,
+      hint: landed
+        ? 'the text matches once all whitespace is ignored — the editor most likely re-formatted line breaks/padding. Treat as applied and re-read the tree to confirm.'
+        : 'the text does not match even after stripping whitespace — the input probably did not land. Check focus/target before retrying.',
+    };
   }
 
   // OOPIF 内整段清空：在所属子帧上下文里聚焦 contenteditable，用 execCommand
