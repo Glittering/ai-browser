@@ -94,6 +94,7 @@ note-gen（8 个月 5k stars）作者的一手经验[cite:2]：
 - [x] 两个演示 GIF 均完成（语义树 + 人机共驾，入 README）；定向邀请 10–20 位真实用户试用（OUTREACH.md D-Day 执行）
 - [x] **D-4 终检（2026-10-16）**：单测实测 **428（28 文件）**、e2e **12 套件 428 断言全绿**，README 徽章 427→428 已修正；npm latest=v1.2.2 / git tag / GitHub Release 三者一致；Show HN 标题三处文档统一以 SHOW_HN.md 为准；4 个 A 类触点全部 OPEN 有效（A4 因 playwright-mcp #1773 被 NOT_PLANNED 关闭，替换为 stagehand #1250，新草稿见 OUTREACH.md）；PR #16354 与周刊三 issue 均 OPEN 在审
 - [ ] 注册/养号：按 ACCOUNT_CHECKLIST.md 逐项验证（Reddit karma、V2EX/linux.do 发帖权限、HN 账号）
+  → **D-3 实测进度（2026-10-16，经 ai-browser）**：V2EX ✅ 老账号已登录可发帖；Reddit ✅ 已登录但评论 karma 0（r/mcp 规则：自荐需披露 + showcase flair）；HN ✅ 已登录但**账号 1 小时前刚注册、karma 1**（🔴 D-Day 最大单点风险，须立即养号：设邮箱 + 4 天真实评论）；linux.do ❌ 未登录（登录页已开，等本人）；NodeSeek ⚠️ 全站维护中，D+1 复检
 - [ ] 准备好 D-Day 当晚 8 小时不被打断的整块时间
 
 ### D-Day（10/20 周二）
