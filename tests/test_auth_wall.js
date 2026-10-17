@@ -176,3 +176,25 @@ describe('looksLoggedIn — 收紧后的启发式', () => {
     expect(a).toEqual(b);
   });
 });
+
+// ---- P1-1 验收中抓到的误报：CSDN 文章页有视觉隐藏的登录表单 ----
+// 纯函数层的契约：调用方（extractor）负责只把**可见**密码框报上来。
+// 这里锁死"没有密码框 → 不判登录墙"，防止有人再把探测放宽回去。
+describe('password_field 只应由可见密码框触发', () => {
+  it('AW-PWD-1: 无密码框时不判登录墙（已登录工作页的常态）', () => {
+    const r = detectAuthWall({ url: 'https://blog.csdn.net/weixin_39287419/article/details/168241019', hasPasswordInput: false });
+    expect(r.detected).toBe(false);
+  });
+
+  it('AW-PWD-2: 有可见密码框才判（调用方已过滤隐藏表单）', () => {
+    const r = detectAuthWall({ url: 'https://example.com/some/page', hasPasswordInput: true });
+    expect(r.detected).toBe(true);
+    expect(r.reason).toBe('password_field');
+  });
+
+  it('AW-PWD-3: URL 命中登录域时无需密码框也判（优先级高于一切）', () => {
+    const r = detectAuthWall({ url: 'https://passport.csdn.net/login', hasPasswordInput: false });
+    expect(r.detected).toBe(true);
+    expect(r.reason).toBe('auth_host');
+  });
+});

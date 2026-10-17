@@ -19,6 +19,9 @@ import valueContract from '../shared/value_contract.cjs';
 import { normalizeInputText, skeletalInputText } from '../shared/input_verify.js';
 // 截图参数规范化（纯函数）：坏参数在入口就给可读错误，不拖到 CDP 层。
 import screenshotOpts from '../shared/screenshot_opts.cjs';
+// 跨进程子帧（OOPIF）判定与自动路由回执（纯函数）：默认读法检测到不可读
+// 子帧时自己补一次 AX 读取，调用方无需知道 ax:true 的存在。
+import frameProbe from '../shared/frame_probe.cjs';
 
 const { expandValueFetchTree } = valueContract;
 
@@ -516,7 +519,45 @@ class PageManager {
     // 截断的 node.value 带内部字段 value_fetch_ref —— 展开成含实际 tab 的
     // value_fetch（mcp/ws 两种可直接执行的调用提示），再删掉内部字段。
     if (res && res.tree) expandValueFetchTree(res.tree, tid);
+    // P1-1：页面有可见的跨进程子帧时，自动把子帧内容合并进默认树。
+    // 此前这条通路只在 ax:true 下存在，而**没有任何地方告诉调用方 ax:true
+    // 的存在** —— B站图文编辑器（正文在 OOPIF 里）因此隐形了两小时，agent
+    // 得出"编辑器没加载"的错误结论。现在默认读法自己补上这一步。
+    if (!focusedOnly) await this._autoMergeOpaqueFrames(res, tid);
     return res;
+  }
+
+  // 把跨进程子帧的内容读出来、合并进默认（DOM）树。轻量：只读子帧，
+  // 不重建主树，所以默认树的形状/id 全部保持原样。
+  // 三种结局都写进 context.frame_hints（见 shared/frame_probe.describeAutoAx）：
+  // merged / no-new-content / failed+reason。调用方必须能区分"已尽力"和
+  // "还有一条没走过的路"。
+  async _autoMergeOpaqueFrames(res, tid) {
+    try {
+      if (!res || !res.tree || !res.context) return;
+      if (res.tree.__oopif_merged) return; // 幂等：合并过的树不重复做
+      const summary = res.context.cross_process_frames;
+      if (!frameProbe.shouldAutoAx(summary)) return;
+      const view = this._getView(tid);
+      if (!view) return;
+      const frames = await withDeadline(this._readOopifFrames(view, tid), 15000, 'get_tree(auto-oopif)');
+      if (frames && frames.length) {
+        res.tree = axExtractor.mergeFrameTrees(res.tree, frames);
+        res.tree.__oopif_merged = true;
+      }
+      res.context.frame_hints = frameProbe.describeAutoAx({
+        merged: !!(frames && frames.length),
+        framesRead: (frames || []).length,
+      });
+    } catch (e) {
+      // 自动合并失败绝不拖垮主读法：默认树照常返回，只在 hints 里说明原因。
+      // 调用方看到 failed 可以手动切 ax:true 重试。
+      if (res && res.context) {
+        res.context.frame_hints = frameProbe.describeAutoAx({
+          error: (e && e.__deadline ? e.message + ' — the page main thread is likely blocked' : e && e.message) || String(e),
+        });
+      }
+    }
   }
 
   // 登录态 / 登录墙自查。长任务里每个关键步骤前都可以问一次，成本只是走一次

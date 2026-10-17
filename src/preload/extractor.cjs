@@ -6,6 +6,9 @@ var valueContract = require("../shared/value_contract.cjs");
 var truncateNodeValue = valueContract.truncateNodeValue;
 var sensitiveInputKind = valueContract.sensitiveInputKind;
 var authWallLib = require("../shared/auth_wall.cjs");
+// 跨进程子帧（OOPIF）探测的纯函数部分。extractor 负责收集（要 DOM），
+// 这里负责汇总与"该不该自动切 AX"的判定（要可单测）。
+var frameProbe = require("../shared/frame_probe.cjs");
 
 // ============================================================
 // 1. EXTRACT TREE — DOM → semantic tree with bounds + states
@@ -19,6 +22,12 @@ function extractTree() {
   var seen = new WeakSet();
   var counter = 0;
   var VERSION_TAG = "v6.9";
+  // 本次抽取中遇到的、内容读不到的 iframe（跨进程子帧）。汇总后由
+  // extractPageContext 写进 context.cross_process_frames。
+  var opaqueFrames = [];
+  // process() 与文末 fallback 显式扫描会各遇到一次同一个 OOPIF，用这个集合
+  // 去重（不依赖 DOM 顺序，也不往页面里写任何标记）。
+  var seenOpaque = new WeakSet();
 
   // 元素自己所在的 window。跨文档时必须用它：
   // `el instanceof HTMLElement` 里 HTMLElement 是**顶层 window**的构造函数，
@@ -341,6 +350,34 @@ function extractTree() {
           };
         }
       } catch (e) { /* cross-origin：读不到就算了，交给后面的兜底 */ }
+      // 走到这里 = 同源 DOM 通路读不到内容的 iframe。绝大多数是跨进程子帧
+      // （OOPIF）：Chromium 把它放在独立渲染进程，contentDocument 恒为 null，
+      // 同源递归对它完全无效。**此前这里静默丢弃** —— B站图文编辑器的正文
+      // 编辑器就是这么从默认语义树里整体消失的（事故复盘见
+      // docs/AGENT_OPERABILITY_FEEDBACK.md）。现在至少留下带 opaque 标记的
+      // 占位节点 + 汇总进 context.cross_process_frames 的线索，调用方才知道
+      // "这里有一块内容，且默认通路读不到，该切 AX"。
+      try {
+        if (!seenOpaque.has(el)) {
+        seenOpaque.add(el);
+        var ifrRect = el.getBoundingClientRect ? el.getBoundingClientRect() : { width: 0, height: 0 };
+        opaqueFrames.push({
+          id: el.id || null,
+          src: el.getAttribute("src") || null,
+          width: Math.round(ifrRect.width || 0),
+          height: Math.round(ifrRect.height || 0)
+        });
+        }
+      } catch (e2) { /* 拿不到尺寸也至少留下存在性线索 */ }
+      return {
+        id: "iframe-" + (el.id || counter++),
+        role: "iframe_body",
+        label: el.title || el.name || "iframe content (cross-process, not readable from here)",
+        // opaque: 内容在另一个渲染进程。同源读取（getBoundingClientRect 之外
+        // 的任何 DOM 访问）都到不了；读取要走 CDP Accessibility（ax:true）。
+        opaque: true,
+        src: el.getAttribute("src") || null
+      };
     }
     if (!isSemantic(el)) {
       var elChildren = el.children;
@@ -528,8 +565,23 @@ function extractTree() {
     } else if (iframeText) {
       extraIframes.push({ id: "iframe-text-" + counter++, role: "iframe_body", label: ifr.title || ifr.name || "iframe content", text: iframeText });
     } else {
-      // At least add the iframe node itself
-      extraIframes.push({ id: "iframe-empty-" + counter++, role: "iframe", label: ifr.title || ifr.name || "iframe" });
+      // 同源通路读不到内容。绝大多数是跨进程子帧（OOPIF）—— Chromium 把它
+      // 放在独立渲染进程，contentDocument 恒 null。**此前这里只产出一个不带
+      // 任何标记的空壳节点**，看起来像"这里有个 iframe 且里面是空的"，
+      // 而真相是"这里有一整块内容，默认通路完全读不到"。标 opaque + 收集。
+      if (!seenOpaque.has(ifr)) {
+        seenOpaque.add(ifr);
+        try {
+          var oRect = ifr.getBoundingClientRect ? ifr.getBoundingClientRect() : { width: 0, height: 0 };
+          opaqueFrames.push({
+            id: ifr.id || null,
+            src: ifr.getAttribute("src") || null,
+            width: Math.round(oRect.width || 0),
+            height: Math.round(oRect.height || 0)
+          });
+        } catch (e3) { /* 尺寸拿不到也留下存在性线索 */ }
+      }
+      extraIframes.push({ id: "iframe-empty-" + counter++, role: "iframe", label: ifr.title || ifr.name || "iframe", opaque: true, src: ifr.getAttribute("src") || null });
     }
   }
   if (extraIframes.length && root) {
@@ -556,12 +608,44 @@ function extractTree() {
   }
   root.focused_element_id = focusedId;
   root._debug = { iframe_count: extraIframes.length, version: VERSION_TAG };
+  // 内容读不到的跨进程子帧：挂根上供调用方一眼看到"这里有 N 块默认通路
+  // 读不到的内容"。extractPageContext 会汇总成更结构化的
+  // context.cross_process_frames（带建议通路）。
+  root.cross_process_iframes = opaqueFrames;
   return root;
 }
 
 // ============================================================
 // 2. EXTRACT PAGE CONTEXT — modals, forms, iframes, session
 // ============================================================
+
+// 收集当前页面里"内容读不到"的 iframe（跨进程子帧 OOPIF）。
+// 为什么 extractPageContext 自己扫而不是复用 extractTree 闭包里的数组：
+// bridge 的 ai:context 只调 extractPageContext（ui.auth_state 走的就是这
+// 条），那条路径上 extractTree 从未运行，闭包数组是空的 —— 登录态自查
+// 也必须能报告"这个页面有 OOPIF"。
+function collectOpaqueFrames() {
+  var out = [];
+  var ifrs = document.querySelectorAll("iframe");
+  for (var i = 0; i < ifrs.length; i++) {
+    var f = ifrs[i];
+    var readable = false;
+    try {
+      var d = f.contentDocument || (f.contentWindow && f.contentWindow.document);
+      readable = !!(d && d.body);
+    } catch (e) { readable = false; }
+    if (readable) continue;
+    var r = { width: 0, height: 0 };
+    try { r = f.getBoundingClientRect() || r; } catch (e2) { /* 尺寸缺失不影响存在性 */ }
+    out.push({
+      id: f.id || null,
+      src: f.getAttribute("src") || null,
+      width: Math.round(r.width || 0),
+      height: Math.round(r.height || 0)
+    });
+  }
+  return out;
+}
 
 function extractPageContext() {
   // MODALS — unified search across ALL patterns.
@@ -905,7 +989,29 @@ function extractPageContext() {
   //      csrfToken，子串命中，于是 logged_in 被判成 true（主动谎报）；
   //   2. bodyText.length > 1000 也算登录证据 —— CSDN 登录页正文远超 1000 字。
   // 现在 cookie 按名字判（csrf 类显式排除），并且新增顶层 auth_wall 硬信号。
-  var hasPwdInput = !!document.querySelector("input[type=password]");
+  // 密码框必须**可见才算**。旧实现是裸 querySelector：CSDN 文章页常驻一个
+  // display:none 的登录表单（视觉隐藏但 DOM 在），于是每篇文章页都被误报成
+  // "登录墙"—— 一个把已登录工作页说成登录墙的信号，比没有信号更糟：它会
+  // 让调用方在正确页面上停下"重新登录"，或干脆不信任这个字段。
+  // 判定与 ui.screenshot 的密码框探测同一口径：有尺寸 + 不在隐藏祖先链上。
+  var hasPwdInput = false;
+  try {
+    var pwdEls = document.querySelectorAll("input[type=password]");
+    for (var pi = 0; pi < pwdEls.length; pi++) {
+      var pe = pwdEls[pi];
+      var pr = pe.getBoundingClientRect ? pe.getBoundingClientRect() : { width: 0, height: 0 };
+      if (!(pr.width > 0 && pr.height > 0)) continue;
+      var pHidden = false;
+      var pp = pe.parentElement;
+      while (pp && pp !== document.body) {
+        var pst = window.getComputedStyle(pp);
+        if (pst && (pst.display === "none" || pst.visibility === "hidden")) { pHidden = true; break; }
+        if (pp.hidden === true || pp.getAttribute("aria-hidden") === "true") { pHidden = true; break; }
+        pp = pp.parentElement;
+      }
+      if (!pHidden) { hasPwdInput = true; break; }
+    }
+  } catch (ePwd) { /* 探测失败按"没有密码框"处理：宁可漏报也不要误报登录墙 */ }
   var hasAvatar = !!document.querySelector("[class*=avatar],img[class*=avatar],img[class*=user]");
   var authWall = authWallLib.detectAuthWall({
     url: document.URL,
@@ -939,6 +1045,11 @@ function extractPageContext() {
     hints: topHints.length ? topHints : null,
     required_hints: requiredHints.length ? requiredHints : null,
     session: { logged_in: login.logged_in, evidence: login.evidence },
+    // 跨进程子帧（OOPIF）汇总。count>0 意味着"页面有一块内容，默认 DOM
+    // 通路读不到"——调用方该切 AX 读法（ax:true）。suggestion 里带通路名。
+    // 事故背景：B站图文编辑器正文在 OOPIF 里，此前树里连占位都没有，
+    // agent 得出"编辑器没加载"的错误结论。
+    cross_process_frames: frameProbe.summarizeOpaqueFrames(collectOpaqueFrames()),
     stats: {
       inputs: document.querySelectorAll("input:not([type=hidden])").length,
       buttons: document.querySelectorAll("button").length,
