@@ -17,6 +17,8 @@ import valueContract from '../shared/value_contract.cjs';
 // 输入成功与否的判定口径（纯函数，独立模块便于单测）。详见文件内注释：
 // 富文本编辑器会把一个语义换行渲染成一串 \n，逐字比对会把成功的输入误判成失败。
 import { normalizeInputText, skeletalInputText } from '../shared/input_verify.js';
+// 截图参数规范化（纯函数）：坏参数在入口就给可读错误，不拖到 CDP 层。
+import screenshotOpts from '../shared/screenshot_opts.cjs';
 
 const { expandValueFetchTree } = valueContract;
 
@@ -559,6 +561,99 @@ class PageManager {
             : 'not-logged-in (heuristic) — verify before continuing'),
       };
     } catch (e) {
+      return { ok: false, error: e.message, tab: tid };
+    }
+  }
+
+  // 视口截图（P0-1）。此前 ai-browser 只有元素树这一只"眼睛"：树里没有的
+  // 东西（浮层、canvas、图片、CSS 遮挡、渲染错位）就完全不可见，而这类情况
+  // 恰恰是操作失败的主因。调用方失败时第一反应是"看截图"，工具面必须支持。
+  //
+  // 走 webContents.debugger 的 Page.captureScreenshot —— 与 AX/Network 域
+  // 共用同一个 per-tab attach（_ensureCdp 幂等），不额外占用调试器。
+  // 截图是同步渲染快照，主线程卡住时它不返回，所以带 deadline。
+  async screenshot(tabId, opts = {}) {
+    const tid = tabId !== undefined ? tabId : this.activeTab;
+    const view = this._getView(tid);
+    if (!view) return { ok: false, error: 'no-such-tab', tab: tid };
+
+    const norm = screenshotOpts.normalizeScreenshotOpts(opts);
+    if (!norm.ok) return { ok: false, error: norm.error, tab: tid };
+    const o = norm.opts;
+
+    let meta = {};
+    try {
+      this._ensureCdp(tid, view, 'Page');
+    } catch (e) {
+      return { ok: false, error: 'cdp-unavailable: ' + e.message, tab: tid };
+    }
+    const dbg = view.webContents.debugger;
+    if (!dbg) return { ok: false, error: 'cdp-unavailable', tab: tid };
+
+    try {
+      // 视口尺寸：clip 缺省时用于回执，也让调用方知道拍的到底是哪块。
+      // 失败不致命（老页面没布局完也会返回 0），降级为 null。
+      try {
+        const lm = await withDeadline(dbg.sendCommand('Page.getLayoutMetrics'), 10000, 'getLayoutMetrics');
+        const vp = lm && lm.cssLayoutViewport ? lm.cssLayoutViewport : (lm && lm.layoutViewport) || null;
+        if (vp) meta = { width: Math.round(vp.clientWidth || 0), height: Math.round(vp.clientHeight || 0) };
+      } catch (_) { /* 布局指标拿不到就算了，截图本身才是主目标 */ }
+
+      const params = {
+        format: o.format,
+        fromSurface: true,
+        captureBeyondViewport: o.fullPage,
+      };
+      if (o.quality !== undefined) params.quality = o.quality;
+      if (o.clip) params.clip = o.clip;
+      const shot = await withDeadline(
+        dbg.sendCommand('Page.captureScreenshot', params),
+        20000, 'captureScreenshot'
+      );
+      if (!shot || typeof shot.data !== 'string') {
+        return { ok: false, error: 'empty screenshot result', tab: tid };
+      }
+
+      const mime = 'image/' + (o.format === 'jpeg' ? 'jpeg' : o.format);
+      // 一次 evaluate 拿两样东西：可见密码框（截图不脱敏，泄密了得让调用方
+      // 知道）和 devicePixelRatio —— 后者因为 CDP 的 clip 是 CSS 像素而输出
+      // 是设备像素：调用方按 getBoundingClientRect 传 500 宽，Retina 上会
+      // 拿到 1000 像素的图。没有这个比值，"zoom 拍元素"的调用方无法把图上的
+      // 坐标换算回页面坐标。
+      let hasPwd = false;
+      let dpr = null;
+      try {
+        const p = await this.evaluate(
+          `(function(){var els=document.querySelectorAll('input[type=password]');` +
+          `var pwd=false;for(var i=0;i<els.length;i++){var r=els[i].getBoundingClientRect();` +
+          `if(r.width>0&&r.height>0)pwd=true;}return JSON.stringify({pwd:pwd,dpr:window.devicePixelRatio||1});})()`, tid);
+        let parsed = null;
+        try { parsed = typeof p === 'string' ? JSON.parse(p) : p; } catch (_) { /* evaluate 可能返回 undefined */ }
+        if (parsed) { hasPwd = parsed.pwd === true; dpr = Number(parsed.dpr) || null; }
+      } catch (_) { /* 探测失败不影响截图交付 */ }
+
+      const summary = screenshotOpts.describeShot({
+        format: o.format,
+        mime,
+        bytes: Buffer.byteLength(shot.data, 'base64'),
+        width: meta.width,
+        height: meta.height,
+        url: (this._getView(tid) && this._getView(tid).webContents.getURL()) || undefined,
+        hasVisiblePasswordInput: hasPwd,
+        devicePixelRatio: dpr,
+      });
+      return {
+        ok: true,
+        tab: tid,
+        // data 是 base64 裸数据（不带 data: 前缀）—— 调用方按需自己拼。
+        data: shot.data,
+        mime,
+        ...summary,
+      };
+    } catch (e) {
+      if (e && e.__deadline) {
+        return { ok: false, error: e.message + ' — the page main thread is likely blocked', tab: tid };
+      }
       return { ok: false, error: e.message, tab: tid };
     }
   }

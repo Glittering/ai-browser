@@ -60,6 +60,9 @@ export const VALID_METHODS = [
   'ui.get_tree',
   'ui.act',
   'ui.auth_state',
+  // 视口截图（P0-1）：操作失败时的第一诊断手段，弥补元素树看不见的
+  // 浮层/canvas/遮挡/渲染错位。返回 base64，默认 png。
+  'ui.screenshot',
   'ui.navigate',
   'ui.repaint',
   'ui.snapshot',

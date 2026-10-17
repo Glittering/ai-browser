@@ -309,6 +309,16 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
             send({ jsonrpc: '2.0', id, result });
             break;
           }
+          case 'ui.screenshot': {
+            // 视口截图（P0-1）。工具面此前只有元素树一只眼睛，树里没有的
+            // （浮层/canvas/遮挡/渲染错位）就完全不可见 —— 而它们正是操作
+            // 失败的主因。失败时"先看截图"从此有工具可依。
+            // 参数：{ tab, format: 'png'|'jpeg'|'webp', quality: 0-100,
+            //         fullPage: bool, clip: {x,y,width,height,scale} }
+            const result = await pageManager.screenshot(tabId, params);
+            send({ jsonrpc: '2.0', id, result });
+            break;
+          }
           case 'ui.peek': {
             // A (plan §9.5): safely reveal a folded/hoverable affordance and
             // return the AX diff. Non-committing (hover only).

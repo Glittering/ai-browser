@@ -135,6 +135,32 @@ export const MCP_TOOLS = [
     }
   },
   {
+    name: 'browse_screenshot',
+    title: 'Screenshot the viewport',
+    description: 'Screenshot the viewport (base64 in data). Use FIRST when an action misbehaves: the element tree cannot show overlays, canvas, occlusion or glitches. Warns if a visible password input is on screen.',
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tab: { type: 'integer', description: 'Tab id (default: active tab).' },
+        format: { type: 'string', enum: ['png', 'jpeg', 'webp'], description: 'Image format. Default png. jpeg at quality 85 is ~5x smaller — prefer it for long pages.' },
+        quality: { type: 'number', description: '0-100, jpeg/webp only (ignored for png). Default 85 for jpeg.' },
+        fullPage: { type: 'boolean', description: 'Capture the full scrollable page, not just the viewport. Cannot be combined with clip.' },
+        clip: {
+          type: 'object',
+          description: 'Capture a rectangle in CSS pixels: {x, y, width, height, scale?}. Use to zoom into one element when the viewport shot is too small to read.',
+          properties: {
+            x: { type: 'number' },
+            y: { type: 'number' },
+            width: { type: 'number' },
+            height: { type: 'number' },
+            scale: { type: 'number', description: 'Device scale factor, 0-4. Default 1.' }
+          }
+        }
+      }
+    }
+  },
+  {
     name: 'browse_list_tabs',
     title: 'List tabs',
     description: 'List open tabs (id, url, title, active).',

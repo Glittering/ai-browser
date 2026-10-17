@@ -19,6 +19,8 @@ import { fileURLToPath } from 'node:url';
 import electronResolve from '../../scripts/electron_resolve.cjs';
 import { MCP_TOOLS } from './mcp_tools.js';
 import { evaluateGuardError } from '../shared/guards.js';
+// 截图体积上限（与 WS 侧共用同一把尺）：超过就不把图塞进上下文。
+import screenshotOpts from '../shared/screenshot_opts.cjs';
 import { config, wsUrl } from '../shared/config.js';
 import { VERSION } from '../shared/version.js';
 import { createWsClient } from './mcp_ws.js';
@@ -249,6 +251,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     case 'browse_auth_state': {
       const result = await wsClient.call('ui.auth_state', { tab: args.tab });
       return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+    }
+
+    case 'browse_screenshot': {
+      // 图片走 MCP 原生 image content（客户端能直接渲染），摘要走 text。
+      // 超大图（默认 >512KB base64）只回摘要：塞进上下文会挤爆调用方的
+      // token 预算，而"这张图太大"本身就该让它换 jpeg/换 clip。
+      const result = await wsClient.call('ui.screenshot', args);
+      if (result.ok && typeof result.data === 'string' && (result.bytes || 0) <= screenshotOpts.MAX_DATA_URL_CHARS) {
+        const meta = { ...result };
+        delete meta.data;
+        return {
+          content: [
+            { type: 'image', data: result.data, mimeType: result.mime },
+            { type: 'text', text: JSON.stringify(meta) },
+          ],
+        };
+      }
+      const slim = result.ok ? { ...result, data: undefined, truncated: true } : result;
+      return { content: [{ type: 'text', text: JSON.stringify(slim) }] };
     }
 
     case 'browse_list_tabs': {
