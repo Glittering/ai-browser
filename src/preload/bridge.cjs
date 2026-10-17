@@ -74,6 +74,18 @@ ipcRenderer.on("ai:evaluate", function(_event, data) {
   data = data || {};
   try {
     var result = eval(data.js);
+    // awaitPromise 的 preload 侧对应物：CDP 路径会等 Promise，这条老路径原先
+    // 不等，于是 async IIFE 原样把 Promise 发回去，调用方看到 {}。页面里
+    // "等一个请求再返回"的探测脚本因此全变成空回执。thenable 才等，普通值
+    // 同步返回（不引入额外延迟）。
+    if (result && typeof result.then === "function") {
+      result.then(function(v) {
+        ipcRenderer.send("ai:evaluate_result", { value: v, id: data.id });
+      }, function(e) {
+        ipcRenderer.send("ai:evaluate_result", { error: e && e.message ? e.message : String(e), id: data.id });
+      });
+      return;
+    }
     ipcRenderer.send("ai:evaluate_result", { value: result, id: data.id });
   } catch(e) {
     ipcRenderer.send("ai:evaluate_result", { error: e.message, id: data.id });

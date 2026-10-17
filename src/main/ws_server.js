@@ -195,7 +195,12 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
               send({ jsonrpc: '2.0', id, error: { code: -32602, message: guardErr } });
               break;
             }
-            const value = await pageManager.evaluate(js, tabId);
+            // frame_ref: run inside that cross-process frame's context.
+            // Needed because the implicit route (a literal data-ai-id="axf-..."
+            // inside the JS) silently no-ops when the caller builds the selector
+            // by string concatenation — the JS then runs in the top frame and
+            // reads null back for an element that exists.
+            const value = await pageManager.evaluate(js, tabId, { frameRef: params.frame_ref || undefined });
             send({ jsonrpc: '2.0', id, result: { value } });
             break;
           }

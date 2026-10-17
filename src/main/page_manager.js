@@ -22,6 +22,9 @@ import screenshotOpts from '../shared/screenshot_opts.cjs';
 // 跨进程子帧（OOPIF）判定与自动路由回执（纯函数）：默认读法检测到不可读
 // 子帧时自己补一次 AX 读取，调用方无需知道 ax:true 的存在。
 import frameProbe from '../shared/frame_probe.cjs';
+// ui.act target 形状体检（纯函数）：传了可见文字而不是 data-ai-id 时，
+// 入口就给可操作的错误，而不是等到选择器查空才说 "Target not found"。
+import refGuard from '../shared/ref_guard.cjs';
 
 const { expandValueFetchTree } = valueContract;
 
@@ -996,6 +999,14 @@ class PageManager {
     if (!target && !targetOptional) return { success: false, error: 'No target' };
     target = target || '';
 
+    // target 形状体检：传了可见文字（"发布"）而不是 data-ai-id 时，这里就明说。
+    // 否则要等到 `[data-ai-id="发布"]` 查空，回一句不带方向的
+    // "Target not found"，调用方很难想到真正原因是形状错了。
+    if (target) {
+      const shapeErr = refGuard.refShapeError(target);
+      if (shapeErr) return { success: false, error: shapeErr, method: 'bad-target-shape' };
+    }
+
     // 只读分支：取 node.value 的完整内容（树里只给前 200 code point）。
     // 不聚焦、不触发 input/change、不改页面，也不走输入动作的 fallback。
     if (action === 'get_value') return await this._getValue(view, target, params, tid);
@@ -1220,21 +1231,32 @@ class PageManager {
     return result?.tree?.focused_element_id || null;
   }
 
-  async evaluate(js, tabId) {
+  async evaluate(js, tabId, opts = {}) {
     const tid = tabId !== undefined ? tabId : this.activeTab;
     const view = this._getView(tid);
     if (!view) throw new Error('Tab not found');
 
-    // OOPIF routing: if the JS targets a sub-frame `data-ai-id` (`axf-...`), run
-    // it inside that frame's own context via Frame.executeJavaScript — the
-    // top-frame CDP Runtime.evaluate cannot see OOPIF (cross-process iframe)
-    // DOM, so probes/`ui.evaluate` would otherwise read `null` back.
-    const m = /data-ai-id="(axf-\d+-\d+)"/.exec(js);
-    if (m) {
-      const frame = await this._owningFrame(view, m[1]);
+    // OOPIF routing. Two ways in, explicit beats implicit:
+    //   opts.frameRef  — caller passes the axf-... ref directly. Reliable:
+    //     works no matter how the JS string was built.
+    //   literal match  — the old behavior: /data-ai-id="(axf-...)/ inside the
+    //     JS source. Kept for compatibility, but it is a trap: a caller that
+    //     builds the selector by concatenation ('[data-ai-id="' + ref + '"]')
+    //     produces no literal, routing silently does not happen, and the
+    //     top-frame evaluate returns null for an element that exists.
+    //     Hit for real during the P1-2 rollout.
+    const frameRef = opts.frameRef || (/data-ai-id="(axf-\d+-\d+)"/.exec(js) || [])[1];
+    if (frameRef) {
+      const frame = await this._owningFrame(view, frameRef);
       if (frame) {
         try { return await frame.executeJavaScript(js.startsWith('(') ? js : `(function(){return ${js};})()`); }
         catch (e) { /* fall through to top-frame path */ }
+      }
+      // 显式给了 frameRef 却找不到帧：不能静默落到顶层 —— 调用方会拿到 null
+      // 并以为"元素不存在"。明说是路由失败。
+      if (opts.frameRef) {
+        throw new Error('frame_not_found: no cross-process frame owns ' + String(opts.frameRef)
+          + ' — the ref may be stale (page re-rendered). Re-read the tree and retry.');
       }
     }
     // Preferred path: CDP Runtime.evaluate. It runs on the DevTools protocol
@@ -1265,7 +1287,13 @@ class PageManager {
     const cmd = dbg.sendCommand('Runtime.evaluate', {
       expression: js,
       returnByValue: true,
-      awaitPromise: false,
+      // awaitPromise:true —— 调用方在页面里写 async/await 是常态（等一个请求、
+      // 等一帧渲染、等编辑器提交），此前是 false，于是 async IIFE 原样返回
+      // 一个 Promise 对象，序列化后调用方看到 **{}**，会以为"页面什么都没
+      // 返回"。实测症状：往掘金标签框写"已选中"的探测脚本明明 await 了网络
+      // 响应，回执却是空对象，据此得出"标签没选上"的错误结论。
+      // 对非 thenable 表达式此参数无副作用（CDP 直接返回值本身）。
+      awaitPromise: true,
     });
     const timeout = new Promise((_, rej) =>
       setTimeout(() => rej(new Error('cdp evaluate timeout')), 5000));

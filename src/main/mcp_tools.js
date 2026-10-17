@@ -49,7 +49,7 @@ export const MCP_TOOLS = [
         action: { type: 'string', enum: ['click', 'type', 'clear', 'focus', 'hover', 'scroll_to', 'upload', 'get_value', 'drag', 'press', 'wheel', 'paste'], description: 'Action.' },
         html: { type: 'string', description: 'paste: HTML to inject (preferred). Editors convert it through their own paste pipeline (Draft.js/ProseMirror/Quill), so headings/code blocks/bold/lists survive. Plain text loses all formatting.' },
         text: { type: 'string', description: 'paste: plain-text fallback when html is absent.' },
-        target: { type: 'string', description: 'Element data-ai-id from the semantic tree. Omit for press (keys go to the current focus); for drag you may also omit it and pass from_x/from_y to start from a bare point.' },
+        target: { type: 'string', description: 'Element data-ai-id from the semantic tree (e.g. e:button-12, axf-3-1) — NOT the visible label. Omit for press (keys go to the current focus); for drag you may also omit it and pass from_x/from_y to start from a bare point.' },
         text: { type: 'string', description: 'Text to type (type only).' },
         value: { type: 'string', description: 'Value for select.' },
         offset: { type: 'integer', description: 'get_value: start offset in Unicode code points (default 0).' },
@@ -81,13 +81,14 @@ export const MCP_TOOLS = [
   {
     name: 'browse_evaluate',
     title: 'Run page JavaScript',
-    description: 'Run a JS expression in the page context and return its value.',
+    description: 'Run a JS expression in the page context and return its value. Promises are awaited (async IIFEs return their resolved value, not {}).',
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     inputSchema: {
       type: 'object',
       properties: {
-        js: { type: 'string', description: 'Page-context JS expression (not statements). Max 5000 chars.' },
-        tab: { type: 'integer', description: 'Tab id (default: active tab).' }
+        js: { type: 'string', description: 'Page-context JS expression (not statements). Max 5000 chars. Promises are awaited.' },
+        tab: { type: 'integer', description: 'Tab id (default: active tab).' },
+        frame_ref: { type: 'string', description: 'Run inside this cross-process frame (an axf-... id from the tree). Pass it explicitly when touching iframe content: building the selector by string concatenation defeats the automatic route and the top-frame run returns null.' }
       },
       required: ['js']
     }
