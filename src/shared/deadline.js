@@ -78,6 +78,12 @@ export function actionDeadlineMs(action, params = {}) {
   } else if (action === 'clear') {
     // clear 要走编辑器状态提交与回读校验（多处 80~150ms 等待）。
     need = Math.max(need, 20000);
+  } else if (action === 'paste') {
+    // paste 本身不逐字符输入，但大型 HTML 经编辑器管线转换（Draft.js 的
+    // DraftPasteProcessor / ProseMirror 的 transformPastedHTML）可能很慢，
+    // 之后还有 350ms 等待 + 回读校验。按 payload 大小给余量。
+    const payload = Math.max(String(p.html || '').length, String(p.text || '').length);
+    need = Math.max(need, 20000 + payload / 4);
   }
 
   const env = Number(process.env.AI_BROWSER_ACTION_TIMEOUT_MS);

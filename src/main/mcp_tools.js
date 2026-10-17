@@ -41,12 +41,14 @@ export const MCP_TOOLS = [
   {
     name: 'browse_act',
     title: 'Act on element',
-    description: 'Act on an element by data-ai-id: click, type (append at caret), setContent (replace all), clear, focus, hover, scroll_to, upload, get_value (read-only), drag, press, wheel.',
+    description: 'Act on an element by data-ai-id: click, type (append at caret), setContent (replace all), clear, focus, hover, scroll_to, upload, get_value (read-only), drag, press, wheel, paste.',
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     inputSchema: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['click', 'type', 'clear', 'focus', 'hover', 'scroll_to', 'upload', 'get_value', 'drag', 'press', 'wheel'], description: 'Action.' },
+        action: { type: 'string', enum: ['click', 'type', 'clear', 'focus', 'hover', 'scroll_to', 'upload', 'get_value', 'drag', 'press', 'wheel', 'paste'], description: 'Action.' },
+        html: { type: 'string', description: 'paste: HTML to inject (preferred). Editors convert it through their own paste pipeline (Draft.js/ProseMirror/Quill), so headings/code blocks/bold/lists survive. Plain text loses all formatting.' },
+        text: { type: 'string', description: 'paste: plain-text fallback when html is absent.' },
         target: { type: 'string', description: 'Element data-ai-id from the semantic tree. Omit for press (keys go to the current focus); for drag you may also omit it and pass from_x/from_y to start from a bare point.' },
         text: { type: 'string', description: 'Text to type (type only).' },
         value: { type: 'string', description: 'Value for select.' },

@@ -36,6 +36,13 @@ function executeAction(elementId, action, params) {
         el.dispatchEvent(new Event("change", { bubbles: true }));
         return { success: true };
 
+      case "paste":
+        // 富文本粘贴（CDP 不可用时的顶层兜底；OOPIF 子帧 preload 到不了，
+        // 那条路只有 CDP 的 Frame.executeJavaScript 能走）。
+        // 合成 ClipboardEvent + DataTransfer：Draft.js / ProseMirror / Quill
+        // 的粘贴处理器会把 text/html 转成内部文档模型，与真人粘贴等效。
+        return doPaste(el, params);
+
       case "select":
         if (el.tagName.toLowerCase() !== "select") return { success: false, error: "Not a select element" };
         el.value = params.value || "";
@@ -105,6 +112,36 @@ function doType(el, text) {
   el.dispatchEvent(new Event("change", { bubbles: true }));
   el.dispatchEvent(new Event("blur", { bubbles: true }));
   return { success: true, value: el.value.slice(0, 40) };
+}
+
+// paste — rich-text injection via a synthetic ClipboardEvent.
+// Same contract as page_manager._pasteViaCdp (params.html preferred over
+// params.text); this is the preload-only fallback for when CDP is absent.
+function doPaste(el, params) {
+  var html = typeof params.html === "string" ? params.html : "";
+  var text = typeof params.text === "string" ? params.text : "";
+  if (!html && !text) {
+    return { success: false, error: "paste called with neither html nor text — nothing to paste" };
+  }
+  var editor = el;
+  if (!(editor.contentEditable === "true" || editor.getAttribute("contenteditable") === "true")) {
+    var inner = el.querySelector("[contenteditable=true],input,textarea");
+    if (inner) editor = inner;
+    else return { success: false, error: "Target is not an editable element" };
+  }
+  editor.focus();
+  var dt = new DataTransfer();
+  if (html) dt.setData("text/html", html);
+  dt.setData("text/plain", text || html.replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim());
+  var ev = new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true, composed: true });
+  var notPrevented = editor.dispatchEvent(ev);
+  if (notPrevented) {
+    return {
+      success: false,
+      error: "paste event was not consumed by the page (defaultPrevented=false) — try a child node ref, or setContent for plain text"
+    };
+  }
+  return { success: true, method: "synthetic-clipboard-event" };
 }
 
 // setContent — write to any editor type including Draft.js/ProseMirror

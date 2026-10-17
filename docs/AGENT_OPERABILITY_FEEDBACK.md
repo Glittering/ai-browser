@@ -184,7 +184,7 @@
 - [x] P1-3 登录态信号 —— 已修（`src/shared/auth_wall.cjs` + `context.auth_wall` + `ui.auth_state` + MCP `browse_auth_state`），真实站点 15/15 通过
 - [x] P0-1 `ui.screenshot` / `browse_screenshot` 视口截图 —— 已修，18 单测 + 25 项真实站点验收全过
 - [x] P1-1 `get_tree` 跨帧自动路由 —— 已修，11 单测 + 14 项真实站点验收全过
-- [ ] P1-2 `ui.act {action:'paste', html}`（含 OOPIF 支持）
+- [x] P1-2 `ui.act {action:'paste', html}`（含 OOPIF 支持）—— 已修，10 单测 + 13 项真实站点验收全过
 - [ ] P2-1 列表行标题保留
 - [ ] P2-2 `states.required` / `states.invalid` / `context.validation_errors`
 - [ ] P2-3 `ui.navigate { wait_until }`

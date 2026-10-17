@@ -1045,6 +1045,15 @@ class PageManager {
         );
         if (r) return r;
       } catch (e) { /* fall through to preload */ }
+    } else if (action === 'paste') {
+      // 富文本粘贴：把 text/html 经合成 ClipboardEvent 送进编辑器，Draft.js /
+      // ProseMirror / Quill 的粘贴处理器会完成格式转换（与真人粘贴等效）。
+      // 支持 OOPIF 子帧（B站 read-editor 那种 ui.evaluate 到不了的上下文）。
+      try {
+        await this._ensureAxHandles(view, tid);
+        const r = await this._pasteViaCdp(view, target, params, tid);
+        if (r) return r;
+      } catch (e) { /* fall through to preload */ }
     } else if (action === 'upload') {
       try {
         await this._ensureAxHandles(view, tid);
@@ -1774,6 +1783,106 @@ class PageManager {
       await new Promise((r) => setTimeout(r, Math.max(20, Number(params.interval_ms) || 60)));
     }
     return { success: true, pressed_via: 'cdp-key', pressed: done };
+  }
+
+  // 富文本粘贴（ui.act {action:'paste'}）—— 把带格式内容（HTML）送进编辑器的
+  // 唯一可靠通路。
+  //
+  // 为什么需要这个动作而不是让调用方自己合成事件：
+  //   1) setContent/type 走 CDP 受信键盘，只能送**纯文本** —— 标题层级、代码块、
+  //      加粗、列表全丢失。B站图文那篇只能发纯文本版，就是这个原因。
+  //   2) 在 OOPIF 子帧里（B站 read-editor），ui.evaluate 到不了那个执行上下文，
+  //      调用方连"自己搓一个 paste 事件"都做不到 —— 这是最疼的一条。
+  //   3) 粘贴是编辑器的**一等公民路径**：Draft.js 的 DraftPasteProcessor、
+  //      ProseMirror 的 transformPastedHTML、Quill 的 clipboard 模块都会把
+  //      text/html 转成各自的内部文档模型。合成一个带 clipboardData 的
+  //      ClipboardEvent('paste') 正是触发这条路径的正规方式，与真人粘贴等效。
+  //
+  // 参数契约：params.html（优先）或 params.text。两者都空 → 明确报错，
+  // 不静默成功（同 cdp-input-empty-text 的教训）。
+  async _pasteViaCdp(view, aiId, params, tabId) {
+    if (!this._canCdp(view)) return null;
+    const html = typeof params.html === 'string' ? params.html : '';
+    const text = typeof params.text === 'string' ? params.text : '';
+    if (!html && !text) {
+      return {
+        success: false,
+        error: 'paste called with neither html nor text — nothing to paste. '
+          + 'Pass params: {html: "<h2>...</h2>"} for rich text, or {text: "..."} for plain.',
+        method: 'paste-empty',
+      };
+    }
+    const owning = await this._owningFrameFor(view, aiId, tabId);
+    const inFrame = !!owning;
+    const run = async (jsBody) => {
+      const fn = `(function(){${jsBody}})()`;
+      return inFrame ? owning.executeJavaScript(fn) : this.evaluate(fn, tabId);
+    };
+    try { this._focusWindow(view); } catch (e) {}
+
+    // 定位 + 聚焦 + 派发**必须在同一次帧内执行里完成**。拆成两步（先 prep 聚焦、
+    // 再回来派发）会丢目标：OOPIF 里 focus() 之后 document.activeElement 的
+    // 读回可能仍是旧值，且 Draft.js 这类编辑器把 paste 监听挂在**最内层的
+    // contenteditable 面子节点**上（.public-DraftEditor-content）——事件从容器
+    // 派发不会向下传播到子节点，监听器收不到，defaultPrevented 恒为 false。
+    // 实测：B站 read-editor 拆两步派发 → 编辑器完全无反应；合并 + 选定最深层
+    // 可编辑元素后成功。
+    const payload = JSON.stringify({ html, text });
+    const res = await run(
+      `var p=${payload};` +
+      `var el=document.querySelector('[data-ai-id="${aiId}"]');if(!el)return {ok:false,err:'no-ref'};` +
+      // 选定真正的编辑面：el 自己可编辑就用 el；否则取内部第一个可编辑后代
+      // （Draft.js/ProseMirror 的编辑面都是容器里的一个子 div）。
+      `var ed=el;` +
+      `var elEditable=(ed.contentEditable==='true')||(ed.tagName==='TEXTAREA')||(ed.tagName==='INPUT');` +
+      `if(!elEditable&&ed.querySelector){var inner=ed.querySelector('[contenteditable=true],input,textarea');if(inner)ed=inner;}` +
+      `var editable=(ed.contentEditable==='true')||(ed.tagName==='TEXTAREA')||(ed.tagName==='INPUT');` +
+      `if(!editable)return {ok:false,err:'not-editable'};` +
+      `ed.focus();` +
+      `var dt=new DataTransfer();` +
+      `if(p.html)dt.setData('text/html',p.html);` +
+      `dt.setData('text/plain',p.text||p.html.replace(/<[^>]+>/g,' ').replace(/&nbsp;/g,' ').replace(/\\s+/g,' ').trim());` +
+      `var ev=new ClipboardEvent('paste',{clipboardData:dt,bubbles:true,cancelable:true,composed:true});` +
+      `var notPrevented=ed.dispatchEvent(ev);` +
+      `return {ok:true,prevented:!notPrevented,tag:ed.tagName};`
+    );
+    if (!res || !res.ok) {
+      return { success: false, error: (res && res.err) || 'paste failed', method: 'synthetic-clipboard-event' };
+    }
+    // 编辑器没接管粘贴（prevented=false）= 页面对合成粘贴不买账。如实报告，
+    // 并给出可操作建议，而不是报 success 让调用方以为内容进去了。
+    if (!res.prevented) {
+      return {
+        success: false,
+        error: 'paste event was not consumed by the page (defaultPrevented=false) — this editor likely listens on a different surface (e.g. a child element or shadow root). Try pasting into a child node ref, or fall back to setContent for plain text.',
+        method: 'synthetic-clipboard-event',
+        consumed: false,
+      };
+    }
+    // 落盘校验：读回编辑器内容。归一化沿用 P0-2 修过的口径（换行会被编辑器
+    // 膨胀，逐字比对必然失配）。只给 html 时无法文本比对，退而检查"有内容"。
+    await new Promise((r) => setTimeout(r, 350)); // 编辑器处理粘贴多为异步（React 提交）
+    const landed = await run(`var e=document.activeElement;return {text:(e&&(e.innerText||e.value||''))||'',html:(e&&e.innerHTML||'')};`);
+    const landedText = (landed && landed.text) || '';
+    const landedLen = landedText.replace(/\s+/g, '').length;
+    if (!landedLen) {
+      return {
+        success: false,
+        error: 'paste was consumed but nothing landed — the editor may have rejected the payload (unsanitized HTML?). Read the editor content back to confirm.',
+        method: 'synthetic-clipboard-event',
+        consumed: true,
+        landed_chars: 0,
+      };
+    }
+    return {
+      success: true,
+      method: 'synthetic-clipboard-event',
+      consumed: true,
+      in_frame: inFrame,
+      landed_chars: landedLen,
+      // 只给 html 时调用方无法预知文本形态，把读回内容捎上，省一轮查询。
+      ...(html && !text ? { landed_preview: landedText.slice(0, 200) } : {}),
+    };
   }
 
   // 文件上传（封面/附件等，跨框架通用）：HTMLInputElement[type=file] 只能由
