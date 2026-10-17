@@ -3,6 +3,8 @@ import { WebSocketServer } from 'ws';
 import { evaluateGuardError } from '../shared/guards.js';
 import { withDeadline, actionDeadlineMs } from '../shared/deadline.js';
 import { config } from '../shared/config.js';
+// act 的参数形状归一（嵌套 params 与顶层平铺都接受）
+import actParams from '../shared/act_params.cjs';
 
 // Each startWSServer() owns a private WebSocketServer. Keeping it local (not a
 // module global) means multiple servers can coexist — required by tests that
@@ -113,12 +115,23 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
             //   - 这一层保护"以后新增的页面路径忘了套"，并且**可以用 mock PageManager
             //     做单测**（真实 PageManager 依赖 Electron，vitest 里起不来）。
             // 同源意味着两层不会打架：预算一致，谁先到期谁报，语义相同。
-            const budget = actionDeadlineMs(params.action, params.params || {});
+            //
+            // 参数形状：`params:{...}` 是规范形状，顶层平铺的已知动作参数会被
+            // 提升（见 shared/act_params.cjs）。此前平铺的 text/html 被静默丢掉，
+            // 动作照常执行但输入为空 —— 调用方看到的是 "type called with empty text"。
+            const hoisted = actParams.hoistActParams(params);
+            const actParamsObj = hoisted.params;
+            const budget = actionDeadlineMs(params.action, actParamsObj);
             try {
               const result = await withDeadline(
-                pageManager.executeAction(params.action, params.target, params.params || {}, tabId),
+                pageManager.executeAction(params.action, params.target, actParamsObj, tabId),
                 budget, `action:${params.action}`
               );
+              // 提升过就在回执里说明：调用方会知道"我平铺的参数被接受了"，
+              // 而不是下次换个客户端又悄悄失效。
+              if (hoisted.hoisted.length && result && typeof result === 'object' && !result.params_hoisted) {
+                result.params_hoisted = hoisted.hoisted;
+              }
               send({ jsonrpc: '2.0', id, result });
             } catch (e) {
               if (e && e.__deadline) {

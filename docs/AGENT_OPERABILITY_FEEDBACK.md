@@ -182,11 +182,11 @@
 
 - [x] P0-2 输入校验假阴性 —— 已修，含单测，全量回归通过
 - [x] P1-3 登录态信号 —— 已修（`src/shared/auth_wall.cjs` + `context.auth_wall` + `ui.auth_state` + MCP `browse_auth_state`），真实站点 15/15 通过
-- [x] P0-1 `ui.screenshot` / `browse_screenshot` 视口截图 —— 已修，18 单测 + 25 项真实站点验收全过
+- [x] P0-1 `ui.screenshot` / `browse_screenshot` 视口截图 —— 已修，21 单测 + 26 项真实站点验收全过（支持 path 落盘；未知参数不再静默忽略）
 - [x] P1-1 `get_tree` 跨帧自动路由 —— 已修，11 单测 + 14 项真实站点验收全过
 - [x] P1-2 `ui.act {action:'paste', html}`（含 OOPIF 支持）—— 已修，10 单测 + 13 项真实站点验收全过
 - [x] P2-1 列表行标题保留 —— 已修，7 单测 + 4 项真实验收（ignored 包裹层透传 + 行角色补 label）
-- [x] P2-2 `states.required` / `states.invalid` / `context.validation_errors` —— 已修，10 单测 + 2 AX 单测 + 9 项真实验收
+- [x] P2-2 `states.required` / `states.invalid` / `context.validation_errors` —— 已修，12 单测 + 2 AX 单测 + 12 项真实验收（含子帧内的 required_hints / validation_errors）
 - [x] P2-3 `ui.navigate { wait_until }` —— 已修，默认 domcontentloaded，6 单测 + 6 项真实验收
 - [x] CSDN：登录态恢复后重新注入正文并发布 —— 已于 2026-10-17 13:40 完成
 

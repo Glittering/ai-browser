@@ -49,9 +49,8 @@ export const MCP_TOOLS = [
       properties: {
         action: { type: 'string', enum: ['click', 'type', 'clear', 'focus', 'hover', 'scroll_to', 'upload', 'get_value', 'drag', 'press', 'wheel', 'paste'], description: 'Action.' },
         html: { type: 'string', description: 'paste: HTML to inject (preferred). Editors convert it through their own paste pipeline (Draft.js/ProseMirror/Quill), so headings/code blocks/bold/lists survive. Plain text loses all formatting.' },
-        text: { type: 'string', description: 'paste: plain-text fallback when html is absent.' },
         target: { type: 'string', description: 'Element data-ai-id from the semantic tree (e.g. e:button-12, axf-3-1) — NOT the visible label. Omit for press (keys go to the current focus); for drag you may also omit it and pass from_x/from_y to start from a bare point.' },
-        text: { type: 'string', description: 'Text to type (type only).' },
+        text: { type: 'string', description: 'Text to type (type/setContent). For paste: plain-text fallback used when html is absent.' },
         value: { type: 'string', description: 'Value for select.' },
         offset: { type: 'integer', description: 'get_value: start offset in Unicode code points (default 0).' },
         limit: { type: 'integer', description: 'get_value: max code points to return (default 20000, hard cap 1000000).' },

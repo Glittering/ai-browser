@@ -1021,6 +1021,18 @@ function extractPageContext() {
         }
       } catch (e) {}
     }
+    // 6) 占位符直接写着"请输入/请填写/必填"的字段。站点既没有 required 属性、
+    //    也没有红星时，这是唯一读得到的"这里要填东西"的信号（B站图文的标题框
+    //    就是这样：placeholder="请输入标题（建议30字以内）"，无 required、无红星，
+    //    于是 agent 只能从"发布没反应"倒推）。
+    //    仍然只进 required_hints（启发式桶），不进 nodes.states —— 它不构成承诺。
+    try {
+      var phEls = document.querySelectorAll("input[placeholder],textarea[placeholder],[contenteditable][data-placeholder]");
+      for (var ph = 0; ph < phEls.length && out.length < 40; ph++) {
+        var pht = phEls[ph].getAttribute("placeholder") || phEls[ph].getAttribute("data-placeholder");
+        if (pht && /请\s*(输入|填写|选择)|必填|必选|不能为空/.test(pht)) push(pht);
+      }
+    } catch (e) {}
     return out;
   }
   var requiredHints = scanRequiredHints();

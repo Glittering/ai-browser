@@ -50,6 +50,16 @@ function normalizeScreenshotOpts(opts) {
   }
   out.fullPage = src.fullPage === true;
 
+  // --- path（可选：把图直接落盘，省得调用方自己解 base64）---
+  // 此前传 path 会被**静默忽略**：调用方拿到 ok:true 以为文件写好了。
+  // 这是本项目反复踩的同一类坑（参数被吞 → 结论错），所以在规范层直接支持。
+  if (src.path !== undefined && src.path !== null && src.path !== '') {
+    if (typeof src.path !== 'string' || !src.path.trim()) {
+      return { ok: false, error: 'path must be a non-empty absolute file path' };
+    }
+    out.path = src.path;
+  }
+
   // --- clip（设备像素坐标；不传则整视口）---
   if (src.clip !== undefined && src.clip !== null) {
     const c = src.clip;

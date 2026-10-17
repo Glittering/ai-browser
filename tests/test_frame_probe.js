@@ -134,3 +134,38 @@ describe('extractor: cross-process iframe probing (jsdom)', () => {
     expect(ctx.cross_process_frames).toEqual({ count: 0, visible_count: 0, suggestion: null });
   });
 });
+
+// ---- P2-2 后续：子帧里的必填提示 / 校验错误要合进顶层 context ----
+import { mergeFrameContext } from '../src/shared/frame_probe.cjs';
+
+describe('mergeFrameContext()', () => {
+  it('FM-1: subframe hints/errors are merged, deduped, and labelled', () => {
+    const ctx = { required_hints: ['请输入标题'], validation_errors: [{ text: '顶层错误', near: 'a' }] };
+    const frames = [{
+      key: 'frame-3',
+      context: {
+        required_hints: ['请输入标题', '请输入正文'],
+        validation_errors: [{ text: '至少添加一个标签', near: 'tag-input' }, { text: '顶层错误', near: 'a' }],
+      },
+    }];
+    const m = mergeFrameContext(ctx, frames);
+    expect(m.required_hints).toEqual(['请输入标题', '请输入正文']);
+    expect(m.validation_errors).toHaveLength(2); // 重复的那条没有再来一次
+    expect(m.validation_errors[1]).toEqual({ text: '至少添加一个标签', near: 'tag-input', frame: 'frame-3' });
+    expect(m.frame_context_merged).toBe(2);
+    // 纯函数：入参没被改
+    expect(ctx.required_hints).toEqual(['请输入标题']);
+    expect(ctx.validation_errors).toHaveLength(1);
+  });
+
+  it('FM-2: nothing new means null (callers can tell "merged" from "nothing to merge")', () => {
+    expect(mergeFrameContext({}, [])).toBeNull();
+    expect(mergeFrameContext({}, [{ key: 'f', context: { required_hints: [], validation_errors: [] } }])).toBeNull();
+    expect(mergeFrameContext({}, [{ key: 'f' }])).toBeNull();
+  });
+
+  it('FM-3: empty error text is not turned into a phantom entry', () => {
+    const m = mergeFrameContext({}, [{ key: 'f', context: { validation_errors: [{ text: '  ', near: 'x' }] } }]);
+    expect(m).toBeNull();
+  });
+});

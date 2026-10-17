@@ -56,8 +56,57 @@ function describeAutoAx(outcome) {
   return { auto_ax: 'no-new-content' };
 }
 
+/**
+ * 把子帧读到的"该填什么 / 错在哪"合进顶层 context。
+ *
+ * 为什么需要：extractPageContext 只在顶层文档里扫描，而真正要填的字段常常在
+ * 跨进程子帧里（B站图文的标题框、掘金编辑器）。于是 required_hints 和
+ * validation_errors 会在**最需要它们的那一类页面上**恰好为空 —— 这比没有这个
+ * 字段更糟，因为调用方会读成"这页没有必填项"。
+ *
+ * 纯函数：不读 DOM、不改入参。子帧来源的条目带 frame 字段，调用方能看出它
+ * 不是顶层文档说的。
+ */
+function mergeFrameContext(ctx, frames) {
+  const base = ctx && typeof ctx === 'object' ? ctx : {};
+  const hints = Array.isArray(base.required_hints) ? base.required_hints.slice() : [];
+  const ves = Array.isArray(base.validation_errors) ? base.validation_errors.slice() : [];
+  const seenHint = new Set(hints);
+  const seenVE = new Set(ves.map((e) => (e && e.near ? e.near : '') + '\u0000' + ((e && e.text) || '')));
+  let added = 0;
+  for (const f of frames || []) {
+    const fc = f && f.context;
+    if (!fc) continue;
+    const where = f.key || f.label || 'subframe';
+    for (const h of fc.required_hints || []) {
+      const t = String(h || '').trim();
+      if (!t || seenHint.has(t)) continue;
+      seenHint.add(t);
+      hints.push(t);
+      added += 1;
+    }
+    for (const e of fc.validation_errors || []) {
+      const text = String((e && e.text) || '').trim();
+      if (!text) continue;
+      const near = String((e && e.near) || '');
+      const key = near + '\u0000' + text;
+      if (seenVE.has(key)) continue;
+      seenVE.add(key);
+      ves.push({ text, near, frame: where });
+      added += 1;
+    }
+  }
+  if (!added) return null;
+  const out = {};
+  if (hints.length) out.required_hints = hints.slice(0, 40);
+  if (ves.length) out.validation_errors = ves.slice(0, 30);
+  out.frame_context_merged = added;
+  return out;
+}
+
 module.exports = {
   summarizeOpaqueFrames,
   shouldAutoAx,
   describeAutoAx,
+  mergeFrameContext,
 };

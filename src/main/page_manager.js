@@ -3,6 +3,7 @@
 // Agent routes via tab ID. Tab 0 is default.
 import { ipcMain, BrowserView } from 'electron';
 import path from 'node:path';
+import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { config } from '../shared/config.js';
 import axExtractor from './axExtractor.js';
@@ -626,6 +627,10 @@ class PageManager {
       if (frames && frames.length) {
         res.tree = axExtractor.mergeFrameTrees(res.tree, frames);
         res.tree.__oopif_merged = true;
+        // 子帧里的必填提示 / 校验错误也一并合进 context（否则最该有这些字段的
+        // 页面恰好是空的，见 frame_probe.mergeFrameContext 顶部注释）。
+        const mergedCtx = frameProbe.mergeFrameContext(res.context, frames);
+        if (mergedCtx) Object.assign(res.context, mergedCtx);
       }
       res.context.frame_hints = frameProbe.describeAutoAx({
         merged: !!(frames && frames.length),
@@ -772,12 +777,28 @@ class PageManager {
         hasVisiblePasswordInput: hasPwd,
         devicePixelRatio: dpr,
       });
+      // path：直接把图写到磁盘。写失败要如实报错（不是"截图成功但没文件"）。
+      let filePath = null;
+      if (o.path) {
+        try {
+          fs.mkdirSync(path.dirname(o.path), { recursive: true });
+          fs.writeFileSync(o.path, Buffer.from(shot.data, 'base64'));
+          filePath = o.path;
+        } catch (e) {
+          return { ok: false, tab: tid, error: 'screenshot captured but writing to ' + o.path + ' failed: ' + ((e && e.message) || e), ...summary };
+        }
+      }
+      // 未知参数不再静默丢弃：调用方传了什么没被用上，回执里点名。
+      const known = { format: 1, quality: 1, fullPage: 1, clip: 1, path: 1 };
+      const ignored = Object.keys(opts || {}).filter((k) => !known[k]);
       return {
         ok: true,
         tab: tid,
         // data 是 base64 裸数据（不带 data: 前缀）—— 调用方按需自己拼。
         data: shot.data,
         mime,
+        ...(filePath ? { path: filePath } : {}),
+        ...(ignored.length ? { ignored_params: ignored } : {}),
         ...summary,
       };
     } catch (e) {
@@ -851,6 +872,10 @@ class PageManager {
     const frames = await this._readOopifFrames(view, tid);
     if (frames.length && main && main.tree) {
       main.tree = axExtractor.mergeFrameTrees(main.tree, frames);
+      if (main.context) {
+        const mergedCtx = frameProbe.mergeFrameContext(main.context, frames);
+        if (mergedCtx) Object.assign(main.context, mergedCtx);
+      }
     }
     // #4: incremental diff — return only newly appeared / hidden interactive
     // nodes since the last ax read on this tab (feeds: small payload per scroll).
@@ -884,6 +909,34 @@ class PageManager {
       for (const c of t.children || []) w(c);
     })(tree);
     return out;
+  }
+
+  // 子帧侧的上下文探测（在子帧自己的 JS 上下文里执行）。只做两件读操作：
+  // 收集"请输入/必填"类占位符，以及 aria-invalid 字段对应的错误文案。
+  // 规则与顶层 extractor 的 scanRequiredHints / validation_errors 同源 ——
+  // 两边给出不同口径的提示，等于让调用方自己判断信谁。
+  _frameCtxJs() {
+    return `(function(){
+      var hints=[], ves=[];
+      try{
+        var els=document.querySelectorAll('input[placeholder],textarea[placeholder],[contenteditable][data-placeholder]');
+        for(var i=0;i<els.length&&hints.length<10;i++){
+          var p=els[i].getAttribute('placeholder')||els[i].getAttribute('data-placeholder');
+          if(p&&/请\\s*(输入|填写|选择)|必填|必选|不能为空/.test(p)&&hints.indexOf(p)<0)hints.push(p.slice(0,50));
+        }
+      }catch(e){}
+      try{
+        var inv=document.querySelectorAll('[aria-invalid="true"]');
+        for(var j=0;j<inv.length&&ves.length<10;j++){
+          var el=inv[j],t='';
+          var ids=(el.getAttribute('aria-describedby')||'').split(/\\s+/);
+          for(var k=0;k<ids.length;k++){var d=ids[k]&&document.getElementById(ids[k]);if(d){t=(d.textContent||'').trim();if(t)break;}}
+          if(!t){var par=el.parentElement;if(par){var e=par.querySelector('[class*=error],[class*=err],[role=alert]');if(e)t=(e.textContent||'').trim();}}
+          ves.push({text:t.slice(0,120),near:el.id||el.name||el.getAttribute('aria-label')||el.getAttribute('placeholder')||''});
+        }
+      }catch(e){}
+      return JSON.stringify({required_hints:hints,validation_errors:ves});
+    })()`;
   }
 
   // Read editable/interactive fields out of each out-of-process sub-frame via
@@ -943,6 +996,16 @@ class PageManager {
             return out.length?out:null;
           })(${JSON.stringify(prefix)})`);
           if (!dto || !dto.length) continue;
+          // 子帧里的"该填什么 / 错在哪"。顶层 extractPageContext 只能看顶层文档，
+          // 而 B站图文的标题框、掘金编辑器都住在 OOPIF 里 —— 上下文扫描不跟着
+          // 走一遍子帧，required_hints / validation_errors 就会在**真正需要它们
+          // 的地方**恰好是空的（实测：B站标题框 placeholder="请输入标题"，顶层扫描
+          // 结果为空）。失败不影响建树。
+          let frameCtx = null;
+          try {
+            const rawCtx = await frame.executeJavaScript(this._frameCtxJs());
+            frameCtx = typeof rawCtx === 'string' ? JSON.parse(rawCtx) : rawCtx;
+          } catch (e) { /* 子帧上下文探测失败：树照常返回 */ }
           const tree = {
             id: key,
             role: 'generic',
@@ -961,7 +1024,7 @@ class PageManager {
               bounds: n.bounds,
             })),
           };
-          out.push({ key, label: frame.name || ('frame-' + frameSeq), tree });
+          out.push({ key, label: frame.name || ('frame-' + frameSeq), tree, context: frameCtx });
         } catch (e) { /* skip unreachable frame */ }
       }
       return out;

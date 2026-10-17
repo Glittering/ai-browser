@@ -135,3 +135,24 @@ describe('constants', () => {
     expect(MAX_DATA_URL_CHARS).toBe(512 * 1024);
   });
 });
+
+// ---- P0-1 后续：path 落盘参数（此前传 path 被静默忽略）----
+describe('normalizeScreenshotOpts — path (write to disk)', () => {
+  it('S-OPT-PATH-1: absolute path is carried through', () => {
+    const r = normalizeScreenshotOpts({ path: '/tmp/shot.png' });
+    expect(r.ok).toBe(true);
+    expect(r.opts.path).toBe('/tmp/shot.png');
+  });
+
+  it('S-OPT-PATH-2: absent/empty means "return base64 only"', () => {
+    expect(normalizeScreenshotOpts({}).opts.path).toBeUndefined();
+    expect(normalizeScreenshotOpts({ path: '' }).opts.path).toBeUndefined();
+    expect(normalizeScreenshotOpts({ path: null }).opts.path).toBeUndefined();
+  });
+
+  it('S-OPT-PATH-3: wrong type is rejected, not silently ignored', () => {
+    expect(normalizeScreenshotOpts({ path: 123 }).ok).toBe(false);
+    expect(normalizeScreenshotOpts({ path: '   ' }).ok).toBe(false);
+    expect(normalizeScreenshotOpts({ path: 123 }).error).toContain('path');
+  });
+});

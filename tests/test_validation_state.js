@@ -109,3 +109,27 @@ describe('context.validation_errors — [{text, near}] (P2-2)', () => {
     if (hit) expect(hit.near).not.toBe('a'); // 不允许猜成某一个字段
   });
 });
+
+describe('context.required_hints — 站点什么都没声明时的可读信号', () => {
+  it('VS-11: a "请输入…" placeholder becomes a required hint (B站 editor title box)', () => {
+    const { tree, ctx } = page(`
+      <form>
+        <textarea placeholder="请输入标题（建议30字以内）"></textarea>
+        <input placeholder="搜索">
+      </form>`);
+    // 它不构成承诺：不进 states（没有 required 属性）
+    const ta = find(tree, (n) => (n.label || '').includes('请输入标题'))[0];
+    expect(ta).toBeTruthy();
+    expect(ta.states || []).not.toContain('required');
+    // 但提示桶里必须有，否则 agent 只能从"发布没反应"倒推
+    expect(ctx.required_hints || []).toContain('请输入标题（建议30字以内）');
+    // 阴性对照：普通搜索框不进提示
+    expect((ctx.required_hints || []).join('|')).not.toContain('搜索');
+  });
+
+  it('VS-12: an explicit required attribute still wins over the placeholder heuristic', () => {
+    const { tree, ctx } = page('<form><input id="t" required placeholder="请输入标题"></form>');
+    expect(byId(tree, 't').states).toContain('required');
+    expect(ctx.required_hints || []).toContain('请输入标题');
+  });
+});
