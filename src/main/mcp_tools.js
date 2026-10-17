@@ -11,13 +11,14 @@ export const MCP_TOOLS = [
   {
     name: 'browse_navigate',
     title: 'Navigate tab',
-    description: 'Navigate the active/focused tab to a URL.',
+    description: 'Navigate the active/focused tab to a URL. Returns as soon as the requested milestone is reached (default: DOM ready) — it does not wait for the load event, which SPAs often never fire.',
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     inputSchema: {
       type: 'object',
       properties: {
         url: { type: 'string', description: 'URL to navigate to.' },
-        tab: { type: 'integer', description: 'Tab id (default: active tab).' }
+        tab: { type: 'integer', description: 'Tab id (default: active tab).' },
+        wait_until: { type: 'string', enum: ['commit', 'domcontentloaded', 'load'], description: 'How far to wait. commit = navigation committed (fastest, content may not be painted); domcontentloaded = DOM ready (default, safe for SPAs); load = also subresources (can hang forever on pages that never fire load).' }
       },
       required: ['url']
     }

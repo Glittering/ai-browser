@@ -25,6 +25,9 @@ import frameProbe from '../shared/frame_probe.cjs';
 // ui.act target 形状体检（纯函数）：传了可见文字而不是 data-ai-id 时，
 // 入口就给可操作的错误，而不是等到选择器查空才说 "Target not found"。
 import refGuard from '../shared/ref_guard.cjs';
+// navigate 的完成信号（commit | domcontentloaded | load）：默认不再是 load ——
+// SPA 永不 fire load，把它当完成信号等于把"页面可用"报成"超时"。
+import navWait from '../shared/nav_wait.cjs';
 
 const { expandValueFetchTree } = valueContract;
 
@@ -462,11 +465,15 @@ class PageManager {
    * （挂起的连接、不结束的加载）。这与 ui.act 是同一类故障：await 一个可能不返回的
    * 东西。所以同样套 deadline。
    */
-  async navigate(url, tabId) {
+  async navigate(url, tabId, opts = {}) {
     const tid = tabId !== undefined ? tabId : this.activeTab;
     const view = this._getView(tid);
     if (!view) return { ok: false, error: 'Tab not found' };
+    const w = navWait.normalizeWaitUntil(opts.waitUntil);
+    if (w.error) return { ok: false, error: w.error, wait_until_valid: navWait.LEVELS };
+    const waitUntil = w.value;
     this._axDiffCache.delete(tid); // fresh page → drop stale incremental snapshot
+    const wc = view.webContents;
     // loadURL resolves at did-finish-load, which is exactly when the old
     // pixels may still be on screen — repaint here as well as from the event
     // hooks, so a programmatic navigate never depends on hook timing.
@@ -477,30 +484,102 @@ class PageManager {
     // 打断当前这次 loadURL 的 Promise —— 如果不区分，agent 收到的就是
     // {ok:false, error:"ERR_ABORTED (-3) loading 'file://.../error_page.html'"}，
     // 它会以为自己的导航请求坏了，而实际上错误页已经接管、信息全在那儿。
+    const pending = wc.loadURL(url);
+    // commit / domcontentloaded 会**提前**返回；之后这个 Promise 仍可能 reject
+    // （错误页接管、用户中止）。不接住就是 unhandledRejection，会把整个进程
+    // 的日志淹掉。错误本身在返回结果里另行汇报。
+    pending.catch(() => {});
+
     try {
-      await withDeadline(view.webContents.loadURL(url), 30000, 'navigate');
+      if (waitUntil === 'load') {
+        await withDeadline(pending, 30000, 'navigate');
+      } else {
+        // 事件驱动，不等 did-finish-load。与 loadURL 自身的结果赛跑：同文档
+        // 导航（#hash、history.pushState）不会 fire did-navigate，但那类导航
+        // 的 loadURL 会立刻 resolve —— 不赛跑就会白等一整个 deadline。
+        await withDeadline(Promise.race([
+          this._waitForNavStep(wc, waitUntil, url),
+          pending.then(() => ({ at: 'resolved' }), () => ({ at: 'resolved' })),
+        ]), waitUntil === 'commit' ? 15000 : 20000, 'navigate');
+      }
     } catch (e) {
-      const msg = String((e && e.message) || e);
-      // 错误页已接管：这不是调用方的错，是目标站点不可达。
-      // 两个判据（都不可省）：_failureGuard 里还有这个 tab（错误页刚加载、
-      // did-finish-load 还没来清标记），或者当前 URL 已经是我们的错误页。
-      const onErrorPage = String(view.webContents.getURL() || '').indexOf('error_page.html') >= 0;
-      if ((this._failureGuard && this._failureGuard.has(tid)) || onErrorPage) {
-        return {
-          ok: false,
-          error: msg,
-          error_page: true,
-          hint: '目标站点加载失败，已显示错误页（可重试 / 改网址）。'
-            + ' 失败详情在页面里，用 ui.get_tree 或 ui.evaluate 读取。',
-        };
-      }
-      if (e && e.__deadline) {
-        return { ok: false, error: `${e.message} — the page never finished loading; it may still be loading in the background` };
-      }
-      return { ok: false, error: msg.slice(0, 300) };
+      return this._navigateFailure(e, view, tid, waitUntil);
     }
     this.repaint(tid);
-    return { ok: true };
+    if (waitUntil === 'load') return { ok: true, waited_for: 'load' };
+    // load 还没来是**正常**的（SPA 本来就不 fire load）。如实说明，并给出
+    // 下一步：调用方需要等某个具体内容时该用 ui.wait，而不是等 load。
+    const stillLoading = typeof wc.isLoading === 'function' ? !!wc.isLoading() : false;
+    return {
+      ok: true,
+      waited_for: waitUntil,
+      url: wc.getURL(),
+      load_pending: stillLoading,
+      hint: stillLoading
+        ? 'returned at ' + waitUntil + ' — the load event has not fired (normal for SPAs); the page is usable now. Wait for specific content with ui.wait, not for load.'
+        : null,
+    };
+  }
+
+  // commit / domcontentloaded 的事件等待。只认主帧：子帧导航不改变"这个 tab 到了
+  // 没有"。任一事件先到就 resolve；did-fail-load 立刻 reject（错误页逻辑在外层）。
+  //
+  // 两个必须忽略的迟到事件（都实测踩到过）：
+  //   -3 ERR_ABORTED：上一次导航被这次导航打断，这是**正常**的取代，不是失败。
+  //      不忽略的话，连续两次 navigate 的第二跳稳定被报成 "did-fail-load -3"。
+  //   failedUrl ≠ 本次目标：上一轮导航的迟到事件。它描述的不是我们等的东西。
+  _waitForNavStep(wc, step, expectedUrl) {
+    const norm = (u) => String(u || '').split('#')[0];
+    return new Promise((resolve, reject) => {
+      const cleanup = () => {
+        wc.removeListener('did-navigate', onCommit);
+        wc.removeListener('dom-ready', onDom);
+        wc.removeListener('did-fail-load', onFail);
+      };
+      const onCommit = () => {
+        if (step !== 'commit') return; // domcontentloaded 还要再等一步
+        cleanup();
+        resolve({ at: 'commit' });
+      };
+      const onDom = () => { cleanup(); resolve({ at: 'domcontentloaded' }); };
+      const onFail = (_e, code, desc, failedUrl, isMainFrame) => {
+        if (isMainFrame === false) return;
+        if (code === -3) return; // 被新的导航取代（见上）
+        if (expectedUrl && failedUrl && norm(failedUrl) !== norm(expectedUrl)) return;
+        cleanup();
+        reject(Object.assign(new Error('did-fail-load ' + code + ' ' + desc), { __navFail: true }));
+      };
+      wc.once('did-navigate', onCommit);
+      wc.once('dom-ready', onDom);
+      wc.once('did-fail-load', onFail);
+    });
+  }
+
+  _navigateFailure(e, view, tid, waitUntil) {
+    const msg = String((e && e.message) || e);
+    // 错误页已接管：这不是调用方的错，是目标站点不可达。
+    // 两个判据（都不可省）：_failureGuard 里还有这个 tab（错误页刚加载、
+    // did-finish-load 还没来清标记），或者当前 URL 已经是我们的错误页。
+    const onErrorPage = String(view.webContents.getURL() || '').indexOf('error_page.html') >= 0;
+    if ((this._failureGuard && this._failureGuard.has(tid)) || onErrorPage) {
+      return {
+        ok: false,
+        error: msg,
+        error_page: true,
+        hint: '目标站点加载失败，已显示错误页（可重试 / 改网址）。'
+          + ' 失败详情在页面里，用 ui.get_tree 或 ui.evaluate 读取。',
+      };
+    }
+    if (e && e.__deadline) {
+      return {
+        ok: false,
+        error: `${e.message} — navigation did not reach "${waitUntil}" in time; the page may still be loading in the background`,
+        waited_for: waitUntil,
+        hint: 'If the page is a SPA that never fires load, use wait_until:"domcontentloaded" or "commit". '
+          + 'If the tab is stuck altogether, rebuild it: ui.close_tab + ui.new_tab.',
+      };
+    }
+    return { ok: false, error: msg.slice(0, 300), waited_for: waitUntil };
   }
 
   async getTree(focusedOnly = false, tabId) {
@@ -570,23 +649,30 @@ class PageManager {
   // 事故里，登录态信息其实一直在 context 里，但它是个不显眼的小字段，且当时的
   // 判定还是错的（csrfToken 子串命中 "token" → 谎报已登录）。显式暴露成
   // "问一句就答一句"的原语，才能让"先验登录态"变成低成本的第一步。
+  // 一次性 DOM 侧上下文（不建树）。authState 与 AX 读法共用：AX 自身的
+  // context 只有 modals/session/stats，登录墙、校验错误、必填提示全都来自
+  // 这条 DOM 扫描 —— 两条读法给出不一致的 context 只会让调用方怀疑读数。
+  async _readContext(view) {
+    const res = await new Promise((resolve, reject) => {
+      const id = ++this._requestId;
+      this._pendingRequests.set(id, { resolve, reject });
+      view.webContents.send('ai:context', { id });
+      setTimeout(() => {
+        if (this._pendingRequests.has(id)) {
+          this._pendingRequests.delete(id);
+          reject(new Error('context read timeout'));
+        }
+      }, 5000);
+    });
+    return (res && res.context) || {};
+  }
+
   async authState(tabId) {
     const tid = tabId !== undefined ? tabId : this.activeTab;
     const view = this._getView(tid);
     if (!view) return { ok: false, error: 'no-such-tab', tab: tid };
     try {
-      const res = await new Promise((resolve, reject) => {
-        const id = ++this._requestId;
-        this._pendingRequests.set(id, { resolve, reject });
-        view.webContents.send('ai:context', { id });
-        setTimeout(() => {
-          if (this._pendingRequests.has(id)) {
-            this._pendingRequests.delete(id);
-            reject(new Error('authState timeout'));
-          }
-        }, 5000);
-      });
-      const ctx = (res && res.context) || {};
+      const ctx = (await this._readContext(view)) || {};
       const wall = ctx.auth_wall || null;
       return {
         ok: true,
@@ -732,7 +818,22 @@ class PageManager {
           15000, 'get_tree(ax).attachHrefs'
         );
       }
-      return await this._finishAxTree(main, view, tid, opts);
+      const out = await this._finishAxTree(main, view, tid, opts);
+      // AX 树的 context 只有 modals/session/stats —— 登录墙、校验错误、必填提示
+      // 都在 DOM 扫描里。此前 ax:true 的调用方拿到的是一份"更薄"的上下文：
+      // 同一个页面，默认读法说"这是登录页"，ax 读法什么都不说。这里把 DOM 侧
+      // 缺的字段补齐（不覆盖 AX 已有的），两条读法的 context 才可比。
+      if (out && out.context) {
+        try {
+          const ctx = await this._readContext(view);
+          for (const k of ['auth_wall', 'validation_errors', 'field_errors', 'required_hints', 'errors', 'hints', 'forms', 'cross_process_frames']) {
+            if (out.context[k] == null && ctx[k] != null) out.context[k] = ctx[k];
+          }
+          if (!out.context.session || !Object.keys(out.context.session).length) out.context.session = ctx.session || {};
+          if (out.context.stats && ctx.stats) Object.assign(out.context.stats, { inputs: ctx.stats.inputs, buttons: ctx.stats.buttons, links: ctx.stats.links, iframes: ctx.stats.iframes });
+        } catch (e) { /* context 补全失败不影响树 */ }
+      }
+      return out;
     } catch (e) {
       if (e && e.__deadline) {
         return { tree: null, context: null, error: e.message + ' — the page main thread is likely blocked' };

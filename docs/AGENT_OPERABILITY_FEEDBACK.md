@@ -185,9 +185,9 @@
 - [x] P0-1 `ui.screenshot` / `browse_screenshot` 视口截图 —— 已修，18 单测 + 25 项真实站点验收全过
 - [x] P1-1 `get_tree` 跨帧自动路由 —— 已修，11 单测 + 14 项真实站点验收全过
 - [x] P1-2 `ui.act {action:'paste', html}`（含 OOPIF 支持）—— 已修，10 单测 + 13 项真实站点验收全过
-- [ ] P2-1 列表行标题保留
-- [ ] P2-2 `states.required` / `states.invalid` / `context.validation_errors`
-- [ ] P2-3 `ui.navigate { wait_until }`
+- [x] P2-1 列表行标题保留 —— 已修，7 单测 + 4 项真实验收（ignored 包裹层透传 + 行角色补 label）
+- [x] P2-2 `states.required` / `states.invalid` / `context.validation_errors` —— 已修，10 单测 + 2 AX 单测 + 9 项真实验收
+- [x] P2-3 `ui.navigate { wait_until }` —— 已修，默认 domcontentloaded，6 单测 + 6 项真实验收
 - [x] CSDN：登录态恢复后重新注入正文并发布 —— 已于 2026-10-17 13:40 完成
 
 ### 5.1 P1-3 落地时新发现的两个调用侧坑（2026-10-17，修 CSDN 发布时实测）

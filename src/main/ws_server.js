@@ -142,7 +142,7 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
             // navigate 现在返回 {ok, error?}：成功形状与旧的 {ok:true} 一致，
             // 失败时多一个原因。此前只有布尔，agent 拿到 ok:false 无从判断
             // 该重试还是换 URL；而"页面永不 did-finish-load"是会真实发生的。
-            const r = await pageManager.navigate(params.url, tabId);
+            const r = await pageManager.navigate(params.url, tabId, { waitUntil: params.wait_until });
             send({ jsonrpc: '2.0', id, result: r && typeof r === 'object' ? r : { ok: !!r } });
             break;
           }

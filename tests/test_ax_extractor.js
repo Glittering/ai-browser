@@ -236,3 +236,131 @@ describe('liteSnapshot() / diffLite() — incremental read (fix #4)', () => {
     expect(d.revealed[0].label).toBe('新卡片');
   });
 });
+// ---- P2-1：行标题必须留在树里 -------------------------------------------
+// B站稿件管理列表每行只剩 `[button] 编辑`，因为标题文本挂在一个被 AX 标为
+// ignored 的包裹层（flex 行里的 span）下，整棵子树被丢掉。ignored 是"这层没
+// 语义"，不是"这里没内容"。
+function ignoredNode(id, role, { childIds = [], name = '' } = {}) {
+  return { nodeId: id, ignored: true, role: { value: role }, name: { value: name }, properties: [], childIds };
+}
+
+describe('normalizeAxTree() — ignored wrappers must not swallow content (P2-1)', () => {
+  it('AX-IGN-1: text under an ignored span is lifted to the list item', () => {
+    const raw = [
+      node(1, 'list', '', { childIds: [2] }),
+      node(2, 'listitem', '', { childIds: [3, 6] }),
+      ignoredNode(3, 'generic', { childIds: [4] }),          // <span class="title"> (presentational)
+      node(4, 'StaticText', '我用 AI 浏览器发了一篇文章', { childIds: [5] }),
+      node(5, 'InlineTextBox', '我用 AI 浏览器发了一篇文章'),
+      node(6, 'button', '编辑', { props: [{ name: 'focusable', value: bool(true) }], childIds: [7] }),
+      node(7, 'StaticText', '编辑'),
+    ];
+    const tree = normalizeAxTree(raw);
+    const li = byId(tree, 'ax-2'); // default idFor = ax-{nodeId}
+    expect(li).toBeTruthy();
+    const texts = (li.children || []).map((c) => c.label);
+    expect(texts).toContain('我用 AI 浏览器发了一篇文章');
+    expect(texts).toContain('编辑');
+  });
+
+  it('AX-IGN-2: an ignored root wrapper still yields a real root', () => {
+    const raw = [
+      ignoredNode(1, 'generic', { childIds: [2] }),
+      node(2, 'RootWebArea', '页面', { childIds: [3] }),
+      node(3, 'button', '保存', { props: [{ name: 'focusable', value: bool(true) }] }),
+    ];
+    const tree = normalizeAxTree(raw);
+    expect(tree.role).toBe('RootWebArea');
+    expect(byId(tree, 'ax-3').label).toBe('保存');
+  });
+
+  it('AX-IGN-3: a node reachable through two paths is emitted exactly once', () => {
+    // AX 有时把同一个 node 同时挂在 ignored 包裹层和真实父节点下。提升时必须
+    // 去重，否则同一段文案会在树里出现两次、id 重复。
+    const raw = [
+      node(1, 'generic', '', { childIds: [2, 3] }),
+      ignoredNode(2, 'generic', { childIds: [4] }),
+      node(3, 'generic', '', { childIds: [4] }),
+      node(4, 'StaticText', '同一个文本'),
+    ];
+    const tree = normalizeAxTree(raw);
+    const count = (function w(t) { let n = t.label === '同一个文本' ? 1 : 0; for (const c of t.children || []) n += w(c); return n; })(tree);
+    expect(count).toBe(1);
+  });
+
+  it('AX-IGN-4: modal buttons behind an ignored wrapper are still collected', () => {
+    const raw = [
+      node(1, 'dialog', '发布弹窗', { props: [{ name: 'modal', value: bool(true) }], childIds: [2] }),
+      ignoredNode(2, 'generic', { childIds: [3] }),
+      node(3, 'button', '确定发布', { props: [{ name: 'focusable', value: bool(true) }] }),
+    ];
+    const m = modalsFromAx(raw);
+    expect(m).toHaveLength(1);
+    expect(m[0].buttons.map((b) => b.text)).toEqual(['确定发布']);
+  });
+});
+
+describe('filterInteractive() — a pruned row must still say which row it is (P2-1)', () => {
+  const rowTree = () => ({
+    id: 'root', role: 'generic', label: '', states: ['visible'], actions: [],
+    bounds: { x: 0, y: 0, width: 100, height: 100 },
+    children: [
+      {
+        id: 'li-1', role: 'listitem', label: '', states: ['visible'], actions: [], bounds: { x: 0, y: 0, width: 100, height: 40 },
+        children: [
+          { id: 't-1', role: 'StaticText', label: '第二篇：跨帧编辑器的那些坑', states: [], actions: [], bounds: { x: 0, y: 0, width: 60, height: 20 }, children: [{ id: 'i-1', role: 'InlineTextBox', label: '第二篇：跨帧编辑器的那些坑', states: [], actions: [], bounds: { x: 0, y: 0, width: 60, height: 20 } }] },
+          { id: 'b-1', role: 'button', label: '编辑', states: [], actions: ['click', 'focus', 'hover'], bounds: { x: 0, y: 0, width: 30, height: 20 }, children: [{ id: 'b-t', role: 'StaticText', label: '编辑', states: [], actions: [], bounds: { x: 0, y: 0, width: 30, height: 20 } }] },
+        ],
+      },
+    ],
+  });
+
+  it('AX-FI-1: pruned listitem keeps the title as its label', () => {
+    const out = filterInteractive(rowTree());
+    const li = byId(out, 'li-1');
+    expect(li).toBeTruthy();
+    expect(li.label).toBe('第二篇：跨帧编辑器的那些坑');
+    // 纹理节点仍被剪掉（不靠堆节点换信息）
+    expect(li.children.map((c) => c.id)).toEqual(['b-1']);
+  });
+
+  it('AX-FI-2: an existing label is never overwritten', () => {
+    const t = rowTree();
+    t.children[0].label = '已有行名';
+    const out = filterInteractive(t);
+    expect(byId(out, 'li-1').label).toBe('已有行名');
+  });
+
+  it('AX-FI-3: non-row roles do not get a synthesized label', () => {
+    const t = rowTree();
+    t.children[0].role = 'generic';
+    const out = filterInteractive(t);
+    expect(byId(out, 'li-1').label).toBe('');
+  });
+});
+
+// ---- P2-2：AX 侧的必填 / 无效态 ------------------------------------------
+describe('normalizeAxTree() — states.required / states.invalid (P2-2)', () => {
+  it('AX-VS-1: AX required property becomes states.required', () => {
+    const raw = [
+      node(1, 'textbox', '标题', {
+        props: [{ name: 'required', value: bool(true) }, { name: 'editable', value: str('plaintext') }, { name: 'focusable', value: bool(true) }],
+      }),
+    ];
+    const t = normalizeAxTree(raw);
+    expect(t.states).toContain('required');
+  });
+
+  it('AX-VS-2: AX invalid property becomes states.invalid (and names grammar/spelling)', () => {
+    const raw = [
+      node(1, 'textbox', '标题', { props: [{ name: 'invalid', value: str('true') }] }),
+      node(2, 'textbox', '拼写', { props: [{ name: 'invalid', value: str('spelling') }] }),
+      node(3, 'textbox', '正常', { props: [{ name: 'invalid', value: str('false') }] }),
+    ];
+    const t = normalizeAxTree(raw);
+    expect(t.children[0].states).toContain('invalid');
+    expect(t.children[1].states).toContain('invalid');
+    expect(t.children[1].states).toContain('invalid=spelling');
+    expect(t.children[2].states).not.toContain('invalid');
+  });
+});

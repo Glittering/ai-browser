@@ -150,7 +150,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   switch (name) {
     case 'browse_navigate': {
-      const result = await wsClient.call('ui.navigate', { url: args.url, tab: args.tab });
+      const result = await wsClient.call('ui.navigate', {
+        url: args.url,
+        tab: args.tab,
+        wait_until: args.wait_until || undefined,
+      });
       return { content: [{ type: 'text', text: JSON.stringify(result) }] };
     }
 

@@ -18,6 +18,38 @@ var frameProbe = require("../shared/frame_probe.cjs");
 // （旧元素沿用自身 data-ai-id，新元素却可能生成出同名的号），所以它只增不减。
 var AI_ID_SEQ = 0;
 
+// ---- 必填 / 已判错（P2-2）----------------------------------------------
+// 这两条判定同时服务两处输出：语义树的 node.states 与 context.fields[].required。
+// 两个地方必须给同一个答案 —— 树里说"可选"而 context 说"必填"，比只给一处更糟。
+//
+// required 只认承诺级别的信号：原生 required 属性、aria-required="true"。
+// 不用红星/文案猜（那是 context.required_hints 的启发式，语义不同）。
+function isRequiredField(el) {
+  if (!el || typeof el.getAttribute !== "function") return false;
+  if (el.required === true) return true;
+  return el.getAttribute("aria-required") === "true";
+}
+
+// invalid 同样只认"页面自己说了算"的信号：
+//   1) aria-invalid（true / grammar / spelling；只有字面 "false" 才算有效）
+//   2) 控件自身或近祖先的常见错误态 class（bootstrap 的 has-error、antd 的
+//      ant-form-item-has-error、is-invalid 等）
+// 刻意**不**用 el.matches(":invalid")：必填项一旦为空，浏览器在用户还没动手之前
+// 就把它算作 :invalid —— 那样每个空必填框都会顶着 invalid，信号变成噪声。
+function isInvalidField(el) {
+  if (!el || typeof el.getAttribute !== "function") return false;
+  var ai = el.getAttribute("aria-invalid");
+  if (ai && ai !== "false") return true;
+  var ERROR_STATE_RE = /(^|[\s_-])(is-invalid|invalid|has-error|error-state|field-error)($|[\s_-])/i;
+  var n = el;
+  for (var d = 0; n && d < 3; d++) {
+    var cls = n.className;
+    if (typeof cls === "string" && ERROR_STATE_RE.test(cls)) return true;
+    n = n.parentElement;
+  }
+  return false;
+}
+
 function extractTree() {
   var seen = new WeakSet();
   var counter = 0;
@@ -432,6 +464,13 @@ function extractTree() {
     if (el.disabled === true) states.push("disabled");
     if (el.readOnly === true) states.push("readonly");
     if (el.checked === true) states.push("checked");
+    // 必填 / 已判错（P2-2）。此前只有 disabled/readonly/checked/focused/visible，
+    // 掘金的红*必填、aria-required、字段已判错在树里**完全不可见**：agent 只能
+    // 从"提交后页面没反应"倒推，而必填缺失正是提交失败最常见的原因。
+    // required 用与 context.fields[].required 同一判定（原生 + aria-required），
+    // 两条读层对同一件事只能有一个答案。
+    if (isRequiredField(el)) states.push("required");
+    if (isInvalidField(el)) states.push("invalid");
     if (el === document.activeElement) states.push("focused");
     if (!isHidden(el)) states.push("visible");
 
@@ -798,9 +837,8 @@ function extractPageContext() {
   // 必填判定：原生 required 或 aria-required="true"。站点/组件库常只用 ARIA 标必填
   // （原生 required 会触发浏览器自带的气泡校验，很多站点刻意绕开它）。
   function isRequired(el) {
-    if (el.required === true) return true;
-    var ar = el.getAttribute ? el.getAttribute("aria-required") : null;
-    return ar === "true";
+    // 单一实现：与 node.states 里的 "required" 同源，避免同一件事两个答案。
+    return isRequiredField(el);
   }
 
   // ---- 顶层错误 / 提示扫描（P0-2 / P1-6）----
@@ -845,7 +883,11 @@ function extractPageContext() {
     }
     var p = el.parentElement;
     if (!p) return "";
-    var inps = p.querySelectorAll("input:not([type=hidden]),textarea,select");
+    // 富文本/标签类字段常常不是 input/textarea，而是 contenteditable 容器
+    // （掘金的标签输入区就是）。只数 input/textarea/select 时，这类字段的错误
+    // 永远关联不上——"至少添加一个标签"因此彻底读不到（P2-2 的原始症状）。
+    var inps = p.querySelectorAll(
+      'input:not([type=hidden]),textarea,select,[contenteditable="true"],[contenteditable=""]');
     if (inps.length !== 1) return "";
     return inps[0].id || inps[0].name || "";
   }
@@ -983,6 +1025,46 @@ function extractPageContext() {
   }
   var requiredHints = scanRequiredHints();
 
+  // ---- validation_errors（P2-2）------------------------------------------
+  // "哪个字段被页面判错了、错在哪儿" 之前只能是两片碎片：context.errors 是
+  // 一堆不知道归属的文案，context.field_errors 要求错误元素能被 fieldOf 关联上。
+  // 掘金的行内错误"至少添加一个标签"既不在 modals 里、也没有 aria-invalid，
+  // 于是 agent 提交了、页面拒绝了、而回执里什么都没有 —— 这正是 1.2 次事故的
+  // 全部条件。这里给出结构化的一条：[{ text, near }]，near 是字段的定位串。
+  //
+  // near 的取值顺序与 context.fields[].id 一致，方便两边对照；关联不上字段时
+  // near 为空串，而不是猜一个"最近的输入框"（位置猜测一直是本项目明令禁止的）。
+  function locatorOf(el) {
+    if (!el) return "";
+    return el.id || el.name || el.getAttribute("aria-label") || el.placeholder ||
+      (el.tagName || "").toLowerCase();
+  }
+  var validationErrors = [];
+  var seenVE = {};
+  function pushVE(text, near) {
+    var t2 = (text || "").trim();
+    if (!t2) return;
+    if (t2.length > 120) t2 = t2.slice(0, 120);
+    var key = (near || "") + "\u0000" + t2;
+    if (seenVE[key]) return;
+    if (validationErrors.length >= 30) return;
+    seenVE[key] = 1;
+    validationErrors.push({ text: t2, near: near || "" });
+  }
+  // 1) 页面明说"这个控件无效"（aria-invalid=true/grammar/spelling）—— 最强信号。
+  //    即使拿不到错误文案，字段本身也已经通过 node.states 的 invalid 暴露了。
+  try {
+    var invEls = document.querySelectorAll(
+      '[aria-invalid="true"],[aria-invalid=grammar],[aria-invalid=spelling]');
+    for (var ivi = 0; ivi < invEls.length && ivi < 40; ivi++) {
+      pushVE(fieldErrorOf(invEls[ivi]) || "", locatorOf(invEls[ivi]));
+    }
+  } catch (e) {}
+  // 2) 已经能对上字段的错误文案（fieldErrors 是同一批 DOM 的结论，换形状给调用方）
+  for (var vei = 0; vei < fieldErrors.length; vei++) {
+    pushVE(fieldErrors[vei].text, fieldErrors[vei].field);
+  }
+
   // SESSION / AUTH WALL — 见 src/shared/auth_wall.cjs 顶部的事故注释。
   // 旧实现在这里犯过两个错，都已修正：
   //   1. document.cookie.indexOf("token") >= 0 —— CSDN 未登录时 cookie 里有
@@ -1042,6 +1124,10 @@ function extractPageContext() {
     // 权威判定看 fields[].required。
     errors: topErrors.length ? topErrors : null,
     field_errors: fieldErrors.length ? fieldErrors : null,
+    // validation_errors —— [{text, near}]：字段级校验结论，near 是该字段的定位串
+    // （id/name/aria-label/placeholder）。与 field_errors 的区别：这里包含
+    // aria-invalid 标记但文案缺失的控件（text 为空串时只在 states 里体现，不占条目）。
+    validation_errors: validationErrors.length ? validationErrors : null,
     hints: topHints.length ? topHints : null,
     required_hints: requiredHints.length ? requiredHints : null,
     session: { logged_in: login.logged_in, evidence: login.evidence },

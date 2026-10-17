@@ -72,7 +72,22 @@ function statesFor(node) {
     if (!v || v.type !== 'boolean' || v.value !== true) continue;
     if (p.name === 'read-only') { states.push('readonly'); continue; }
     if (p.name === 'hidden') continue;
+    // required 在下面单独处理（要给出与 DOM 路径同一份语义）。这里跳过，
+    // 否则 states 里会出现两个 "required"。
+    if (p.name === 'required') continue;
+    if (p.name === 'invalid') continue; // 字符串属性，下面单独处理
     states.push(p.name); // focusable/disabled/focused/checked/selected/settable/multiline/visible...
+  }
+  // 必填 / 无效（P2-2）。AX 把 aria-required 和原生 required 都折成 `required`，
+  // 把 aria-invalid 折成 `invalid`（字符串：false | true | grammar | spelling）。
+  // 这两个信号此前完全不在 states 里，于是"掘金红*必填"和"字段已判错"都只能靠
+  // 截图猜 —— 而红色星号在无样式/色盲场景下本来就不是可靠信号。
+  const req = prop(nodeStore, node.nodeId, 'required');
+  if (req && req.value === true) states.push('required');
+  const invalid = prop(nodeStore, node.nodeId, 'invalid');
+  if (invalid && typeof invalid.value === 'string' && invalid.value !== 'false') {
+    states.push('invalid');
+    if (invalid.value !== 'true') states.push('invalid=' + invalid.value); // grammar / spelling
   }
   // raw `editable` stays available to callers that need the primitive signal
   const editable = nodeStore ? valueOf(prop(nodeStore, node.nodeId, 'editable')) : null;
@@ -81,6 +96,27 @@ function statesFor(node) {
 }
 
 let nodeStore = null; // current normalize pass's node map (see normalizeAxTree)
+// Nodes already emitted in this pass. Needed because we walk *through* ignored
+// wrappers (§buildThroughIgnored); an AX node that a wrapper re-parents must not
+// be emitted twice.
+let seenNodes = null;
+
+// Descendants of an AX node that is `ignored: true`. AX marks presentational
+// wrappers (a `span` in a flex row, `<b>` inside a paragraph) as ignored, but
+// the text under them is real content — dropping the wrapper must not drop the
+// subtree. This is the P2-1 cause: a list row's title lives in such a span, so
+// the row came back as `[button] 编辑` and nothing else.
+function buildThroughIgnored(node, idFor) {
+  const out = [];
+  for (const cid of node.childIds || []) {
+    const c = nodeStore.get(cid);
+    if (!c || seenNodes.has(c.nodeId)) continue;
+    if (c.ignored) { out.push(...buildThroughIgnored(c, idFor)); continue; }
+    seenNodes.add(c.nodeId);
+    out.push(build(c, idFor));
+  }
+  return out;
+}
 
 function build(node, idFor) {
   const rawRole = (node.role && node.role.value) || 'generic';
@@ -130,7 +166,12 @@ function build(node, idFor) {
   const kids = [];
   for (const cid of node.childIds || []) {
     const c = nodeStore.get(cid);
-    if (c && !c.ignored) kids.push(build(c, idFor));
+    if (!c || seenNodes.has(c.nodeId)) continue;
+    // 被 AX 标为 ignored 的只是包裹层（见 buildThroughIgnored）；它的子节点
+    // 才是内容，必须被提升上来而不是连同子树一起丢掉。
+    if (c.ignored) { kids.push(...buildThroughIgnored(c, idFor)); continue; }
+    seenNodes.add(c.nodeId);
+    kids.push(build(c, idFor));
   }
   if (kids.length) tn.children = kids;
   return tn;
@@ -141,21 +182,41 @@ let readValue = null; // opts.readValue — per-node DOM read hook for textbox v
 // Public pure API.
 // opts: { idFor: (node)=>string, readValue: (node)=>string }
 export function normalizeAxTree(rawNodes, opts = {}) {
-  const live = (rawNodes || []).filter((n) => n && !n.ignored);
-  nodeStore = new Map(live.map((n) => [n.nodeId, n]));
+  // nodeStore keeps ignored nodes too: we never *emit* them, but we must walk
+  // through them (see buildThroughIgnored). Indexing only the live ones was the
+  // second half of the P2-1 bug — the wrapper was in the map lookup's blind spot
+  // and its children became unreachable.
+  const all = (rawNodes || []).filter(Boolean);
+  const live = all.filter((n) => !n.ignored);
+  nodeStore = new Map(all.map((n) => [n.nodeId, n]));
+  seenNodes = new Set();
   readValue = opts.readValue || null;
   const idFor = opts.idFor || ((n) => 'ax-' + n.nodeId);
 
-  const childIds = new Set();
-  for (const n of live) for (const c of n.childIds || []) if (c != null) childIds.add(c);
-  const roots = live.filter((n) => !childIds.has(n.nodeId));
+  // Parent map over ALL nodes, so "is this a root?" accounts for ignored
+  // ancestors: a live node under an ignored wrapper is not a root.
+  const parentOf = new Map();
+  for (const n of all) for (const c of n.childIds || []) if (c != null && !parentOf.has(c)) parentOf.set(c, n.nodeId);
+  const hasLiveAncestor = (n) => {
+    let p = parentOf.get(n.nodeId); let guard = 0;
+    while (p != null && guard++ < 64) {
+      const pn = nodeStore.get(p);
+      if (!pn) return false;
+      if (!pn.ignored) return true;
+      p = parentOf.get(p);
+    }
+    return false;
+  };
+  const roots = live.filter((n) => !hasLiveAncestor(n));
 
+  for (const r of roots) seenNodes.add(r.nodeId);
   const built = roots.map((n) => build(n, idFor));
   const tree = built.length === 1
     ? built[0]
     : { id: 'root', role: 'generic', label: '', states: ['visible'], actions: [], bounds: { x: 0, y: 0, width: 0, height: 0 }, children: built };
   tree._debug = { layer: 'ax', version: VERSION_TAG };
   nodeStore = null;
+  seenNodes = null;
   readValue = null;
   return tree;
 }
@@ -215,8 +276,11 @@ export function mergeFrameTrees(mainTree, frames = []) {
 // AX role=dialog|alertdialog that is visible, plus its descendant buttons — the
 // AX-native replacement for the class-keyword modal table (extractor's modalSelectors).
 export function modalsFromAx(rawNodes) {
-  const live = (rawNodes || []).filter((n) => n && !n.ignored);
-  nodeStore = new Map(live.map((n) => [n.nodeId, n]));
+  const all = (rawNodes || []).filter(Boolean);
+  const live = all.filter((n) => !n.ignored);
+  // 与 normalizeAxTree 同一条规则：ignored 只是包裹层，遍历要穿过去（否则
+  // ignored span 里的按钮永远数不到）。
+  nodeStore = new Map(all.map((n) => [n.nodeId, n]));
   const dialogs = live.filter((n) => {
     const r = n.role && n.role.value;
     if (r !== 'dialog' && r !== 'alertdialog') return false;
@@ -228,7 +292,8 @@ export function modalsFromAx(rawNodes) {
     const buttons = [];
     const walk = (id) => {
       const n = nodeStore.get(id);
-      if (!n || n.ignored) return;
+      if (!n) return;
+      if (n.ignored) { for (const cid of n.childIds || []) walk(cid); return; }
       const r = n.role && n.role.value;
       if (r === 'button') {
         const btn = {
@@ -386,6 +451,24 @@ export async function attachHrefs(dbg, tree) {
 // descendants); drops layout-only branches. Pure and generic (role/actions
 // based, no site heuristics) — the read-lowering mode for long feeds.
 function isInteractive(tree) { return !!tree.editor_type || (tree.actions && tree.actions.length > 0) || !!tree.url; }
+
+// 行容器（列表项 / 表格行 / 树项）在 prune 后常常只剩一个操作按钮：
+// 标题是被剪掉的纯文本，而**纯文本正是"这是哪一行"的唯一线索**。B站稿件
+// 管理列表因此每行只剩 `[button] 编辑`，无法定位目标条目（P2-1）。
+// 对这类角色，若剪完 label 为空，就把首个文本后代的文字提升成行 label。
+const ROW_ROLES = { listitem: 1, row: 1, treeitem: 1, cell: 1, gridcell: 1, article: 1 };
+const MAX_ROW_LABEL = 120;
+function firstTextOf(node) {
+  if (!node) return '';
+  const role = node.role || '';
+  if (role === 'StaticText' || role === 'InlineTextBox') return String(node.label || '').trim();
+  for (const c of node.children || []) {
+    const t = firstTextOf(c);
+    if (t) return t;
+  }
+  return '';
+}
+
 export function filterInteractive(tree) {
   if (!tree) return tree;
   const keep = (t) => {
@@ -393,7 +476,12 @@ export function filterInteractive(tree) {
     const kids = (t.children || []).map(keep).filter(Boolean);
     if (kids.length || isInteractive(t)) {
       if (!kids.length) return t;
-      return { ...t, children: kids };
+      const node = { ...t, children: kids };
+      if (ROW_ROLES[t.role] && !node.label) {
+        const txt = firstTextOf(t);
+        if (txt) node.label = txt.slice(0, MAX_ROW_LABEL);
+      }
+      return node;
     }
     return null;
   };
