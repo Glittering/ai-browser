@@ -344,13 +344,6 @@ async function axRaw(dbg) {
   return raw;
 }
 
-export function interactiveIdSet(raw) {
-  const byId = new Map(raw.filter((n) => !n.ignored).map((n) => [n.nodeId, n]));
-  const s = new Set();
-  for (const n of raw) if (!n.ignored && isInteractiveNode(n, byId)) s.add(n.nodeId);
-  return s;
-}
-
 // C: PURE READ. Same {tree, context} shape as the default getTree, but derived
 // from AX alone. No DOM mutation, ids = ax-{backendDOMNodeId} (stable).
 export async function axRead(dbg) {
@@ -395,24 +388,10 @@ export async function ensureHandles(dbg) {
   return out;
 }
 
-// A: PURE diff of two AX snapshots (pre/post a reveal) by nodeId. Returns only
-// interactive nodes that newly appeared (revealed) or disappeared (hidden).
-export function diffAx(beforeRaw, afterRaw) {
-  const bm = new Map((beforeRaw || []).map((n) => [n.nodeId, n]));
-  const am = new Map((afterRaw || []).map((n) => [n.nodeId, n]));
-  const bi = interactiveIdSet(beforeRaw || []);
-  const ai = interactiveIdSet(afterRaw || []);
-  const toLite = (n) => ({
-    id: axId(n),
-    role: (n.role && n.role.value) || 'generic',
-    label: (n.name && n.name.value) || '',
-    backendDOMNodeId: n.backendDOMNodeId != null ? n.backendDOMNodeId : undefined,
-  });
-  const revealed = [], hidden = [];
-  for (const id of ai) if (!bi.has(id)) { const n = am.get(id); if (n && !n.ignored) revealed.push(toLite(n)); }
-  for (const id of bi) if (!ai.has(id)) { const n = bm.get(id); if (n && !n.ignored) hidden.push(toLite(n)); }
-  return { revealed, hidden };
-}
+// 注意：这里原本有基于 AX 的 diffAx（ui.peek 用的差异比较）。它已删除，原因是
+// 自绘菜单在 AX 里是"无名的 generic"、进不了 isInteractiveNode 的判据，peek 因此
+// 对这类菜单一律报空；且它返回的 ax-* id 动作层解析不了，探到了也点不了。
+// ui.peek 现在改用 DOM 语义树做差异，实现在 src/shared/tree_diff.cjs。
 
 // C: read-only href resolution for actionable nodes. The AX read layer only knows
 // "this is clickable", not "where it goes" (AX has no href). We lazily decorate
@@ -521,4 +500,4 @@ export function diffLite(prevLite, newLite) {
   return { revealed, hidden };
 }
 
-export default { normalizeAxTree, mergeFrameTrees, modalsFromAx, extractFromDebugger, axRead, axRaw, ensureHandles, diffAx, interactiveIdSet, attachHrefs, filterInteractive, liteSnapshot, diffLite, VERSION_TAG };
+export default { normalizeAxTree, mergeFrameTrees, modalsFromAx, extractFromDebugger, axRead, axRaw, ensureHandles, attachHrefs, filterInteractive, liteSnapshot, diffLite, VERSION_TAG };

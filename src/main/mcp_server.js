@@ -408,6 +408,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return { content: [{ type: 'text', text: JSON.stringify(result) }] };
     }
 
+    case 'browse_errors': {
+      // 只读：读主进程错误日志（本次进程的内存记录 + 落盘文件路径）。
+      // 用途是"事后自查"——界面里弹过框、或者某个动作莫名其妙失败时，
+      // 这里能看到 stack 与出错那一刻最近的调用上下文。
+      const result = await wsClient.call('ui.errors', { limit: args.limit, kind: args.kind });
+      return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+    }
+
     case 'browse_quit': {
       // Fire and forget — the WS server closes before we'd get the response.
       try { await wsClient.call('ui.quit', {}); } catch (e) {}

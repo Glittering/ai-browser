@@ -802,7 +802,9 @@ guard.track(child);
     p2Labels.some((l) => String(l).indexOf("三级") >= 0),
     "revealed=" + JSON.stringify(p2Labels) + " err=" + String(p2.error || "") +
     "\n            peek 前=" + JSON.stringify(pre3) + "\n            peek 后=" + JSON.stringify(post3));
-  await sleep(1900); // 等 peek 强制的 revert（revertMs 传 0 无效，见 B-14）走完，否则鼠标被移开会关掉菜单
+  // 这里不用等"peek 的强制 revert"了：peek 现在是同步的，revertMs:0 表示保持展开
+  // （见 B-13/B-14 的新契约说明），菜单不会在自己背后被关掉。
+  await sleep(1900);
   // 对照：不用 peek，act hover 二级项
   await parkMouse();
   await b.call("ui.act", { action: "hover", target: "menuRoot", tab: mnTab });
@@ -871,12 +873,23 @@ guard.track(child);
     afterRevert === null, afterRevert ? "still present" : "absent（revert 生效）");
 
   // --- revertMs 语义：0 到底是不是"不回撤" ---
+  //
+  // 契约在 2026-10-17 的 peek 重写里变了，B-13 跟着翻面（不是把测试拧向实现，
+  // 是"延迟回撤窗口"这个设计本身被拿掉了）：
+  //   旧：peek 立刻返回，另起一个 per-tab 定时器在 revertMs 之后把鼠标挪开；
+  //       于是 revertMs=5000 意味着"菜单还会开 5 秒，agent 趁这段时间去点"。
+  //   新：peek 是**同步**的 —— 悬停拍一张、挪开拍一张、差分、返回。返回时鼠标
+  //       已经挪开，页面回到基线（菜单收起）；只有 revertMs:0 会再把鼠标移回目标
+  //       并保持展开。
+  // 为什么砍掉延迟窗口：那一刻的"菜单还开着"是与 agent 下一步动作的**竞态**
+  // （定时器什么时候跑、agent 什么时候点，都不确定），而 revertMs:0 是确定的：
+  // 想接着点就显式说 0，不用和计时器赛跑。README 与 §9/§10 都按新契约写。
   await parkMouse();
   await b.call("ui.peek", { tab: mnTab, target: "menuRoot", hoverMs: 300, revertMs: 5000 });
   await sleep(2200);
   const keepOpen = await nodeOf(mnTab, "lv2a");
-  check("B-13 peek(revertMs=5000) → 2.2s 后菜单仍展开（大 revertMs 生效，作为对照）",
-    !!keepOpen, keepOpen ? "still open" : "closed");
+  check("B-13 peek(revertMs=5000) → 返回时菜单已收起（新契约：只有 revertMs:0 表示'别回撤'）",
+    !keepOpen, keepOpen ? "still open（非 0 的 revertMs 被当成了'别回撤'）" : "closed");
   await parkMouse();
   await b.call("ui.peek", { tab: mnTab, target: "menuRoot", hoverMs: 300, revertMs: 0 });
   await sleep(2200);
@@ -912,22 +925,19 @@ guard.track(child);
   const hoverNode = await nodeOf(mnTab, "lv2a");
   check("B-12 对照路径：act hover(menuRoot) + get_tree 同样能拿到二级项",
     !!hoverNode, JSON.stringify(hoverNode && hoverNode.label));
-  note("ui.peek 实测结论（全部基于本组实测数据，不空谈）：**能力是真的，但当前实现有三个坑，"
-    + "直接决定它在嵌套菜单场景能不能用。**"
+  note("ui.peek 实测结论（全部基于本组实测数据，不空谈）："
     + "\n            (1) 能做什么：真实 CDP mousemove 触发 hover，revealed 给出新出现的可交互项 —— "
     + "二级（B-06/B-07）和三级（B-02）都探到了，agent 不用猜子菜单的 DOM 结构。这是 get_tree 给不了的，"
     + "因为收起状态的子菜单压根不在树里（B-01）。"
-    + "\n            (2) 坑一（致命）：**revertMs 传 0 无效**（B-14）。`Number(opts.revertMs) || 1500` 把 0 "
-    + "当成缺省值，于是 peek 永远在约 1.5s 后把鼠标移回 (4,4) 收起菜单。'peek 探出来 → 接着 act click' "
-    + "这个唯一有价值的用法被废掉：实测 peek(lv2c) 确实探到了三级项，但 1.5s 后菜单关掉，"
-    + "等 agent 去点时目标已经不存在（B-02 的 peek 后探针：enter:lv2cWrap 之后紧跟 leave:wrap）。"
-    + "当前可绕：peek 完立刻在 1.5s 内 get_tree + act click，或者干脆用 act hover（不会回撤，B-03 验证可行）。"
-    + "\n            (3) 坑二：定位不到 target 时**静默返回空 revealed 且不报错**（B-11），和"
-    + "'这里确实没有可展开项'不可区分 —— 而新展开出的元素第一次只有 ax-N 句柄，必须再 get_tree "
-    + "一次才能拿到稳定的原生 id。"
-    + "\n            (4) 缺口：MCP 的 13 个 browse_* 工具没暴露 peek。走 MCP 的 agent 只能退化成 "
-    + "act hover + get_tree（B-12 验证走得通），但拿不到'本次 hover 新出现了什么'的差分信息。"
-    + "\n            一句话：值得暴露给 MCP，但要先修 revertMs=0 和静默失败这两条，否则暴露了也不好用。");
+    + "\n            (2) 已修（2026-10-17）：**revertMs 传 0 现在真的不回撤**（B-14）。此前 "
+    + "`Number(opts.revertMs) || 1500` 把 0 当 falsy 顶成默认值，菜单永远在约 1.5s 后自己关掉，"
+    + "'peek 探出来 → 接着 act click'这个核心用法被废掉。现在 peek 是同步的，返回时鼠标已挪开；"
+    + "只有 revertMs:0 会把鼠标移回目标并保持展开（B-13 是翻面后的对照：非 0 的 revertMs = 回撤）。"
+    + "重开后的菜单是新造的 DOM，所以顺带做了 id 重绑 —— 否则点 revealed 里的 id 只会拿到 "
+    + "target_not_found（详见 shared/tree_diff.cjs 的 remapIds）。"
+    + "\n            (3) 已修：定位不到 target 时**如实报错**（B-11），不再与'这里确实没有可展开项'混淆。"
+    + "\n            (4) 仍在的缺口：MCP 的 browse_* 工具没暴露 peek。走 MCP 的 agent 只能退化成 "
+    + "act hover + get_tree（B-12 验证走得通），但拿不到'本次 hover 新出现了什么'的差分信息。");
 
   // =======================================================================
   // C. 复杂表单：必填 vs 选填

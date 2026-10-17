@@ -82,8 +82,30 @@ function extractTree() {
     }
   }
 
-  function isHidden(el) {
-    if (!isHtmlElement(el)) return true;
+  // 真正的焦点元素 —— 穿透 shadow root 取最里层。
+  //
+  // `document.activeElement` 在 Web Component 里只到**宿主**为止：焦点实际在
+  // 宿主 shadow root 里那个 contenteditable 上，但顶层读到的是宿主本身。于是
+  // 树里没有任何节点能被标成 "focused"（宿主 !== 里层输入框），agent 看不到
+  // "光标现在在哪"，而这是判断"接下来 type 会落到哪"的唯一依据。
+  // 一次抽取内只算一次（缓存），因为每个节点都要问。
+  var _deepActive,
+    _deepActiveDone = false;
+  function deepActive() {
+    if (_deepActiveDone) return _deepActive;
+    _deepActiveDone = true;
+    var e = null;
+    try { e = document.activeElement; } catch (x) { return null; }
+    // 防御页面构造的循环引用；shadow 嵌套深度实际远小于 10。
+    var g = 0;
+    while (e && e.shadowRoot && e.shadowRoot.activeElement && g++ < 10) {
+      e = e.shadowRoot.activeElement;
+    }
+    _deepActive = e;
+    return e;
+  }
+
+  function isHidden(el) {    if (!isHtmlElement(el)) return true;
     var tag = el.tagName.toLowerCase();
     if (tag === "dialog") return false;
     var style = winOf(el).getComputedStyle(el);
@@ -130,6 +152,212 @@ function extractTree() {
     "nav","main","header","footer","section","article","aside","iframe"
   ];
 
+  // ───────────────────────────────────────────────────────────────────────
+  // 「人看着能点」—— 用渲染结果判定可点性，而不是猜类名、也不是看 onclick 属性。
+  //
+  // 为什么不能用 el.onclick：Vue / React 一律走 addEventListener，元素上的
+  // onclick **属性**恒为 null。实测 CSDN 首页顶部 10 个 .layout-menu-item
+  // （首页/博客/下载/学习/…）全是裸 div + addEventListener，用属性判据一个都看不见，
+  // 而它们是页面上最常被点的东西。老校验里 `typeof el.onclick === "function"`
+  // 这条在框架站上等于永远为假。
+  //
+  // 为什么用 cursor:pointer：它是**浏览器自己算出来的**可点性 —— 人手看到手型光标
+  // 就知道这儿能点，浏览器也是照这个画的。读它等于读"浏览器怎么理解这个元素"，
+  // 比猜 `.btn` / `[class*=item]` 这类各框架私有类名通用得多。
+  //
+  // 为什么必须限定「自己是手型边界」：cursor 是**可继承**的 CSS 属性。一张卡片设了
+  // cursor:pointer，卡片里每个 div/span/svg/path 计算出来全是 pointer。若逐个收下，
+  // CSDN 首页这一条会从 254 个可点目标涨到 840 个节点，而它们点起来效果完全相同
+  // （都落在卡片上）—— 语义树白白膨胀 3 倍，agent 还得从一堆同义节点里挑。
+  // 只收"父元素不是 pointer"的最外层那个，数量才等于**人看到几个可点区块**。
+  // 实测（tools/coverage_probe.cjs，2026-10-17）：CSDN 254 个可点目标 / 840 个
+  // pointer 元素；B站 88 / 400；百度 38 / 88。
+  //
+  // 还要能读出名字：只判"可点"不够，agent 拿到一个无名节点照样没法选。aria-label /
+  // title / 自身文本 / 内含图标，四者任一即可 —— 图标按钮靠标签和图标，文字按钮靠文本。
+  // 全都没有就不收（这类通常真的是装饰性占位），宁可少报。
+  var CLICK_MIN_BOX = 8;
+  // 「一个可点目标」的候选交互后代。只作判重用途，不用来产出节点。
+  var INTERACTIVE_DESC = "a[href],button,input,select,textarea,summary,details," +
+    "[role=button],[role=link],[role=checkbox],[role=radio],[role=tab],[role=menuitem],[contenteditable=true]";
+  function ownCursor(el) {
+    try { return String(winOf(el).getComputedStyle(el).cursor || "").toLowerCase(); } catch (e) { return ""; }
+  }
+  // 外层只是**单个**交互元素的外壳时，不要再收一个节点。
+  //
+  // 实测（CSDN 首页）：每个导航项都是
+  //   <div class="layout-menu-item"><a class="layout-menu-item_inner">首页</a></div>
+  // div 是手型边界、<a> 本来就在树里，两者指向同一个目标。不加这条，agent 会在
+  // 树里看到两个同名「首页」，还得自己猜哪个是对的 —— 这不是能力，是噪声。
+  //
+  // 判据是"内层几乎盖满外层"（>=90%），而不是"外层只有一个交互后代"：
+  // 一张大的可点卡片里只放了一个小链接时，两者是不同的目标（点卡片 ≠ 点那个链接），
+  // 那条外层通路要保留。
+  function wrapsSingleInteractive(el) {
+    var hits;
+    try { hits = el.querySelectorAll(INTERACTIVE_DESC); } catch (e) { return false; }
+    if (!hits || hits.length !== 1) return false;
+    var inner = hits[0], a, b;
+    try { a = el.getBoundingClientRect(); b = inner.getBoundingClientRect(); } catch (e) { return false; }
+    if (!a || !b || !(b.width > 0) || !(b.height > 0)) return false;
+    var w = Math.min(a.right, b.right) - Math.max(a.left, b.left);
+    var h = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+    if (!(w > 0) || !(h > 0)) return false;
+    var inter = w * h;
+    // 两个方向都要「盖满」：
+    //   内层全在外层里 ≠ 内层盖满外层。大卡片里放一个 80×20 的链接，
+    //   交集/内层面积 = 100%，但交集/外层面积只有 1% —— 点卡片空白处根本
+    //   不等于点那个链接，两条通路必须都留。
+    // 实测踩过：只看前者，CB-5 的大卡片会被误判成壳子删掉。
+    return inter / (b.width * b.height) >= 0.9 && inter / (a.width * a.height) >= 0.9;
+  }
+  // ── 浮层（下拉菜单 / 弹出面板）────────────────────────────────────────────
+  //
+  // 脱流浮层里的每一项都是**独立目标**，但 cursor:pointer 是从触发按钮一路继承
+  // 下来的，于是"父元素 pointer 就抑制"的边界规则会把整张菜单并成触发按钮的
+  // 一个节点。实测（2026-10-17，B站 动态卡片的「更多」菜单）：
+  //
+  //   div.bili-dyn-more      cursor:auto    24×24   ← 真正的边界在这里
+  //     div.tp               absolute      24×24   ← 菜单被并到这个节点上
+  //       div.bili-cascader  absolute     139×106  ← 浮层根（溢出了父块）
+  //         div.item         pointer      140×40   ← 「置顶」/「删除」是纯 div
+  //           …两层包装…
+  //             div.item-label "删除"     26×18
+  //
+  // 合并后的节点 label 是 "取消置顶  删除"，看着像一个节点，实际**点不了**，
+  // 而且"删除"两个字就在里面，agent 会以为它拿到了删除入口。
+  //
+  // 判据两半：
+  //   ① 浮层根 = 位置脱流（absolute/fixed）且盒子**溢出**了父块 —— 弹出层正是
+  //      "画在自己触发区外面的一块板"。用"溢出"而不是"脱流"本身，是为了不把
+  //      "整页都是绝对定位"的布局当成浮层（那种页面上这条规则会让节点数失控）。
+  //      position:fixed 例外：它按定义锚在视口上，直接算浮层根。
+  //   ② 浮层内只收**最内层**的可点元素（自身没有"带名字的可点后代"）——
+  //      一个菜单项通常套着 item → custom → label 三层，只留能读到名字的那层，
+  //      既拿到正确 label，又不会一项收成三层。
+  var FLOAT_OVERFLOW_TOL = 8;
+  // 盒子是否溢出了父块。用「溢出」而不是「脱流」本身：整页绝对定位的布局也脱流，
+  // 但它没有溢出父块（body），不该被当成弹出层。
+  function overflowsParent(el) {
+    var p = el.parentElement;
+    if (!p) return false;
+    var a, b;
+    try { a = p.getBoundingClientRect(); b = el.getBoundingClientRect(); } catch (e) { return false; }
+    if (!(b.width > 0) || !(b.height > 0)) return false;
+    return b.left < a.left - FLOAT_OVERFLOW_TOL ||
+      b.top < a.top - FLOAT_OVERFLOW_TOL ||
+      b.right > a.right + FLOAT_OVERFLOW_TOL ||
+      b.bottom > a.bottom + FLOAT_OVERFLOW_TOL;
+  }
+  // el 是否位于某个浮层里；返回那个浮层根（不在浮层里返回 null）。
+  // 只沿 pointer 链上溯：一旦离开手型块（祖先不是 pointer），就不属于同一张菜单。
+  // 每层只读一次 computed style（这个函数对每个可点元素都要跑一遍，别重复读）。
+  function floatingLayerOf(el) {
+    var p = el.parentElement, g = 0;
+    while (p && p !== document.documentElement && g++ < 12) {
+      var cs;
+      try { cs = winOf(p).getComputedStyle(p); } catch (e) { return null; }
+      if (String(cs.cursor || "").toLowerCase() !== "pointer") return null;
+      if (cs.position === "fixed") return p; // 视口锚定，按定义就是浮层
+      if (cs.position === "absolute" && overflowsParent(p)) return p;
+      p = p.parentElement;
+    }
+    return null;
+  }
+
+  // 元素的可读文字名（aria-label / alt / title / 自身文本）。
+  function elementName(el) {
+    var name = "";
+    try {
+      name = String(el.getAttribute("aria-label") || el.getAttribute("title") || "");
+    } catch (e) {}
+    // alt 与标签读法同源（见 extractLabel）：图标 img、表情图都靠它取名。
+    if (!name.trim()) {
+      try {
+        var a = el.getAttribute("alt");
+        if (a && String(a).trim()) name = String(a).trim();
+      } catch (e) {}
+    }
+    if (!name.trim()) {
+      var t = el.innerText || el.textContent || "";
+      if (t && t.trim()) name = t.trim().slice(0, 120);
+    }
+    return name;
+  }
+  // 没有文字但有图标 —— 也算"人看得出这是什么"，否则右侧一排图标按钮会全部消失。
+  // 这条不能混进 elementName 的返回值：那样调用方就分不清"名字是空字符串"和
+  // "压根没有名字"，而判重逻辑要的正是后者。
+  function hasIconInside(el) {
+    try { return !!(el.querySelector && el.querySelector("svg,img,i[class],[class*=icon]")); } catch (e) { return false; }
+  }
+  function isNamed(el) {
+    return !!elementName(el).trim() || hasIconInside(el);
+  }
+
+  // 浮层内是否还有"更内层的可点元素"——有的话当前这层只是包装，不该单独收。
+  // 只用于压掉 item → custom → label 这种多层包裹，不做通用遍历优化：
+  // 浮层本身很小（菜单/面板），后代数量有界。
+  function hasClickableNamedDescendant(el) {
+    var all;
+    try { all = el.querySelectorAll("*"); } catch (e) { return false; }
+    for (var i = 0; i < all.length; i++) {
+      var c = all[i];
+      var r;
+      try { r = c.getBoundingClientRect(); } catch (e) { continue; }
+      if (!r || r.width < CLICK_MIN_BOX || r.height < CLICK_MIN_BOX) continue;
+      if (ownCursor(c) !== "pointer") continue;
+      if (isNamed(c)) return true;
+    }
+    return false;
+  }
+
+  function isHumanClickable(el) {
+    // 顺序按代价排：几何 → 自身 cursor → 父 cursor → 命名 → 判重
+    var r;
+    try { r = el.getBoundingClientRect(); } catch (e) { return false; }
+    if (!r || r.width < CLICK_MIN_BOX || r.height < CLICK_MIN_BOX) return false;
+    if (ownCursor(el) !== "pointer") return false;
+    // 浮层内：只收最内层，且不参与"父元素 pointer 就抑制"的合并（理由见上面
+    // FLOAT 那段注释）。
+    if (floatingLayerOf(el)) {
+      if (hasClickableNamedDescendant(el)) return false;
+      return isNamed(el);
+    }
+    var p = el.parentElement;
+    if (p && p !== document.documentElement && ownCursor(p) === "pointer") return false;
+    if (!isNamed(el)) return false;
+    // 命名检查在前、判重在后：判重要遍历后代并量两个盒子，比读文本贵
+    if (wrapsSingleInteractive(el)) return false;
+    return true;
+  }
+
+  // 一个元素的"子节点" = 普通子元素 + 影子根里的元素。
+  //
+  // 为什么必须下探 shadowRoot：Web Component 的内容**不在 el.children 里**。
+  // 实测（2026-10-17，B站 opus 详情页）：整块评论区（输入框、发送按钮、评论列表）
+  // 全部装在 <bili-comments> 的 shadow root 里 —— DOM 通路读出来只有 45 个节点、
+  // 评论面板是个空 tabpanel，而 AX 通路能读到 190 个节点。这不是 B站 特有的写法：
+  // YouTube 的 <ytd-*>、各种设计系统的 <ui-*> 都一样。
+  //
+  // closed shadow root 按设计拿不到（el.shadowRoot 为 null），这里不做任何绕过 ——
+  // 能拿到的是 open 的那部分，拿不到的由 AX 通路兜底。
+  function childrenOf(el) {
+    var out = [];
+    var kids = el.children;
+    if (kids) for (var i = 0; i < kids.length; i++) out.push(kids[i]);
+    try {
+      var sr = el.shadowRoot;
+      if (sr && sr.children) {
+        for (var j = 0; j < sr.children.length; j++) {
+          // slot 分配进 shadow 的 light DOM 元素已在 el.children 里出现过，
+          // seen 集合会去重，不会重复产出。
+          out.push(sr.children[j]);
+        }
+      }
+    } catch (e) { /* 拿不到就算了 */ }
+    return out;
+  }
+
   function isSemantic(el) {
     if (!isHtmlElement(el)) return false;
     if (el === document.body || el === document.documentElement) return true;
@@ -139,6 +367,12 @@ function extractTree() {
     if (el.hasAttribute("role")) return true;
     if (typeof el.onclick === "function") return true;
     if (el.contentEditable === "true" || el.getAttribute("contenteditable") === "true") return true;
+    // 必须排在 isPureLayout **之前**：isPureLayout 对裸 div/span 一律返回 true，
+    // 放在它后面就永远轮不到。而真正被它误杀的恰好就是这类元素（CSDN 导航项、
+    // 百度"设置/下载/辅助"）。role/onclick/contenteditable/aria 这些显式特征
+    // 在上面已经各自 return true 了，所以把"手型边界"插在这里不会削弱原有判定，
+    // 只是补上 framework 站上唯一还剩的那条通路。
+    if (isHumanClickable(el)) return true;
     if (isPureLayout(el)) return false;
     if (tag === "div" || tag === "span") return false;
     // Non-interactive/non-visible tags — never semantic
@@ -291,6 +525,24 @@ function extractTree() {
   function extractLabel(el) {
     var ariaLabel = el.getAttribute("aria-label");
     if (ariaLabel) return ariaLabel;
+    // 图片的可访问名是 alt（HTML-AAM 规定），此前完全没读。
+    //
+    // 实测（B站动态正文）：插入的表情是 `<img alt="[doge_金箍]">`，正文里看得见、
+    // 树里 role=image 但 label 是空串 —— "刚才插进去的是哪个表情"读不出来。
+    // 同理，带 alt 的图标按钮（img 包在 <button> 里）也变成了无名节点。
+    // 空 alt（alt="" 表示装饰性图片）继续往下走，不制造假名字。
+    var alt = el.getAttribute("alt");
+    if (alt && String(alt).trim()) return String(alt).trim();
+    // input[type=submit|button|reset] 的可访问名是 value（同理，标准规定）。
+    // 没有这条，提交按钮在树里是"无名可点节点"，只能靠坐标点。
+    var tagName = String(el.tagName || "").toUpperCase();
+    if (tagName === "INPUT") {
+      var itype = String(el.getAttribute("type") || "").toLowerCase();
+      if (itype === "submit" || itype === "button" || itype === "reset") {
+        var iv = el.getAttribute("value");
+        if (iv && String(iv).trim()) return String(iv).trim();
+      }
+    }
     var title = el.getAttribute("title");
     if (title) return title;
     var text = (el.textContent || "").trim();
@@ -412,7 +664,7 @@ function extractTree() {
       };
     }
     if (!isSemantic(el)) {
-      var elChildren = el.children;
+      var elChildren = childrenOf(el);
       if (elChildren && elChildren.length > 0) {
         var results = [];
         for (var ci = 0; ci < elChildren.length; ci++) {
@@ -464,6 +716,25 @@ function extractTree() {
     if (el.disabled === true) states.push("disabled");
     if (el.readOnly === true) states.push("readonly");
     if (el.checked === true) states.push("checked");
+    // 选中态的第二来源：自绘单选/复选。
+    //
+    // 实测（CSDN 发布页的「可见范围」）：视觉上是四个单选，DOM 是
+    // `<label><input type=radio style="opacity:0"></label>`，可点的是 label。
+    // label 自己没有 checked，于是树里四个选项**长得一模一样**，只有 visible ——
+    // 「我到底选中了哪个」读不出来，只能靠截图。这是 HTML 标准里写清楚的：
+    // label 的选中态来自它关联的控件（label.control / label[for]），
+    // WAI-ARIA 的 role=radio/checkbox 则用 aria-checked。两条都读，不猜。
+    // 顺序：真控件 → 关联控件 → aria 属性。
+    if (states.indexOf("checked") < 0) {
+      var ctrl = null;
+      try {
+        if (el.control) ctrl = el.control;
+        else if (el.htmlFor && el.ownerDocument) ctrl = el.ownerDocument.getElementById(el.htmlFor);
+      } catch (e) { ctrl = null; }
+      if (ctrl && ctrl.checked === true) states.push("checked");
+      else if (el.getAttribute && el.getAttribute("aria-checked") === "true") states.push("checked");
+    }
+    if (el.getAttribute && el.getAttribute("aria-selected") === "true") states.push("selected");
     // 必填 / 已判错（P2-2）。此前只有 disabled/readonly/checked/focused/visible，
     // 掘金的红*必填、aria-required、字段已判错在树里**完全不可见**：agent 只能
     // 从"提交后页面没反应"倒推，而必填缺失正是提交失败最常见的原因。
@@ -471,7 +742,7 @@ function extractTree() {
     // 两条读层对同一件事只能有一个答案。
     if (isRequiredField(el)) states.push("required");
     if (isInvalidField(el)) states.push("invalid");
-    if (el === document.activeElement) states.push("focused");
+    if (el === deepActive()) states.push("focused");
     if (!isHidden(el)) states.push("visible");
 
     var node = {
@@ -521,8 +792,8 @@ function extractTree() {
     if (editorType) node.editor_type = editorType;
     if (editorBlocks) node.editor_blocks = editorBlocks;
 
-    // Children — including iframe content if same-origin
-    var elChildren = el.children;
+    // Children — 普通子元素 + 影子根（Web Component），见 childrenOf 的注释
+    var elChildren = childrenOf(el);
     var childNodes = [];
 
     // 同源 iframe 的递归已在 process() 开头完成（必须在 isSemantic 之前），此处不再重复。
@@ -633,13 +904,13 @@ function extractTree() {
   // 当前焦点元素的 data-ai-id，挂根上。ui.get_focused 一直在读这个字段，而
   // extractor 从不产出它 —— 于是那个方法恒返回 null（e2e/audit_ws.cjs AU-B2 抓到）。
   // 焦点信息本来就在每个节点的 states:[...,"focused"] 里，但那是 O(n) 扫树；
-  // 挂根上 O(1)，且与节点状态同源（都是 document.activeElement）。
+  // 挂根上 O(1)，且与节点状态同源（都是「真正的焦点元素」，见 deepActive）。
   //
   // 三种情况给 null，不猜：焦点在 body/documentElement（没有对应语义节点）、
   // 焦点在iframe 里（activeElement 是 iframe 元素本身，不是里面那个输入框）、
   // 焦点元素不是语义节点（没有 data-ai-id，比如被 isPureLayout 剪掉的容器）。
   var focusedEl = null;
-  try { focusedEl = document.activeElement; } catch (e) {}
+  try { focusedEl = deepActive(); } catch (e) {}
   var focusedId = null;
   if (focusedEl && focusedEl !== document.body && focusedEl !== document.documentElement &&
       typeof focusedEl.getAttribute === "function") {

@@ -6,6 +6,9 @@ dist/
 Electron.app/
 cache/
 screenshots/
+# 验证过程落盘的截图等证据产物（outputs/verify-YYYY-MM-DD/）。只作当场取证用，
+# 不进仓库 —— 一次验收就能到几十 MB。
+outputs/
 # tools/ holds a WS helper the committed e2e/ suite depends on (../tools/browser.cjs);
 # archive it so CI/repros don't break, keep the one real asset tracked.
 tools/**

@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>主进程异常</title>
+<style>
+  /* 横幅只有 34px 高：所有尺寸都按"一行文字"设计，任何换行都会被裁掉，
+    所以主进程那边已经把消息压成一行（shared/error_banner.cjs）。 */
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    display: flex; align-items: center; gap: 10px;
+    padding: 0 8px 0 12px;
+    background: #7f1d1d;
+    color: #fff;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif;
+    font-size: 12px;
+    user-select: none;
+    cursor: default;
+    border-top: 1px solid #b91c1c;
+  }
+  #icon { font-size: 13px; flex: none; opacity: 0.95; }
+  #title { font-weight: 600; flex: none; letter-spacing: 0.2px; }
+  #detail {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    color: #fee2e2;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11.5px;
+  }
+  #count {
+    display: none;
+    flex: none;
+    background: #fff; color: #7f1d1d;
+    border-radius: 8px; padding: 0 6px;
+    font-size: 10.5px; font-weight: 700; line-height: 16px;
+  }
+  #log {
+    flex: 0 1 auto; max-width: 34%;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    color: #fca5a5; font-size: 11px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  #close {
+    flex: none;
+    background: transparent; border: 1px solid #fca5a5; color: #fee2e2;
+    border-radius: 4px; width: 20px; height: 20px; line-height: 1;
+    cursor: pointer; font-size: 13px; font-family: inherit;
+  }
+  #close:hover { background: #b91c1c; color: #fff; }
+</style>
+</head>
+<body>
+  <span id="icon">⚠</span>
+  <span id="title">主进程异常</span>
+  <span id="detail"></span>
+  <span id="count"></span>
+  <span id="log"></span>
+  <button id="close" title="关闭（日志已保存，不受影响）">×</button>
+
+<script>
+  const { ipcRenderer } = require('electron');
+
+  function apply(p) {
+    if (!p) return;
+    const detail = document.getElementById('detail');
+    // title 只用一次：横幅里"主进程异常"当标签，异常消息当正文，不重复两遍
+    document.getElementById('title').textContent = p.title || '主进程异常';
+    detail.textContent = p.detail || '';
+    detail.title = p.detail || '';            // 悬停看全文（截断时可读）
+    const logEl = document.getElementById('log');
+    // 路径可能很长，展示时只留尾部（文件名一定在末尾），完整路径放 title
+    logEl.textContent = p.log_path ? '日志 ' + p.log_path : '';
+    logEl.title = p.log_path || '';
+    const countEl = document.getElementById('count');
+    if (p.count > 1) {
+      countEl.style.display = 'inline-block';
+      countEl.textContent = '×' + p.count;
+      countEl.title = '连续异常次数（日志里每一条都在）';
+    }
+  }
+
+  ipcRenderer.on('error-banner:show', (_e, payload) => apply(payload));
+  document.getElementById('close').addEventListener('click', () => {
+    ipcRenderer.send('error-banner:close');
+  });
+</script>
+</body>
+</html>

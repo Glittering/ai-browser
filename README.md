@@ -363,7 +363,7 @@ MCP is a thin stdio adapter. Anything MCP can do is reachable directly over JSON
 | `ui.subscribe` / `ui.unsubscribe` | Event subscription; `params.events`, `"*"` for all | — (WS only — see below) |
 | `ui.downloads` | This tab's downloads with on-disk paths (`state`, `received_bytes`, `dir`) | `browse_downloads` |
 | `ui.get_focused` | The focused element subtree | — |
-| `ui.peek` | Hover a folded/hover-only affordance and return the diff, without committing | — |
+| `ui.peek` | Hover a folded/hover-only affordance and return what appeared/disappeared (`revealed` / `hidden`), without committing. Ids are real `data-ai-id`s you can hand straight to `ui.act`; `revertMs: 0` keeps the mouse there so you can click what it found | — |
 | `ui.network_body` | Response body by URL substring (`url_pattern`) | — (superseded by `browse_network`) |
 | `ui.quit` | Graceful shutdown | `browse_quit` |
 
@@ -445,7 +445,9 @@ perturbs the thing it is measuring.
 **Writing.** Actions are **trusted browser input**, not synthesized JS. The main process drives the
 page over the Chrome DevTools Protocol — `Input.dispatchMouseEvent` for clicks, and per-character
 `Input.dispatchKeyEvent` (`rawKeyDown → char → keyUp`) for typing — then validates that the click
-actually landed via `elementFromPoint`. Because the events arrive as real keyboard and mouse input,
+actually landed via `elementFromPoint` (piercing shadow roots: the plain call returns the *host* for
+anything inside a web component, which silently downgraded every such click to a synthetic one).
+Because the events arrive as real keyboard and mouse input,
 Draft.js, ProseMirror, CKEditor, Quill, and plain `<textarea>` all work through the same path without
 per-framework branches.
 
@@ -558,6 +560,65 @@ not "logged in" in another:
 ```bash
 AI_BROWSER_USER_DATA=~/.ai-browser-work npm start
 ```
+
+**A red bar appeared at the bottom of the window.** That is a main-process exception — a bug in
+AI Browser itself, not in the page you were driving. It is deliberately *not* a modal dialog: a
+native `dialog.showMessageBox` is an `NSAlert` modal loop on macOS and blocks the whole main process
+(measured: WebSocket calls got 4ms with no dialog vs **8 seconds of no response** with one), which
+turned a self-healing JS exception into "every RPC timed out". The bar shows the message and the log
+path, the process keeps running, and you can dismiss it with `×`.
+
+Every exception is appended synchronously to `~/.ai-browser/logs/error.jsonl` (2MB × 4 rolling), with
+the last 20 WebSocket calls attached so you can see *what was being done* when it broke. Read it over
+the API with `ui.errors` / `browse_errors`, or just `tail` the file. A record of `boot` without a
+matching `shutdown` means the process died hard last time.
+
+If the exception happened before any window existed, the bar has nowhere to go, so it falls back to a
+native box once (logged as `error_dialog_fallback`) rather than leaving you with a silently dead app.
+Both paths are switchable: `AI_BROWSER_ERROR_BANNER=0` disables the bar, `AI_BROWSER_ERROR_DIALOG=1`
+forces the modal box — the latter blocks the main process, so it is only for staring at a startup
+crash on purpose.
+
+### The element is clearly on the page but not in the tree
+
+Before you write a site-specific script, work down this list. The reflex — "pin it with a
+`querySelector` chain" — is what produced 142 site-specific scripts and 731 hardcoded selectors in
+this project's own history, and almost none of them turned out to be necessary.
+
+| # | Check | How | If it is the cause |
+|---|---|---|---|
+| 1 | Is it a **read-layer** gap? | `node tools/coverage_probe.cjs https://the.site/` | the tree is missing clickable elements → report it; the fix belongs in `src/preload/extractor.cjs`, not in your script |
+| 2 | Is it an **action-layer** gap? | the node is in the tree, `ui.act` fails or does nothing | the element is readable but not reachable (iframe/OOPIF, canvas, trusted input, un-mounted input) → that is a browser-side fix too |
+| 3 | Is it **timing**? | re-read the tree 2–3s later, or `wait_until` | the SPA simply had not rendered when you read it |
+| 4 | Does it only exist **while hovered**? | `ui.peek { target, revertMs: 0 }` | the affordance is hover-rendered. `peek` hovers it and returns what appeared — pass `revertMs: 0` to keep it open, then `ui.act click` the id you got back |
+| 5 | Is it **unnamed**? | `ui.peek`, or click it and read what shows up | an icon-only button the site gave no `aria-label`/`title`/`alt` cannot be named from nothing. But the panel it opens usually is named — so open it and read that instead of guessing which icon is which |
+| 6 | Only now: **pin it yourself** | a selector in *your* script | keep it in your script. Do not encode it as "how this site works" — the next site will not match |
+
+`coverage_probe` counts what a human would call click targets — elements the browser itself renders
+with a hand cursor (`cursor:pointer`), where the pointer starts (not every descendant that inherits
+it), and reports how many of them carry a `data-ai-id`:
+
+```
+$ node tools/coverage_probe.cjs https://www.csdn.net/
+可点目标（手型边界）: 257
+  ├ 自己带 data-ai-id（直接可操作）: 257 → 100%
+  ├ 被单个交互后代盖满且它在树里（壳子，点内层等价）: 0
+  ├ 祖先歧义（同一祖先下多个手型后代，点祖先指不准）: 0
+  └ 整条祖先链无 id（真看不见）: 0
+可用率（in_tree + by_desc + anc_only）: 100 % | 真缺口: 0
+```
+
+It exits non-zero below 80% so you can drop it into CI. Measured on 2026-10-17 (Baidu / Bilibili /
+CSDN): **82% / 97% / 88%** before the click-boundary fix, **100% / 100% / 100%** after, at ~40ms
+per `ui.get_tree`.
+
+Two things the numbers do **not** cover, so you do not chase them: an element the page gives no
+readable name (image-only links with no `alt` — 53% of Bilibili's clickable nodes) can never get a
+label without inventing one, and a canvas has no DOM to read at all. Those are genuine boundaries,
+not bugs. The full write-up, including why the first measurement of this was wrong by 3× (inherited
+`cursor` inflates the denominator), is in
+[`docs/AGENT_OPERABILITY_FEEDBACK.md`](docs/AGENT_OPERABILITY_FEEDBACK.md) §6.
+
 
 ---
 

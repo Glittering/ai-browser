@@ -49,14 +49,14 @@ export const MCP_TOOLS = [
       properties: {
         action: { type: 'string', enum: ['click', 'type', 'clear', 'focus', 'hover', 'scroll_to', 'upload', 'get_value', 'drag', 'press', 'wheel', 'paste'], description: 'Action.' },
         html: { type: 'string', description: 'paste: HTML to inject (preferred). Editors convert it through their own paste pipeline (Draft.js/ProseMirror/Quill), so headings/code blocks/bold/lists survive. Plain text loses all formatting.' },
-        target: { type: 'string', description: 'Element data-ai-id from the semantic tree (e.g. e:button-12, axf-3-1) — NOT the visible label. Omit for press (keys go to the current focus); for drag you may also omit it and pass from_x/from_y to start from a bare point.' },
+        target: { type: 'string', description: 'Element data-ai-id from the semantic tree (e.g. e:button-12, axf-3-1) — NOT the visible label. Omit for press (keys go to the current focus); for drag you may also omit it and pass from_x/from_y to start from a bare point. upload also accepts a CSS selector (descendant selectors with spaces included), which is the only way to reach upload widgets that have no semantic node.' },
         text: { type: 'string', description: 'Text to type (type/setContent). For paste: plain-text fallback used when html is absent.' },
         value: { type: 'string', description: 'Value for select.' },
         offset: { type: 'integer', description: 'get_value: start offset in Unicode code points (default 0).' },
         limit: { type: 'integer', description: 'get_value: max code points to return (default 20000, hard cap 1000000).' },
         url: { type: 'string', description: 'For click: click the link whose href matches this URL instead of guessing the target label.' },
         keep_tab: { type: 'boolean', description: 'For click: keep the current tab active instead of auto-following a newly opened tab.' },
-        file: { type: 'string', description: 'Absolute path to upload (upload only, target must be a file input).' },
+        file: { type: 'string', description: 'Absolute path to upload (upload only). target may be the file input itself, the control that opens the picker, or — when the control has no semantic node at all — a CSS selector such as ".upload-button". Works inside cross-process iframes.' },
         timeout_ms: { type: 'integer', description: 'Override the action deadline in ms (default 15000; type/setContent/drag/press scale with text length / duration / repeat; 1s floor, 300s cap). A timeout returns success=false, timed_out=true and warns the action may have partially applied.' },
         to_target: { type: 'string', description: 'drag: data-ai-id to drop onto (e.g. drag from one node\'s output to another node to connect them).' },
         dx: { type: 'number', description: 'drag: horizontal distance to move (use with dy instead of to_target).' },
@@ -317,6 +317,19 @@ export const MCP_TOOLS = [
       type: 'object',
       properties: {
         tab: { type: 'integer', description: 'Tab ID (defaults to the active tab).' },
+      },
+    },
+  },
+  {
+    name: 'browse_errors',
+    title: 'Read error log',
+    description: 'Read the main-process error log: uncaught exceptions, crashes, failed navigations, RPC errors. Each entry includes recent calls as context. Returns the on-disk JSONL path.',
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        limit: { type: 'integer', description: 'Max entries to return (default 50).' },
+        kind: { type: 'string', description: 'Filter by kind: uncaught_exception / unhandled_rejection / render_process_gone / child_process_gone / nav_fail / ws_error.' },
       },
     },
   },

@@ -1,12 +1,14 @@
 // main/index.js — Electron entry v5 (multi-tab, real UI)
 // One process, one WS server, multiple tabs with real tab bar.
-import { app, BrowserWindow, BrowserView, ipcMain, net, session } from 'electron';
+import { app, BrowserWindow, BrowserView, ipcMain, net, session, dialog } from 'electron';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startWSServer } from './ws_server.js';
 import { PageManager } from './page_manager.js';
 import { config } from '../shared/config.js';
 import { parseWatchdogTargets, isWatchdogEnabled } from '../shared/watchdog.js';
+import { initErrorLog, recordError, markShutdown, getLogPath } from './error_log.js';
+import errorBanner from '../shared/error_banner.cjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -14,6 +16,239 @@ const __dirname = path.dirname(__filename);
 // CRITICAL: set userData BEFORE app.whenReady — session/cookie storage
 // is initialized during ready, so setting it after loses persistence.
 app.setPath('userData', config.userDataDir);
+
+// === 错误日志：必须在 ready 之前就绪 ===
+// 早期异常（模块初始化、窗口创建）恰恰是最常见的一类，等 ready 再初始化就等于
+// 漏掉最关键的那一段。目录放在 userData 下（可写、可预期）：~/.ai-browser/logs/
+const LOG_DIR = path.join(config.userDataDir, 'logs');
+initErrorLog({ dir: LOG_DIR, meta: { port: config.wsPort, userData: config.userDataDir } });
+
+// === 主进程兜底 ===
+// 注册 uncaughtException 就等于接管 Electron 的默认行为 —— 而那个默认行为正是
+// "弹一个只有栈的原生框，栈不进任何文件"。用户看到的是「弹了个框说 js 崩溃」，
+// 点掉之后**没有任何地方能查到它崩在哪**（2026-10-17 实测）。
+//
+// 修法两步：① 先同步落盘（appendFileSync，崩之前一定写完）；
+//          ② 提示改成**窗口底部的非阻塞红色横幅**，不再用原生模态框。
+//
+// 为什么不能用原生框（实测，不是推测）：dialog.showMessageBox 虽然返回 Promise，
+// macOS 底层仍是 NSAlert 模态循环，**会阻塞主进程**。对照实验：不弹框时 WS 4ms
+// 返回，弹框期间 8 秒无响应。一次"能自愈的异常"就这样被放大成"所有 RPC 超时"，
+// agent 那边看到的是满屏 timed_out，与真实原因（一个无关的 JS 异常）完全对不上。
+// 横幅是窗口里的一个 BrowserView：主进程照常跑，RPC 不受影响。
+//
+// 原生框仍作为调试开关保留（AI_BROWSER_ERROR_DIALOG=1），但只在需要"停下来盯着看"
+// 时用；默认路径绝不允许阻塞。
+const ERROR_BANNER_HEIGHT = 34;
+// 连续异常时横幅不重开、只刷新内容；2 秒内的抖动直接合并（异常循环里每帧都发一次
+// 会白烧 IPC，而人眼也看不出差别）。日志那条照旧一条不漏。
+const BANNER_REFRESH_MS = 2000;
+
+let errorBannerView = null;
+let lastBannerAt = 0;
+let bannerCount = 0;
+// 启动阶段崩溃时窗口还不存在：先排队，等窗口建好再挂上去。
+let pendingBanner = null;
+let pendingBannerTimer = null;
+// 连窗口都等不到（启动即死）时，多久后退回一次原生框 —— 这是唯一"什么都不显示"
+// 的场景，否则用户会看到应用静默不动、也没有任何提示。
+const BANNER_GIVE_UP_MS = 8000;
+
+function bannerEnabled() {
+  // e2e / 无人值守可以关掉（日志照记）：横幅虽不阻塞，但会改变窗口布局，
+  // 截图对比类断言会因此漂移。
+  return String(process.env.AI_BROWSER_ERROR_BANNER || '') !== '0';
+}
+function nativeDialogForced() {
+  return String(process.env.AI_BROWSER_ERROR_DIALOG || '') === '1';
+}
+
+// 原生模态框：只走 AI_BROWSER_ERROR_DIALOG=1。保留它是因为排查启动阶段崩溃时
+// "让窗口停在那儿"仍然有用，但它不能是默认路径。
+function showNativeFatalDialog(detail) {
+  const body = 'A JavaScript error occurred in the main process.\n\n'
+    + detail
+    + '\n\n已写入日志：\n' + (getLogPath() || '(日志未就绪)');
+  if (!app.isReady()) {
+    try { dialog.showErrorBox('AI Browser 主进程异常（启动阶段）', body); } catch {}
+    return;
+  }
+  setTimeout(() => {
+    recordError('error_dialog', {
+      note: 'modal dialog opened — main-process event loop is blocked until dismissed',
+      detail: String(detail || '').slice(0, 500),
+    });
+    try {
+      const p = dialog.showMessageBox({
+        type: 'error',
+        title: 'AI Browser 主进程异常',
+        message: 'AI Browser 主进程异常',
+        detail: body,
+        buttons: ['好'],
+        noLink: true,
+      });
+      if (p && typeof p.then === 'function') p.then(() => {}).catch(() => {});
+    } catch {
+      /* 无 GUI / 弹框失败：日志已经在盘上，这不影响记录 */
+    }
+  }, 800);
+}
+
+// 布局集中在一处算：横幅要占掉底部 34px，页面视图必须相应让出来，
+// 否则横幅会被页面盖住（或反过来压住页面最后一行）。
+function layoutWithBanner() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  let b;
+  try { b = mainWindow.getContentBounds(); } catch { return; }
+  if (tabBarView && !tabBarView.webContents.isDestroyed()) {
+    tabBarView.setBounds({ x: 0, y: 0, width: b.width, height: TAB_BAR_HEIGHT });
+  }
+  const inset = errorBannerView ? ERROR_BANNER_HEIGHT : 0;
+  if (pageManager) pageManager._bottomInset = inset;
+  if (errorBannerView && !errorBannerView.webContents.isDestroyed()) {
+    errorBannerView.setBounds({
+      x: 0,
+      y: Math.max(0, b.height - ERROR_BANNER_HEIGHT),
+      width: b.width,
+      height: ERROR_BANNER_HEIGHT,
+    });
+  }
+  if (pageManager) pageManager._layoutAllViews(b);
+}
+
+function ensureErrorBanner() {
+  if (errorBannerView && !errorBannerView.webContents.isDestroyed()) return errorBannerView;
+  if (!mainWindow || mainWindow.isDestroyed()) return null;
+  // 与标签栏同样的配置（nodeIntegration + 非隔离）：横幅是我们自己的本地页面，
+  // 需要 ipcRenderer 才能把「×」传回主进程。页面里没有任何远程内容。
+  errorBannerView = new BrowserView({
+    webPreferences: { contextIsolation: false, nodeIntegration: true },
+  });
+  try { errorBannerView.setBackgroundColor('#7f1d1d'); } catch {}
+  mainWindow.addBrowserView(errorBannerView);
+  // 新开 tab 会往窗口里再加一个视图；显式置顶一次，避免"横幅被后来的页面盖住"
+  // 这种只在特定时序下出现的 bug。
+  try { mainWindow.setTopBrowserView(errorBannerView); } catch {}
+  errorBannerView.webContents.loadFile(path.join(__dirname, '../renderer/error_banner.html'));
+  return errorBannerView;
+}
+
+function showErrorBanner(payload) {
+  const view = ensureErrorBanner();
+  if (!view) return false;
+  const deliver = () => {
+    try { view.webContents.send('error-banner:show', payload); } catch { /* 帧已销毁就放弃，日志已有 */ }
+  };
+  // 首次创建时 listener 还没注册，直接 send 会静默丢失 —— 等 load 完再发。
+  if (view.webContents.isLoading()) view.webContents.once('did-finish-load', deliver);
+  else deliver();
+  layoutWithBanner();
+  return true;
+}
+
+function hideErrorBanner() {
+  if (!errorBannerView) return;
+  const view = errorBannerView;
+  errorBannerView = null;
+  try {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.removeBrowserView(view);
+  } catch {}
+  try { view.webContents.destroy(); } catch {}
+  layoutWithBanner();
+}
+
+function flushPendingBanner() {
+  if (!pendingBanner) return;
+  const payload = pendingBanner;
+  pendingBanner = null;
+  if (pendingBannerTimer) { clearTimeout(pendingBannerTimer); pendingBannerTimer = null; }
+  showErrorBanner(payload);
+}
+
+function reportFatal(detail) {
+  const text = String(detail === undefined || detail === null ? '' : detail);
+  if (nativeDialogForced()) { showNativeFatalDialog(text); return; }
+  if (!bannerEnabled()) return;
+  const logPath = getLogPath() || '';
+  const now = Date.now();
+  bannerCount = now - lastBannerAt < BANNER_REFRESH_MS ? bannerCount + 1 : 1;
+  lastBannerAt = now;
+  const payload = errorBanner.buildBannerPayload({ detail: text, logPath, count: bannerCount });
+  recordError('error_banner', {
+    detail: text.slice(0, 500),
+    log_path: logPath,
+    note: 'shown in-window (non-blocking); no modal dialog opened',
+  });
+  if (app.isReady() && mainWindow && !mainWindow.isDestroyed()) {
+    showErrorBanner(payload);
+    return;
+  }
+  // 窗口还没建好：排队。等 createWindow 完成后 flushPendingBanner() 挂上去。
+  pendingBanner = payload;
+  if (pendingBannerTimer) clearTimeout(pendingBannerTimer);
+  pendingBannerTimer = setTimeout(() => {
+    pendingBannerTimer = null;
+    if (!pendingBanner) return;
+    const p = pendingBanner;
+    pendingBanner = null;
+    // 这里退回原生框是**有意的例外**：没有窗口 = 没有别的地方能显示任何东西，
+    // 静默死掉比阻塞更糟。日志里记一笔，避免以后把它当成"又弹框了"的回归。
+    recordError('error_dialog_fallback', {
+      note: 'no window to host the banner — native box used once so the failure is visible',
+      detail: p.detail,
+    });
+    try {
+      dialog.showErrorBox(
+        'AI Browser 主进程异常（启动阶段）',
+        p.detail + '\n\n已写入日志：\n' + (p.log_path || '(日志未就绪)')
+      );
+    } catch {}
+  }, BANNER_GIVE_UP_MS);
+}
+
+process.on('uncaughtException', (err, origin) => {
+  const e = err instanceof Error ? err : new Error(String(err));
+  recordError('uncaught_exception', {
+    origin: origin || null,
+    message: e.message,
+    stack: String(e.stack || '').slice(0, 8000),
+  });
+  console.error('[fatal] uncaughtException:', (e && e.stack) || e);
+  reportFatal((e && e.message) || String(e));
+});
+
+process.on('unhandledRejection', (reason) => {
+  const e = reason instanceof Error ? reason : new Error(String(reason));
+  recordError('unhandled_rejection', {
+    message: e.message,
+    stack: String(e.stack || '').slice(0, 8000),
+  });
+  // 这里**不弹框**：没接住 Promise 属于实现疏漏，噪音大但多数不影响用户当下的
+  // 操作。弹框只会把真正需要人介入的致命异常淹掉 —— 记下来就够。
+  console.error('[warn] unhandledRejection:', (e && e.stack) || e);
+});
+
+// 网页渲染进程崩溃（"Aw, Snap!"）与 Chromium 子进程崩溃（网络服务/GPU）。
+// 2026-10-17 实测见过 `Network service crashed, restarting service`：网络服务
+// 挂了之后所有页面都打不开，但主进程还活着 —— 没有这层记录就完全无从判断。
+app.on('render-process-gone', (_event, webContents, details) => {
+  let url = null;
+  try { url = webContents && webContents.getURL(); } catch {}
+  recordError('render_process_gone', {
+    reason: details && details.reason,
+    exit_code: details && details.exitCode,
+    url,
+  });
+});
+
+app.on('child-process-gone', (_event, details) => {
+  recordError('child_process_gone', {
+    type: details && details.type,
+    reason: details && details.reason,
+    exit_code: details && details.exitCode,
+    service: details && details.serviceName,
+  });
+});
 
 // Disable GPU compositing to avoid a whole class of GPU driver crashes
 // (exit_code=6) that take down the whole app on some systems. This only turns
@@ -125,6 +360,9 @@ function createWindow() {
     : 'https://www.baidu.com';
   pageManager.newTab(START_URL);
 
+  // 启动阶段崩溃排的队到这里兑现：窗口、标签栏、页面视图都已就绪，横幅才挂得上。
+  flushPendingBanner();
+
   // Start WS server — pass cleanupAndQuit so ui.quit can shut down the app
   wsServer = startWSServer(pageManager, PORT, cleanupAndQuit);
 
@@ -142,6 +380,12 @@ function createWindow() {
     refreshTabBar();
   });
   ipcMain.handle('tab:list', () => pageManager.listTabs());
+
+  // 错误横幅上的「×」：连关闭动作也走 IPC —— 横幅是独立的 BrowserView，
+  // 它没有别的通道能告诉主进程"把我收起来"。
+  // setImmediate：不要在渲染进程自己派发的事件里销毁它所属的 frame（先让这条
+  // IPC 走完，再拆视图）。
+  ipcMain.on('error-banner:close', () => { setImmediate(hideErrorBanner); });
 
   // === 地址栏 / 导航按钮 ===
   ipcMain.handle('nav:state', () => {
@@ -184,13 +428,10 @@ function createWindow() {
     refreshTabBar();
   });
 
-  // Resize handler
+  // Resize handler —— 走 layoutWithBanner：横幅在的时候页面视图要让出底部 34px，
+  // 各算各的迟早会出现"横幅被页面盖住"或"页面最后一行被横幅压住"。
   mainWindow.on('resize', () => {
-    const bounds = mainWindow.getContentBounds();
-    if (tabBarView && !tabBarView.webContents.isDestroyed()) {
-      tabBarView.setBounds({ x: 0, y: 0, width: bounds.width, height: TAB_BAR_HEIGHT });
-    }
-    pageManager._layoutAllViews(bounds);
+    layoutWithBanner();
   });
 
   // === Window becoming visible again → force a compositor repaint ===
@@ -516,6 +757,31 @@ function normalizeUrlInput(input) {
 
 app.whenReady().then(() => {
   createWindow();
+
+  // === 自检钩子：AI_BROWSER_SELFTEST=crash ===
+  // 主动制造一次主进程未捕获异常，用来验证"崩溃时的日志与横幅"这条链路真的通。
+  // 没有它，这条链路只能等真事故发生才能验证 —— 而真事故发生的时候，恰恰是
+  // 最不适合（也最没心情）做实验的时候。2026-10-17 就是因为这个空缺，用户看到
+  // 一个"js 崩溃"框、事后却无从查证。
+  //   AI_BROWSER_SELFTEST=crash node scripts/start.cjs
+  //   AI_BROWSER_SELFTEST=crash-close node scripts/start.cjs   # 5 秒后自动收起
+  // 默认走窗口内红色横幅（非阻塞）；要在崩溃处停下来用原生模态框，加
+  // AI_BROWSER_ERROR_DIALOG=1（它阻塞主进程，只用于人工盯着看）。
+  //
+  // `crash-close` 存在的原因：收起横幅那条路（销毁视图 + 把让出去的 34px 还回去）
+  // 没法从外面点 —— 它是个独立的 BrowserView，没有 WS 入口，而 macOS 上模拟点击
+  // 需要辅助功能权限（实测被拒，-10004）。不测就等于把"横幅关不掉 / 关了以后
+  // 底部一直空一条"这类问题留给用户。
+  const _selftest = String(process.env.AI_BROWSER_SELFTEST || '');
+  if (_selftest === 'crash' || _selftest === 'crash-close') {
+    setTimeout(() => { throw new Error('selftest: injected uncaught exception'); }, 2000);
+    if (_selftest === 'crash-close') {
+      setTimeout(() => {
+        hideErrorBanner();
+        console.log('[selftest] error banner hidden — bottom inset restored');
+      }, 5000);
+    }
+  }
   // 下载与权限的 session 级钩子。必须装在 will-download 上，否则 Electron 默认
   // **取消**下载：agent 点"导出"只看到 success，然后什么都没有，连错误都没有
   // （2026-10-12 审计发现 src/ 里原先没有任何下载处理）。
@@ -536,6 +802,9 @@ app.whenReady().then(() => {
 function cleanupAndQuit() {
   if (isQuitting) return;
   isQuitting = true;
+  // 收尾行：日志里**没有** shutdown 行，就说明上一次是硬退（崩溃 / 被 kill）——
+  // 这是事后判断"到底有没有崩过"最直接的依据。
+  try { markShutdown('cleanup'); } catch {}
   if (tabRefreshInterval) {
     clearInterval(tabRefreshInterval);
     tabRefreshInterval = null;

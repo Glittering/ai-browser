@@ -10,6 +10,7 @@
     "bin",
     "scripts",
     "src",
+    "tools/coverage_probe.cjs",
     "examples/AGENT_INSTRUCTIONS.md",
     "examples/mcp-config.json",
     "llms-install.md",
@@ -60,6 +61,7 @@
     "canvas": "node e2e/canvas_ws.cjs",
     "focus": "node e2e/focus_ws.cjs",
     "interact": "node e2e/interact_ws.cjs",
+    "upload": "node e2e/upload_ws.cjs",
     "view": "node e2e/view_ws.cjs",
     "realsites": "node e2e/e2e_realsites.cjs",
     "realsites:meta": "vitest run tests/test_realsites_sites.js",
@@ -67,7 +69,8 @@
     "modeldiff": "node e2e/modeldiff_ws.cjs",
     "nav": "node e2e/nav_ws.cjs",
     "audit": "node e2e/audit_ws.cjs",
-    "e2e:all": "node e2e/run_all.cjs"
+    "e2e:all": "node e2e/run_all.cjs",
+    "coverage": "node tools/coverage_probe.cjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

@@ -212,9 +212,14 @@ async function main() {
   // ===================== D. 操作校验（ui.snapshot / ui.diff）=====================
   console.log("\n[D. ui.diff：把'操作→回读→比对'变成一行]");
 
-  // D-01: 传错参数层级必须明确报错，不得静默报成功。
-  // 实测踩过：WS 契约把动作参数放在 params.params，照 MCP 的扁平形状写
-  // {text:...} 会变成空文本 → 命中幂等短路 → **什么都没打却报 success**。
+  // D-01: 动作参数层级 —— 契约在 2026-10-17 的 "stop swallowing params" 里改了，
+  // 这里跟着翻面（不是把测试拧向实现）：
+  //   旧：只认 params.params，照 MCP 扁平形状写 {text:...} 会被**静默丢掉** →
+  //       空文本命中幂等短路 → 什么都没打却报 success。
+  //   新：顶层平铺的已知动作参数会被提升（shared/act_params.cjs 的 hoistActParams），
+  //       回执里带 params_hoisted 说明"这两个参数是被提升进来的"。
+  // 所以现在的正确断言是"扁平参数真的生效了、且明确告知被提升"，而不是"必须报错"。
+  // 真正要守住的阴性只有一条：**压根没给 text** 时必须报错（见 D-01b）。
   const raw = await b.call("ui.get_tree", { tab });
   const tree = (raw && raw.result ? raw.result.tree : null) || (raw && raw.tree) || raw;
   const root = tree && tree.result ? tree.result : tree;
@@ -224,13 +229,25 @@ async function main() {
   const textbox = flat.find((n) => n.role === "textbox");
 
   if (textbox) {
-    const wrongNesting = unwrap(await b.call("ui.act", {
-      action: "type", target: textbox.id, text: "wrong nesting", tab,
+    const flatParams = unwrap(await b.call("ui.act", {
+      action: "type", target: textbox.id, text: "flat params", tab,
     }));
-    check("D-01 传错参数层级 → 明确报错，不得静默报成功",
-      wrongNesting.success === false && /empty text|params\.params/.test(wrongNesting.error || ""),
-      JSON.stringify({ success: wrongNesting.success, method: wrongNesting.method,
-        error: String(wrongNesting.error || "").slice(0, 70) }));
+    const typedOk = await ev("(function(){var e=document.activeElement;return (e&&(e.value||e.innerText||''))||'';})()", tab);
+    check("D-01 顶层平铺的 text 不再被静默丢弃：真的打进去了，且回执说明被提升",
+      flatParams.success === true && String(typedOk).indexOf("flat params") >= 0 &&
+      JSON.stringify(flatParams.params_hoisted || []).indexOf("text") >= 0,
+      JSON.stringify({ success: flatParams.success, method: flatParams.method,
+        hoisted: flatParams.params_hoisted, value: String(typedOk).slice(0, 40) }));
+    // D-01b 阴性：压根没给 text —— 必须明确报错，绝不能"什么都没打却报成功"。
+    // 先清空：空文本守卫只在"目标文本为空 **且** 当前内容也为空"时触发（幂等短路
+    // 那条路径），字段里有内容时会走"输入校验失败"分支，报的是另一条信息 ——
+    // 同样不谎报成功，但要测这条守卫就得先把字段清干净。
+    await b.call("ui.act", { action: "clear", target: textbox.id, tab });
+    const noText = unwrap(await b.call("ui.act", { action: "type", target: textbox.id, tab }));
+    check("D-01b type 完全没给 text 时明确报错（不静默报成功）",
+      noText.success === false && /empty text/.test(noText.error || ""),
+      JSON.stringify({ success: noText.success, method: noText.method,
+        error: String(noText.error || "").slice(0, 70) }));
   } else {
     check("D-01 找到输入框", false, "no textbox in semantic tree");
   }

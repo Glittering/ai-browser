@@ -15,7 +15,7 @@
 ## 中文版（copy-paste）
 
 ```text
-我可以用 AI Browser 浏览网页。它提供 MCP 服务（17 个 browse_* 工具），第一次调用时会自动
+我可以用 AI Browser 浏览网页。它提供 MCP 服务（20 个 browse_* 工具），第一次调用时会自动
 拉起一个真实可见的浏览器窗口，用完调用 browse_quit 释放。页面以结构化语义树返回，不是截图。
 
 标准循环：
@@ -30,6 +30,8 @@
                                            text_contains / url_contains
 5. browse_evaluate { js }                  在页面上下文跑 JS 表达式（上限 5000 字符，
                                            禁用 process. / require / child_process）
+6. browse_errors                           出事了先看这里：主进程异常 / 崩溃 / 导航失败 /
+                                           RPC 报错的最近记录（含调用上下文与日志路径）
 
 省 token（browse_get_tree 参数）：
 - { "subset": "interactive" }  只保留可交互节点，砍掉纯布局分支 —— 默认就该带上
@@ -38,6 +40,14 @@
 
 验证写操作（success 不等于做成了）：browse_diff 先 snapshot 基线，写操作之后再 diff，
 verdict 显式给出 changed / unchanged。
+
+找不到元素 / 点了没反应时的排查顺序（**别一上来就写站点专用选择器**）：
+1. 重读 browse_get_tree，或先 browse_wait —— SPA 常常只是还没渲染完
+2. 节点在树里但操作失败 → 是**动作层**问题（跨进程 iframe、canvas、需要受信输入、
+   上传控件未挂载），写选择器解决不了
+3. 树里没有、页面上明明有 → 是**读层**缺口，属于浏览器该修的东西；先跑
+   tools/coverage_probe.cjs <url> 量化，再考虑绕过
+4. 以上都不成立，才在自己脚本里用选择器兜底；别把"某个站点的选择器"记成通用知识
 
 其他：browse_scroll 滚动文档（画布类页面用 browse_act 的 wheel）；browse_list_tabs /
 browse_new_tab / browse_close_tab / browse_set_active_tab 管标签页；browse_network 拉取网络
@@ -57,7 +67,7 @@ browse_downloads 查下载文件落盘路径；browse_repaint 在窗口画面陈
 ## English (copy-paste)
 
 ```text
-I can browse the web with AI Browser. It exposes an MCP server (17 browse_* tools), auto-starts a
+I can browse the web with AI Browser. It exposes an MCP server (20 browse_* tools), auto-starts a
 real, visible browser window on my first call, and I release it with browse_quit when done. Pages come
 back as a structured semantic tree — no screenshots, no OCR.
 
@@ -81,6 +91,16 @@ Saving tokens (browse_get_tree params):
 
 Verifying writes (success is not evidence): browse_diff snapshots a baseline, then diffs after the
 write and returns an explicit verdict of changed / unchanged.
+
+When an element cannot be found, or a click does nothing — work down this list, do **not** reach for a
+site-specific selector first:
+1. re-read with browse_get_tree, or browse_wait — an SPA usually just has not rendered yet
+2. the node is in the tree but the action fails → an **action-layer** gap (cross-process iframe,
+   canvas, trusted input, unmounted upload input); a selector will not fix it
+3. the node is missing though the page clearly renders it → a **read-layer** gap, i.e. something the
+   browser should fix; quantify it with `tools/coverage_probe.cjs <url>` before working around it
+4. only then pin it with a selector inside your own script — and never record "the selector for site X"
+   as general knowledge
 
 Also: browse_scroll (document scrolling; use the wheel action on canvas apps); browse_list_tabs /
 browse_new_tab / browse_close_tab / browse_set_active_tab for tabs; browse_network for captured

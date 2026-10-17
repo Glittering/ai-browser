@@ -5,6 +5,12 @@ import { withDeadline, actionDeadlineMs } from '../shared/deadline.js';
 import { config } from '../shared/config.js';
 // act 的参数形状归一（嵌套 params 与顶层平铺都接受）
 import actParams from '../shared/act_params.cjs';
+// 穿透影子根的 ref 查找。ui.scroll 的 target 也走它 —— 不穿透的话，目标在
+// Web Component 里时会报 "target not found"，而元素其实就在那儿。
+import findRefUtil from '../shared/find_ref.cjs';
+// 错误日志：RPC 层异常必须落盘（此前只回一句 JSON-RPC error，现场永久丢失），
+// 每次调用的摘要进环形缓冲，作为崩溃时的上下文。
+import { recordError, noteCall, recentErrors } from './error_log.js';
 
 // Each startWSServer() owns a private WebSocketServer. Keeping it local (not a
 // module global) means multiple servers can coexist — required by tests that
@@ -93,6 +99,7 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
         if (ws.readyState === 1) ws.send(JSON.stringify(payload));
       };
 
+      const t0 = Date.now();
       try {
         switch (method) {
           case 'ui.get_tree': {
@@ -395,14 +402,10 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
             const target = typeof params.target === 'string' ? params.target : null;
             const js = `(function(t, d, a){
               if (t) {
-                var all = document.querySelectorAll('[data-ai-id]');
-                for (var i = 0; i < all.length; i++) {
-                  if (all[i].getAttribute('data-ai-id') === t) {
-                    all[i].scrollIntoView({ behavior: 'instant', block: 'center' });
-                    return { ok: true };
-                  }
-                }
-                return { ok: false, error: 'target not found' };
+                var el = ${findRefUtil.findRefExpr('t')};
+                if (!el) return { ok: false, error: 'target not found' };
+                el.scrollIntoView({ behavior: 'instant', block: 'center' });
+                return { ok: true };
               }
               window.scrollBy(0, d === 'down' ? a : -a);
               return { ok: true };
@@ -489,6 +492,15 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
             send({ jsonrpc: '2.0', id, result: r });
             break;
           }
+          // === ui.errors — 读主进程错误日志（本次进程的内存记录 + 文件路径）===
+          // 存在的理由：界面里弹一个"js 崩溃"的原生框，栈只活在框里，点掉就没了。
+          // 让调用方能主动问"刚才报过什么错"，不用靠人复述。
+          // 历史（跨进程）在 path 指向的 JSONL 文件里；这里返回的是本次进程的。
+          case 'ui.errors': {
+            const r = recentErrors(params.limit, params.kind || null);
+            send({ jsonrpc: '2.0', id, result: { ok: true, ...r } });
+            break;
+          }
           case 'ui.quit': {
             send({ jsonrpc: '2.0', id, result: { ok: true } });
             // Defer so the response actually flushes before the WS closes.
@@ -499,7 +511,20 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
             send({ jsonrpc: '2.0', id, error: { code: -32601, message: 'Method not found' } });
             break;
         }
+        // 成功的调用只进环形缓冲（不落盘）：它的用处是"崩溃那一刻最近的上下文"，
+        // 而不是给每次点击都记一行日志。
+        noteCall(method, params, Date.now() - t0, true);
       } catch (e) {
+        noteCall(method, params, Date.now() - t0, 'error: ' + ((e && e.message) || e));
+        // RPC 层异常**必须落盘**。此前它只变成一句 JSON-RPC error 回给调用方，
+        // 一旦客户端那边没截住（或用户只看到界面里闪一下），现场就永久丢了 ——
+        // 事后既查不到崩在哪，也证不了"刚才是不是真的报过错"。
+        recordError('ws_error', {
+          method,
+          params,
+          message: (e && e.message) || String(e),
+          stack: String((e && e.stack) || '').slice(0, 8000),
+        });
         send({ jsonrpc: '2.0', id, error: { code: -32603, message: e.message } });
       }
     });

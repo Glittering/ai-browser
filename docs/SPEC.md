@@ -126,7 +126,26 @@ input"这类位置猜测** —— 猜出来的对应关系比没有更糟。
 | `click` / `hover` / `drag` / `press` / `wheel` | **CDP 受信输入**（`Input.*`），必要时先解析元素中心点 |
 | `type` / `clear` | CDP 输入（全选走页内程序化选区，**不发受信 Cmd+A** —— 那会弹出 macOS 原生 About 面板） |
 | `setContent` | 整篇替换（与 `type` 的追加语义区分） |
-| `scroll_to` / `upload` / `focus` / `get_value` | 页内执行 |
+| `scroll_to` / `focus` / `get_value` | 页内执行 |
+| `upload` | 帧内注入 `File`（`DOM.setFileInputFiles` 只够得着顶层文档的 input，跨进程 iframe 进不去；见下） |
+
+**upload 的 target**：可以是 ref，也可以是**CSS 选择器**（含带空格的组合选择器，
+`.container-coverimage-box .el-upload__input`）。上传控件常常既没有语义节点、
+也没有原生 id（B站「本地上传」是纯 `div` 菜单项，AX 树里根本没有），只能靠选择器。
+
+控件有**三种状态**，工具都处理：
+
+1. target 就是 `input[type=file]` —— 直接写；
+2. target 是容器，input 预挂在里面 —— 取容器里的第一个 file input；
+3. 容器里**一个 input 都没有**（组件在"已有文件"状态下把上传区整个卸载了，
+   CSDN 的封面就是这样）—— 拿选择器的祖先当锚点，临时接管
+   `HTMLInputElement.prototype.click` 把 input"点"出来再写。回执 `resolved_by`
+   如实标明走了哪条路：`direct` / `click` / `click-descendant`。
+
+三种都不成时返回**具体**原因（"选择器没命中任何元素" vs "命中了容器但点不出 input"），
+不要笼统报 `no file input found`。点击探测只点可见的、类名带 upload/file/replace
+等正向词的子元素，并显式排除 remove/delete/cancel 一类 —— 封面区常驻一个
+「删除封面」按钮，误点会直接删掉用户的封面（`npm run upload` 用陷阱页钉住这一点）。
 
 **为什么必须走 CDP**：合成事件（`el.click()`、`dispatchEvent(new MouseEvent(...))`）
 对画布类应用无效。实测：React Flow 的节点拖拽在合成事件下位移恒为 0；`Fit View`
@@ -180,12 +199,62 @@ input"这类位置猜测** —— 猜出来的对应关系比没有更糟。
 `show` / `restore` / `focus` 时重绘当前标签；`ui.repaint` 供 agent 显式兜底，
 回执带累计 `repaint_count` —— 这是"重绘真的发生了"的唯一可证伪判据。
 
+## 错误日志（崩溃了要查得到）
+
+**曾经的坑**：主进程一处错误处理都没有。任何未捕获异常都走 Electron 默认路径 ——
+弹一个原生框（标题就是 `A JavaScript error occurred in the main process`），栈只活在
+框里，点掉即永久丢失，进程随即退出。用户看到"弹了个框说 js 崩溃"，事后却**无法证明**
+刚才发生过什么。事故的核心不是"日志不够细"，而是根本没有日志。
+
+现在：`~/.ai-browser/logs/error.jsonl`，每行一条 JSON，**同步写**（`appendFileSync`）——
+异步写等到 flush 时进程可能已经没了，而崩溃现场最需要的恰恰是最后一刻那几行。
+
+记录的事件（`kind` 字段）：
+
+| kind | 何时 |
+|---|---|
+| `boot` / `shutdown` | 进程边界。**没有 shutdown 行 = 上次是硬退**，这是"到底有没有崩过"最直接的判据 |
+| `uncaught_exception` | 主进程未捕获异常（会触发窗口内红色横幅的那类） |
+| `unhandled_rejection` | 没接住的 Promise（默认会让 Node 直接终止进程） |
+| `render_process_gone` / `child_process_gone` | 网页渲染进程崩溃（"Aw, Snap!"）、Chromium 子进程崩溃（网络服务 / GPU） |
+| `nav_fail` | 导航失败（界面已显示错误页），带 tab / url / error_code |
+| `ws_error` | RPC 层异常（原本只回一句 JSON-RPC error，现场永久丢失） |
+| `error_banner` | 窗口内红色横幅已显示（**非阻塞**，主进程照常处理 RPC） |
+| `error_dialog` | 原生模态框已弹出（**主进程进入模态、WS 暂停响应**）—— 只在 `AI_BROWSER_ERROR_DIALOG=1` 时出现 |
+| `error_dialog_fallback` | 想显示横幅但窗口还不存在（启动即崩），退回到原生框。诊断"应用静默不动"时先看这条 |
+
+两条设计约束：
+
+1. **日志本身绝不能再抛**。所有磁盘操作 try/catch 吞掉 —— 为记录崩溃而制造新崩溃，
+   是最难查的那种 bug。写不下去时 `dropped_writes` 如实上报。
+2. **条目自带最近的 WS 调用**（`recent_calls`，环形缓冲 40 条）。只有栈说不清
+   "是哪个调用在什么 target 上触发的"。`text`/`html` 压成长度，`js` 保留前 200 字符。
+
+读取：`ui.errors {limit, kind}`（MCP：`browse_errors`）返回本次进程的内存记录 +
+落盘路径；跨进程历史直接读文件。单文件 2MB、保留 4 份滚动。
+
+**提示方式：窗口内横幅，不是模态框。** 原生 `dialog.showMessageBox` 虽然返回 Promise，
+macOS 底层仍是 `NSAlert` 模态循环，**会阻塞主进程**（实测对照：不弹框时 WS 4ms 返回，
+弹框期间 8 秒无响应 —— 一个能自愈的 JS 异常被放大成"所有 RPC 超时"）。
+现在改成窗口底部 34px 的红色横幅（独立的 `BrowserView`，页面视图用
+`PageManager._bottomInset` 让出这条空间）：日志同步落盘 → 横幅显示异常消息 + 日志路径 →
+主进程继续跑。横幅可点 × 关闭，连续异常只更新内容不叠加（角标显示次数）。
+只有一种情况仍用原生框：**启动阶段就崩、连窗口都建不出来**，8 秒后记一条
+`error_dialog_fallback` 再弹一次 —— 否则用户看到的是应用静默不动。
+
+自检：`AI_BROWSER_SELFTEST=crash` 在窗口就绪后主动抛一个未捕获异常，用来验证
+"日志 + 横幅"这条链路真的通 —— 否则它只能等真事故发生才能验证，而那时候恰恰最
+不适合做实验。
+
 ## 配置（环境变量）
 
 | 变量 | 默认 | 作用 |
 |---|---|---|
 | `AI_BROWSER_PORT` | 9223 | WS / MCP 探测端口 |
-| `AI_BROWSER_USER_DATA` | `~/.ai-browser` | 会话与 Cookie 持久化目录 |
+| `AI_BROWSER_USER_DATA` | `~/.ai-browser` | 会话与 Cookie 持久化目录（错误日志在其下 `logs/`） |
+| `AI_BROWSER_ERROR_BANNER` | 开 | `0` 关闭主进程异常的窗口内横幅（日志照记；e2e 截图对比用，它会改变窗口布局） |
+| `AI_BROWSER_ERROR_DIALOG` | 关 | `1` 强制改用原生模态框（阻塞主进程 8 秒，只用于人工盯着看启动崩溃） |
+| `AI_BROWSER_SELFTEST` | 关 | `crash` 在就绪后注入一次未捕获异常，用于自检错误链路 |
 | `AI_BROWSER_UA` | Chrome 130 UA | 伪装 UA，去掉 Electron 指纹 |
 | `AI_BROWSER_FOCUS` | `auto` | `auto`=只伪造页面内焦点态，不抢真实窗口焦点；`always`=旧行为；`never`=都不做。**不决定窗口是否显示** |
 | `AI_BROWSER_WATCHDOG` | 开 | `0`/`off`/`false`/`no` 关闭网络看门狗 |

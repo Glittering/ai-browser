@@ -26,7 +26,7 @@ const BASE_PORT = Number(process.env.BASE_PORT) || 9410;
 
 const SUITES = [
   'smoke', 'capabilities', 'richtext', 'network', 'value', 'canvas',
-  'modeldiff', 'audit', 'nav', 'focus', 'interact', 'view',
+  'modeldiff', 'audit', 'nav', 'focus', 'interact', 'upload', 'view',
 ];
 
 /**

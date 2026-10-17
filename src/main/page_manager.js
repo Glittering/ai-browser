@@ -26,14 +26,41 @@ import frameProbe from '../shared/frame_probe.cjs';
 // ui.act target 形状体检（纯函数）：传了可见文字而不是 data-ai-id 时，
 // 入口就给可操作的错误，而不是等到选择器查空才说 "Target not found"。
 import refGuard from '../shared/ref_guard.cjs';
+// 错误日志：导航失败（界面会显示错误页）必须落盘 —— load_failed 只是内存里的
+// 一次广播，进程一退出就再也查不到"哪个 tab、哪个网址、什么错误码"。
+import { recordError } from './error_log.js';
 // navigate 的完成信号（commit | domcontentloaded | load）：默认不再是 load ——
 // SPA 永不 fire load，把它当完成信号等于把"页面可用"报成"超时"。
 import navWait from '../shared/nav_wait.cjs';
+// 穿透影子根的 ref 查找（纯字符串构造，见 shared/find_ref.cjs 顶部注释）
+import findRefUtil from '../shared/find_ref.cjs';
+// 真正的焦点元素（穿透 shadow root）。`document.activeElement` 在 Web Component
+// 里只到宿主为止，用它做输入校验会读到空串，把"已打进去"报成"没打进去"。
+import deepActiveUtil from '../shared/deep_active.cjs';
+// 悬停前后语义树的差异（ui.peek）。数据源是 DOM 语义树而不是 AX 树，理由与两条
+// 实测证据都写在 shared/tree_diff.cjs 顶部。
+import treeDiff from '../shared/tree_diff.cjs';
+// 按键派发计划（纯函数）：rawKeyDown 不产生 keypress，Enter 的默认动作会落空。
+import keyDispatchUtil from '../shared/key_dispatch.cjs';
+// 命中探测（穿透影子根）。`document.elementFromPoint` 不跨 shadow boundary，
+// 对影子内部的元素恒返回宿主 —— 于是"点击前证明坐标会落在目标上"这道校验
+// 恒为假，点击只能降级成非受信的 el.click()。详见 shared/hit_point.cjs 顶部。
+import hitPointUtil from '../shared/hit_point.cjs';
 
 const { expandValueFetchTree } = valueContract;
+const deepActiveExpr = deepActiveUtil.deepActiveExpr;
+const keyDispatchPlan = keyDispatchUtil.keyDispatchPlan;
+const { hitTestExpr, hitInfoExpr, deepHitExpr } = hitPointUtil;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// 穿透影子根的 ref 查找（返回自包含 JS 表达式，可原地替换 document.querySelector）。
+// 实现与理由见 src/shared/find_ref.cjs —— 那里的注释解释了为什么查询必须穿 shadow
+// boundary，以及为什么返回"表达式字符串"而不是"运行时函数"。
+const findRefExpr = findRefUtil.findRefExpr;
+const findDescExpr = findRefUtil.findDescExpr;
+
 
 // canvas 绘制调用记录：默认开。关闭开关 AI_BROWSER_CANVAS_HOOK=0。
 const CANVAS_BRIDGE_KEY = '__aiCanvasBridge';
@@ -134,7 +161,6 @@ class PageManager {
     this._wsClients = new Map();
     this._openedTabs = new Map();   // sourceTabId -> { id, url } (new tab opened by window.open)
     this._axDiffCache = new Map();  // tabId -> lite interactive snapshot (get_tree {mode:'diff'})
-    this._revertTimers = new Map(); // tabId -> 挂起的 ui.peek 自动回撤定时器（新 peek 会取消它）
     this._repaintTimers = new Map();// tabId -> 正在排队/已调度的重绘（合并同一批导航事件）
     this._snapshots = new Map();    // snapshotId -> { tabId, js, value, at }（ui.snapshot 存基线）
     this._snapshotSeq = 0;
@@ -283,12 +309,16 @@ class PageManager {
   }
 
   _layoutAllViews(bounds) {
+    // `_bottomInset`：窗口底部被别的东西占掉的高度（目前只有主进程异常横幅）。
+    // 由 index.js 设置、这里统一扣减 —— 让每个"给视图定尺寸"的地方各自记住
+    // 这 34px 必然会漏掉一处（新建 tab 走的是 _layoutView，不是这里）。
+    const inset = this._bottomInset || 0;
     for (const [id, view] of this.tabs) {
       view.setBounds({
         x: 0,
         y: config.tabBarHeight,
         width: bounds.width,
-        height: bounds.height - config.tabBarHeight,
+        height: Math.max(0, bounds.height - config.tabBarHeight - inset),
       });
     }
   }
@@ -1053,23 +1083,14 @@ class PageManager {
     const view = this._getView(tid);
     if (!view) return { revealed: [], hidden: [], mode: 'hover', error: 'Tab not found' };
     if (!target) return { revealed: [], hidden: [], mode: 'hover', error: 'No target' };
-    // 取消上一次 peek 挂起的自动回撤。回撤是"把鼠标挪走"的延迟动作，若前一次的
-    // 定时器还在，它会在本次 peek 已经把鼠标放到新目标上之后才触发，把刚刚探出来的
-    // 菜单又关掉 —— 表现为 revertMs=0（语义：别回撤）依然失效。谁后动手谁说了算。
-    const staleRevert = this._revertTimers.get(tid);
-    if (staleRevert) { clearTimeout(staleRevert); this._revertTimers.delete(tid); }
     const out = { revealed: [], hidden: [], mode: 'hover' };
     try {
-      this._ensureCdp(tid, view, 'Accessibility');
-      this._ensureCdp(tid, view, 'DOM');
+      this._ensureCdp(tid, view, 'Page'); // 只为挂上 debugger（Input 域没有 enable）
     } catch (e) { return { ...out, error: 'cdp-unavailable' }; }
     const dbg = view.webContents.debugger;
     try {
-      const beforeRaw = await axExtractor.axRaw(dbg);
-      if (!beforeRaw.length) return out;
-      await axExtractor.ensureHandles(dbg); // give the target a stable append id
       const center = await this.evaluate(
-        `(function(){var el=document.querySelector('[data-ai-id="${target}"]');if(!el)return null;` +
+        `(function(){var el=${findRefExpr(JSON.stringify(target))};if(!el)return null;` +
         `el.scrollIntoView({block:'center',inline:'center',behavior:'instant'});` +
         `var r=el.getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)};})()`,
         tid);
@@ -1079,31 +1100,71 @@ class PageManager {
       if (!center) {
         return { ...out, error: 'target_not_found: no element with data-ai-id=' + String(target) };
       }
+      const send = (method, params) => dbg.sendCommand(method, params);
+      // 区分"没传"与"显式传 0"：0 是合法语义（hoverMs=0 不等、revertMs=0 不回撤）。
+      // 原来的 `Number(x) || 450` 把 0 当 falsy 顶成默认值，revertMs=0 永远失效。
+      const msOr = (v, dflt) => (v === undefined || v === null || v === '') ? dflt : Math.max(0, Number(v) || 0);
       try {
     // 抢焦点会打断人正在做的事（agent 干活时人几乎不能用电脑）。
     // 策略见 _focusWindow：默认只保证窗口可见，不把它拽到最前、不抢焦点。
     this._focusWindow(view);
       } catch (e) {}
-      const send = (method, params) => dbg.sendCommand(method, params);
+      //
+      // 顺序是「先悬停拍一张，再挪开拍一张」，不是反过来。
+      //
+      // 反过来（先挪开落基线、再悬停）要求基线是"干净的"，也就是鼠标必须真的已经
+      // 离开目标、且菜单已经收完。这条做不到：菜单是带动画收起的，等多久取决于
+      // 站点 —— 实测 B站 头部「收藏」的下拉，鼠标挪开后 3 轮分别要 522 / 496 /
+      // 491ms 才从 DOM 里消失。写死等待时长不是 150ms 只有 2/4 命中，就是 550ms
+      // 也照样会漏（都试过）。
+      //
+      // 更麻烦的是"判断鼠标是否还在目标上"这一步本身也不可靠（el.matches(':hover')
+      // 在连续调用时给出的结果会跳），于是连"要不要等"都判断错。
+      //
+      // 换成先悬停再挪开，两张快照都是自己亲手造成的，与调用前的鼠标位置无关：
+      //   A = 悬停着（菜单在）  B = 挪开后（菜单不在）
+      //   revealed = A \ B  → "悬停带来的东西"，无论鼠标一开始在哪。
       await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: center.x, y: center.y });
-      // 区分"没传"与"显式传 0"：0 是合法语义（hoverMs=0 不等、revertMs=0 不回撤）。
-      // 原来的 `Number(x) || 450` 把 0 当 falsy 顶成默认值，revertMs=0 永远失效。
-      const msOr = (v, dflt) => (v === undefined || v === null || v === '') ? dflt : Math.max(0, Number(v) || 0);
       const hoverMs = msOr(opts.hoverMs, 450);
       await new Promise((r) => setTimeout(r, hoverMs));
-      const afterRaw = await axExtractor.axRaw(dbg);
-      const diff = axExtractor.diffAx(beforeRaw, afterRaw);
+      const snapWith = await this.getTree(false, tid);
+      // 取不到快照就必须报错，不能拿空数组当基线 —— 那样另一张里的每一个节点都会
+      // 变成"新出现的"，一屏假结果比报错危险得多。
+      if (!snapWith || !snapWith.tree) {
+        return { ...out, error: 'snapshot_failed: 拿不到悬停时的语义树' };
+      }
+      const nodesWith = treeDiff.flattenTree(snapWith.tree);
+      // 挪开鼠标后要等菜单真的收完，再拍第二张。
+      //
+      // 试过"轮询元素总数直到不再减少"来适配不同站点，行不通：页面自己一直在抖
+      // （B站 首页有轮播与懒加载，元素总数常态波动），"稳定"永远达不到，每回都
+      // 跑满 12 次轮询（1080ms）。所以回到固定时长 —— 但 600 这个数是实测出来的：
+      // 轮询 B站 头部「收藏」下拉的收起耗时，3 轮分别是 491 / 496 / 522ms。
+      // 想换更短的等待可以传 opts.settleMs。
+      await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 4, y: 4 });
+      await new Promise((r) => setTimeout(r, msOr(opts.settleMs, 600)));
+      const snapWithout = await this.getTree(false, tid);
+      if (!snapWithout || !snapWithout.tree) {
+        return { ...out, error: 'snapshot_failed: 拿不到挪开鼠标后的语义树' };
+      }
+      const nodesWithout = treeDiff.flattenTree(snapWithout.tree);
+      const diff = treeDiff.diffTree(nodesWithout, nodesWith);
       out.revealed = diff.revealed;
       out.hidden = diff.hidden;
-      // revertMs=0 表示"别回撤，我要接着点" —— 只有显式传 0 才不该回撤，
-      // 未传则沿用 1500ms 默认（同上，0 不再是 falsy）。
+      // revertMs=0 表示"别回撤，我要接着点" —— 这时把鼠标放回目标上，让菜单重新
+      // 展开，调用方下一步可以直接点 revealed 里的东西。其余情况鼠标已经挪开了，
+      // 天然就是"回撤"，不需要延迟定时器（原先那套 per-tab 定时器也因此删掉了）。
+      //
+      // 移回之后必须重新拍一张并把 id 重绑：菜单重开时 DOM 是新造的节点，id 全变
+      // 了，直接返回刚才那批 id 的话，调用方点下去只会拿到 target_not_found。
       const revertMs = msOr(opts.revertMs, 1500);
-      if (revertMs > 0) {
-        const h = setTimeout(() => {
-          this._revertTimers.delete(tid);
-          try { send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 4, y: 4 }); } catch (e) {}
-        }, revertMs);
-        this._revertTimers.set(tid, h);
+      if (revertMs === 0) {
+        await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: center.x, y: center.y });
+        await new Promise((r) => setTimeout(r, msOr(opts.reopenMs, 350)));
+        const snapBack = await this.getTree(false, tid);
+        if (snapBack && snapBack.tree) {
+          out.revealed = treeDiff.remapIds(out.revealed, treeDiff.flattenTree(snapBack.tree));
+        }
       }
     } catch (e) {
       out.error = String((e && e.message) || e).slice(0, 200);
@@ -1167,7 +1228,10 @@ class PageManager {
     // 否则要等到 `[data-ai-id="发布"]` 查空，回一句不带方向的
     // "Target not found"，调用方很难想到真正原因是形状错了。
     if (target) {
-      const shapeErr = refGuard.refShapeError(target);
+      // upload 额外接受 CSS 选择器：上传控件经常没有 data-ai-id（纯 div 的
+      // 「本地上传」），只能靠选择器定位。其它动作仍只认 ref —— 放行一个
+      // 它们解析不了的选择器，只会把失败推到更远、信息更少的地方。
+      const shapeErr = refGuard.refShapeError(target, { allowSelector: action === 'upload' });
       if (shapeErr) return { success: false, error: shapeErr, method: 'bad-target-shape' };
     }
 
@@ -1233,10 +1297,16 @@ class PageManager {
       try {
         await this._ensureAxHandles(view, tid);
         const r = await this._uploadViaCdp(view, target, params.file || '', tid);
+        if (r && r.success !== false) return r;
+      } catch (e) { /* fall through */ }
+      // CDP 的 DOM.setFileInputFiles 只能写顶层文档里的 input；跨进程 iframe 里的
+      // 上传控件（B站封面、编辑器插图等都属于这一类）必须走帧内注入。
+      try {
+        const r = await this._uploadViaFrameJs(view, target, params.file || '', tid);
         if (r) return r;
-      } catch (e) { /* fall through to preload */ }
+      } catch (e) { /* fall through */ }
       // 无 CDP 时 preload 无法真正赋值文件（受安全限制），返回失败让 agent 感知。
-      return { success: false, error: 'Upload requires CDP (input file set) — no file input found' };
+      return { success: false, error: 'Upload requires CDP (input file set) — no file input found for target ' + JSON.stringify(String(target || '')) };
     } else if (action === 'drag') {
       try {
         const r = await this._cdpDrag(view, target, params, tid);
@@ -1289,7 +1359,7 @@ class PageManager {
     // 通过 target 内容跳出字符串。
     const js =
       "(function(){"
-      + "var el=document.querySelector('[data-ai-id=' + " + JSON.stringify(String(target)) + " + ']');"
+      + "var el=" + findRefExpr(JSON.stringify(String(target))) + ";"
       + "if(!el)return {__miss:true};"
       + "var tag=(el.tagName||'').toUpperCase();"
       + "if(tag==='INPUT'){var ty=String(el.type||'').toLowerCase();"
@@ -1414,7 +1484,15 @@ class PageManager {
       const frame = await this._owningFrame(view, frameRef);
       if (frame) {
         try { return await frame.executeJavaScript(js.startsWith('(') ? js : `(function(){return ${js};})()`); }
-        catch (e) { /* fall through to top-frame path */ }
+        catch (e) {
+          // 帧找到了、但脚本自己抛了异常。不能继续走下面的 frame_not_found ——
+          // 那会把"脚本报错"误报成"引用失效"，把调用方引到"反复重读树"的死路上。
+          // 实测踩过：上传脚本里一个 TypeError 被包装成 frame_not_found，白查了半天。
+          if (opts.frameRef) {
+            throw new Error('frame_eval_failed: ' + String((e && e.message) || e).slice(0, 300));
+          }
+          /* 自动推导出的 ref：允许回落到顶层路径 */
+        }
       }
       // 显式给了 frameRef 却找不到帧：不能静默落到顶层 —— 调用方会拿到 null
       // 并以为"元素不存在"。明说是路由失败。
@@ -1499,7 +1577,13 @@ class PageManager {
     } catch(e) { return false; }
   }
 
-  async _cdpKey(inputCmd, p) {
+  async _cdpKey(inputCmd, p, opts) {
+    // 「按键的默认动作」要的是 keypress，不是 keydown。决策本身抽在
+    // shared/key_dispatch.cjs（纯函数，可单测），这里只负责按计划派发。
+    // 两种语义：
+    //   opts.activate = true  （ui.act press 用）→ 带 text 的 keyDown，产生默认动作
+    //   否则（type 里的段间换行/删除）→ 保持 rawKeyDown，行为不变
+    const plan = keyDispatchPlan(p, opts);
     const base = {
       windowsVirtualKeyCode: p.vk,
       nativeVirtualKeyCode: p.vk,
@@ -1508,11 +1592,16 @@ class PageManager {
       text: p.text || '',
       modifiers: p.mod || 0,
     };
-    await inputCmd('Input.dispatchKeyEvent', { ...base, type: 'rawKeyDown' });
-    // CDP 的 rawKeyDown 会忽略 text —— 带字符的键（换行）必须再发一个带
-    // text 的 char 事件才会真的把字符插进去，否则 Enter 在 textarea /
-    // 原生 contenteditable 里不产生任何换行（"a\nb\nc" 静默变成 "abc"）。
-    if (base.text) await inputCmd('Input.dispatchKeyEvent', { ...base, type: 'char' });
+    if (plan.type === 'keyDown') {
+      // keyDown 带 text：一次派发同时产出 keydown 与 char，等价真实按键。
+      await inputCmd('Input.dispatchKeyEvent', { ...base, type: 'keyDown', text: plan.text });
+    } else {
+      await inputCmd('Input.dispatchKeyEvent', { ...base, type: 'rawKeyDown' });
+      // CDP 的 rawKeyDown 会忽略 text —— 带字符的键（换行）必须再发一个带
+      // text 的 char 事件才会真的把字符插进去，否则 Enter 在 textarea /
+      // 原生 contenteditable 里不产生任何换行（"a\nb\nc" 静默变成 "abc"）。
+      if (plan.charText) await inputCmd('Input.dispatchKeyEvent', { ...base, type: 'char' });
+    }
     await inputCmd('Input.dispatchKeyEvent', { ...base, type: 'keyUp' });
   }
 
@@ -1526,7 +1615,7 @@ class PageManager {
     if (/^axf-/.test(aiId)) return await this._owningFrame(view, aiId);
     try {
       const inTop = await this.evaluate(
-        `!!document.querySelector('[data-ai-id="${aiId}"]')`,
+        `!!${findRefExpr(JSON.stringify(aiId))}`,
         tabId
       );
       if (inTop) return null;
@@ -1544,7 +1633,7 @@ class PageManager {
       if (frame === root) continue;
       try {
         const has = await frame.executeJavaScript(
-          `!!document.querySelector('[data-ai-id="${aiId}"]')`
+          `!!${findRefExpr(JSON.stringify(aiId))}`
         );
         if (has) return frame;
       } catch (e) { /* skip */ }
@@ -1613,7 +1702,7 @@ class PageManager {
       } else {
         try {
           const ok = await owning.executeJavaScript(
-            `(function(){var el=document.querySelector('[data-ai-id="${aiId}"]');if(!el)return false;` +
+            `(function(){var el=${findRefExpr(JSON.stringify(aiId))};if(!el)return false;` +
             `el.scrollIntoView({block:'center',inline:'center',behavior:'instant'});` +
             `el.focus();el.click();return true;})()`);
           return ok ? 'oopif-click' : null;
@@ -1623,11 +1712,11 @@ class PageManager {
     // 定位 → 滚入视口居中 → 返回滚动后的中心点（frame 内局部坐标）。
     const center = inFrame
       ? await owning.executeJavaScript(
-          `(function(){var el=document.querySelector('[data-ai-id="${aiId}"]');if(!el)return null;` +
+          `(function(){var el=${findRefExpr(JSON.stringify(aiId))};if(!el)return null;` +
           `el.scrollIntoView({block:'center',inline:'center',behavior:'instant'});` +
           `var r=el.getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)};})()`)
       : await this.evaluate(
-          `(function(){var el=document.querySelector('[data-ai-id="${aiId}"]');if(!el)return null;` +
+          `(function(){var el=${findRefExpr(JSON.stringify(aiId))};if(!el)return null;` +
           `el.scrollIntoView({block:'center',inline:'center',behavior:'instant'});` +
           `var r=el.getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)};})()`,
           tabId);
@@ -1648,18 +1737,19 @@ class PageManager {
     // 命中校验必须在派发【之前】做，且派发成功就不再回退 —— 否则一次 act 会点两次。
     // 事后校验的致命漏洞：mousePressed/mouseReleased 一发出，点击就已生效；而"点了
     // 之后自身消失/收起"的目标（话题候选收起列表、提交后置灰、菜单项、@提及、点赞）
-    // 此刻已经被自己点没了，elementFromPoint 必然命中不到 → 返回 null → executeAction
+    // 此刻已经被自己点没了，命中探测必然拿不到 → 返回 null → executeAction
     // 回退 preload 再点一次 → DOM 上出现两份插入/两次提交。派发前的坐标命中才是
     // "这一下会不会落在目标上"的唯一可信判断；校验失败（被遮挡/屏外/已隐藏）才回退。
+    //
+    // 命中探测必须穿透 shadow：不穿透的话，影子内部的元素（B站 整块评论区装在
+    // <bili-comments> 里）永远返回宿主 → contains 判定 false → 每次点击都静默
+    // 降级成非受信的 el.click()。降级本身不报错，所以表现为"能点但对某些编辑器
+    // 没反应"。hitTestExpr 同时把 contains 换成含 shadow 的祖先判定。
     if (action === 'click') {
+      const hitJs = hitTestExpr(JSON.stringify(aiId), String(center.x), String(center.y));
       const hit = inFrame
-        ? await owning.executeJavaScript(
-            `(function(){var el=document.querySelector('[data-ai-id="${aiId}"]');if(!el)return false;` +
-            `var h=document.elementFromPoint(${center.x},${center.y});return !!(h&&(h===el||el.contains(h)));})()`)
-        : await this.evaluate(
-            `(function(){var el=document.querySelector('[data-ai-id="${aiId}"]');if(!el)return false;` +
-            `var h=document.elementFromPoint(${center.x},${center.y});return !!(h&&(h===el||el.contains(h)));})()`,
-            tabId);
+        ? await owning.executeJavaScript(hitJs)
+        : await this.evaluate(hitJs, tabId);
       if (!hit) return null; // 坐标落不到目标上 —— 交给 preload 的 focus()+click 兜底
     }
     await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: vp.x, y: vp.y });
@@ -1696,8 +1786,10 @@ class PageManager {
     if (params.at && Number.isFinite(Number(params.at.x))) {
       at = { x: Math.round(Number(params.at.x)), y: Math.round(Number(params.at.y)) };
     } else if (aiId) {
+      // 穿透 shadow：目标在 Web Component 里时 document.querySelector 够不着，
+      // 落点会静默退化成视口中心 —— 滚轮打到完全无关的地方，还报成功。
       const c = await run(
-        `var el=document.querySelector(${JSON.stringify(`[data-ai-id="${aiId}"]`)});if(!el)return null;` +
+        `var el=${findRefExpr(JSON.stringify(aiId))};if(!el)return null;` +
         `el.scrollIntoView({block:'center',inline:'center',behavior:'instant'});` +
         `var r=el.getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)};`
       );
@@ -1771,9 +1863,12 @@ class PageManager {
     // 连接点识别用 classList 逐 token 词边界匹配 —— 上一版用
     // `[class*="anchor"]` 会把 `is-node-anchored` 这类无关类名当成连接点
     // （实测抢到了"标签"按钮），拖拽起点完全错位。
-    const pointFor = async (sel, anchor, offset) => {
+    // 传 aiId 而不是选择器：目标可能在 shadow 里，`document.querySelector` 够不着，
+    // 报出来是 "drag: start element not found"，读起来像元素不存在。定位统一走
+    // findRefExpr（穿透影子根），与点击路径口径一致。
+    const pointFor = async (aiId, anchor, offset) => {
       const body =
-        `var el=document.querySelector(${JSON.stringify(sel)});if(!el)return null;` +
+        `var el=${findRefExpr(JSON.stringify(aiId))};if(!el)return null;` +
         `var r=el.getBoundingClientRect();var side=${JSON.stringify(anchor)};` +
         `var cx=r.x+r.width/2,cy=r.y+r.height/2;` +
         `function isHandle(h){var cl=h.classList;for(var i=0;i<cl.length;i++){var t=cl[i];` +
@@ -1803,8 +1898,13 @@ class PageManager {
         // 判定必须是"命中即是连接点，或连接点的子孙"。**不能**接受
         // `hit.contains(handle)`：节点本体当然包含自己的连接点，那样会把这个
         // 失败情形原样放行（第一版就是这么写的，实测仍然报 handle）。
-        `if(best){var hit=document.elementFromPoint(best.x,best.y);` +
-        `if(!(hit&&(hit===best.el||best.el.contains(hit))))best=null;}` +
+        // 命中探测同样要穿透 shadow（连接点在 Web Component 里时，不穿透就
+        // 恒判"没命中"，于是永远回退到 via:'edge'，把"按在连接点上"降级成
+        // "按在节点边沿"）。跨 shadow 后用含 shadow 的祖先判定。
+        `if(best){var hit=${deepHitExpr('best.x', 'best.y')};` +
+        `var ok=false,c=hit,g=0;` +
+        `while(c&&g++<128){if(c===best.el){ok=true;break;}c=c.parentNode||c.host||null;}` +
+        `if(!ok)best=null;}` +
         `if(best){delete best.el;return best;}` +
         `if(side==='right')return {x:r.right,y:r.y+r.height/2,via:'edge'};` +
         `if(side==='left')return {x:r.left,y:r.y+r.height/2,via:'edge'};` +
@@ -1822,19 +1922,21 @@ class PageManager {
     // 同时向上找最近的 data-ai-id：如果它**不是**本次目标，说明抓错了节点
     // （实测踩过：两个节点视觉重叠时，拖 A 实际按在叠在上面的 B 的浮层上，
     // 事件照常派发、success 照常返回，但什么都没动）。
+    //
+    // 穿透 shadow + 含 shadow 的上溯，理由同上。原来那版用 e.closest('[data-ai-id]')：
+    // closest 走到影子树顶就停，影子内部的元素永远得到 id:null，于是 `is_target`
+    // 恒为 true —— "抓错节点"的检测被静默跳过，正是它存在的意义所在。
     const atPointJs = (p, selfId) =>
-      `var e=document.elementFromPoint(${p.x},${p.y});if(!e)return null;` +
-      `var anc=e.closest?e.closest('[data-ai-id]'):null;` +
-      `var id=anc?anc.getAttribute('data-ai-id'):null;` +
-      `return {el:(e.tagName||'')+' '+(typeof e.className==='string'?e.className:'').slice(0,60),` +
-      `id:id,is_target:(id===null||id===${JSON.stringify(String(selfId))})};`;
+      `var info=${hitInfoExpr(String(p.x), String(p.y))};if(!info)return null;` +
+      `return {el:info.el,id:info.id,` +
+      `is_target:(info.id===null||info.id===${JSON.stringify(String(selfId))})};`;
 
     // 起点
     let from = null;
     if (params.from && Number.isFinite(Number(params.from.x))) {
       from = { x: Math.round(Number(params.from.x)), y: Math.round(Number(params.from.y)), via: 'explicit' };
     } else if (aiId) {
-      from = await pointFor(`[data-ai-id="${aiId}"]`, anchorOf(params.from_anchor), params.from_offset);
+      from = await pointFor(aiId, anchorOf(params.from_anchor), params.from_offset);
     }
     if (!from) return { success: false, error: 'drag: start element not found: ' + aiId };
 
@@ -1852,7 +1954,7 @@ class PageManager {
     if (explicitTo && Number.isFinite(Number(explicitTo.x)) && Number.isFinite(Number(explicitTo.y))) {
       to = { x: Math.round(Number(explicitTo.x)), y: Math.round(Number(explicitTo.y)), via: 'explicit' };
     } else if (params.to_target) {
-      to = await pointFor(`[data-ai-id="${params.to_target}"]`, anchorOf(params.to_anchor), params.to_offset);
+      to = await pointFor(params.to_target, anchorOf(params.to_anchor), params.to_offset);
       if (!to) return { success: false, error: 'drag: to_target not found: ' + params.to_target };
     } else if (Number.isFinite(Number(params.dx)) || Number.isFinite(Number(params.dy))) {
       to = { x: Math.round(from.x + Number(params.dx || 0)), y: Math.round(from.y + Number(params.dy || 0)), via: 'delta' };
@@ -1959,7 +2061,10 @@ class PageManager {
       this._focusWindow(view);
     } catch (e) {}
     if (aiId) {
-      await run(`var el=document.querySelector(${JSON.stringify('[data-ai-id="' + String(aiId) + '"]')});if(el&&el.focus)el.focus();return true;`);
+      // 穿透 shadow：目标在 Web Component 里时 querySelector 拿不到 el，
+      // focus 这一步被静默跳过 —— 按键发给"当前焦点"（多半是 body），
+      // 现象是快捷键完全没生效，但回执照常 success。
+      await run(`var el=${findRefExpr(JSON.stringify(String(aiId)))};if(el&&el.focus)el.focus();return true;`);
     }
     const list = Array.isArray(params.keys) && params.keys.length
       ? params.keys
@@ -1970,7 +2075,7 @@ class PageManager {
     for (const name of list) {
       const spec = keySpec(name, params.modifiers);
       if (!spec) return { success: false, error: 'press: unsupported key: ' + String(name), pressed: done };
-      await this._cdpKey(send, spec);
+      await this._cdpKey(send, spec, { activate: true });
       done.push(spec.key);
       await new Promise((r) => setTimeout(r, Math.max(20, Number(params.interval_ms) || 60)));
     }
@@ -2022,12 +2127,12 @@ class PageManager {
     const payload = JSON.stringify({ html, text });
     const res = await run(
       `var p=${payload};` +
-      `var el=document.querySelector('[data-ai-id="${aiId}"]');if(!el)return {ok:false,err:'no-ref'};` +
+      `var el=${findRefExpr(JSON.stringify(aiId))};if(!el)return {ok:false,err:'no-ref'};` +
       // 选定真正的编辑面：el 自己可编辑就用 el；否则取内部第一个可编辑后代
       // （Draft.js/ProseMirror 的编辑面都是容器里的一个子 div）。
       `var ed=el;` +
       `var elEditable=(ed.contentEditable==='true')||(ed.tagName==='TEXTAREA')||(ed.tagName==='INPUT');` +
-      `if(!elEditable&&ed.querySelector){var inner=ed.querySelector('[contenteditable=true],input,textarea');if(inner)ed=inner;}` +
+      `if(!elEditable&&ed.querySelector){var inner=${findDescExpr('ed', JSON.stringify('[contenteditable=true],input,textarea'))};if(inner)ed=inner;}` +
       `var editable=(ed.contentEditable==='true')||(ed.tagName==='TEXTAREA')||(ed.tagName==='INPUT');` +
       `if(!editable)return {ok:false,err:'not-editable'};` +
       `ed.focus();` +
@@ -2054,7 +2159,7 @@ class PageManager {
     // 落盘校验：读回编辑器内容。归一化沿用 P0-2 修过的口径（换行会被编辑器
     // 膨胀，逐字比对必然失配）。只给 html 时无法文本比对，退而检查"有内容"。
     await new Promise((r) => setTimeout(r, 350)); // 编辑器处理粘贴多为异步（React 提交）
-    const landed = await run(`var e=document.activeElement;return {text:(e&&(e.innerText||e.value||''))||'',html:(e&&e.innerHTML||'')};`);
+    const landed = await run(`var e=${deepActiveExpr()};return {text:(e&&(e.innerText||e.value||''))||'',html:(e&&e.innerHTML||'')};`);
     const landedText = (landed && landed.text) || '';
     const landedLen = landedText.replace(/\s+/g, '').length;
     if (!landedLen) {
@@ -2090,7 +2195,7 @@ class PageManager {
     // 用户在系统选择器选中）；若再对它 click 会重新唤起系统文件框并清空 files，
     // 导致刚写入的状态被覆盖。由调用方负责先让上传组件就绪。
     const idRes = await dbg.sendCommand('Runtime.evaluate', {
-      expression: `(function(){var el=document.querySelector('[data-ai-id="${aiId}"]');return el&&el.__proto__&&el.matches?el.matches('input[type=file],input')?el:null:null;})()`,
+      expression: `(function(){var el=${findRefExpr(JSON.stringify(aiId))};return el&&el.__proto__&&el.matches?el.matches('input[type=file],input')?el:null:null;})()`,
       returnByValue: false,
     });
     const objId = idRes && idRes.result && idRes.result.objectId;
@@ -2098,12 +2203,195 @@ class PageManager {
     await dbg.sendCommand('DOM.setFileInputFiles', { files: [filePath], objectId: objId });
     // 兜底校验：确认 files 已写入
     const ver = await dbg.sendCommand('Runtime.evaluate', {
-      expression: `(function(){var f=document.querySelector('[data-ai-id="${aiId}"]').files;return f&&f.length>0?{name:f[0].name,size:f[0].size}:null;})()`,
+      expression: `(function(){var f=${findRefExpr(JSON.stringify(aiId))}.files;return f&&f.length>0?{name:f[0].name,size:f[0].size}:null;})()`,
       returnByValue: true,
     });
     const v = ver && ver.result && ver.result.value;
     if (!v) return { success: false, error: 'Upload not written to input' };
     return { success: true, uploaded: v.name, size: v.size };
+  }
+
+  // 跨帧文件上传（含 OOPIF）。CDP 的 DOM.setFileInputFiles 需要顶层文档里的
+  // nodeId/objectId，够不着 iframe 内部的 input —— B站封面上传、多数编辑器的
+  // "插入图片"都在 iframe 里，实测只得出一条 "no file input found"。
+  // 走到帧内：文件读成字节 → 在目标帧构造 File → DataTransfer 赋给 input.files
+  // → 派发 change，与"用户在系统选择器里选中文件"等价。
+  //
+  // 三种状态的控件都要能对付（实测各站点轮流出现）：
+  //   1. 目标本身就是 input[type=file] —— 直接写；
+  //   2. 目标是容器，input 预挂在里面 —— 取容器里的第一个 file input；
+  //   3. 容器里**一个 input 都没有**（组件在"已上传"状态下把上传区整个卸载了，
+  //      CSDN 的封面就是：有封面时 .container-coverimage-box 里连
+  //      .el-upload__input 都不存在）—— 临时接管 HTMLInputElement.prototype.click
+  //      再把容器点开，捕获"点击时才创建"的那个 input。
+  // 第 3 种是 target 写成 `.box .el-upload__input` 这类"指向 input 本身的选择器"
+  // 时最容易踩的：整条选择器查不到元素，但它的祖先还在。所以 target 先展开成
+  // 由长到短的回退候选（selectorAncestors），用第一个命中的祖先当锚点。
+  async _uploadViaFrameJs(view, aiId, filePath, tabId) {
+    if (!aiId) return null;
+    if (!filePath) throw new Error('upload requires a file path');
+    // 上传控件经常没有语义节点（B站的「本地上传」就是个纯 div 菜单项，AX 树里
+    // 根本没有它），此时调用方给不出 ref，只能给 CSS 选择器。所以 target 先按
+    // data-ai-id 找，找不到再当作选择器：先找帧、再找顶层文档。
+    const target = String(aiId);
+    // 由长到短的候选：`.a .b` → ['.a .b', '.a']。data-ai-id 形状的 target
+    // 走 selectorAncestors 会原样返回单元素，行为不变。
+    const cands = refGuard.selectorAncestors(target);
+    let owning = await this._owningFrameFor(view, aiId, tabId);
+    let inTop = false;
+    if (!owning) {
+      const probe = `(function(){var C=${JSON.stringify(cands)};for(var i=0;i<C.length;i++){try{if(document.querySelector(C[i]))return true;}catch(e){}}return false;})()`;
+      for (const frame of (view.webContents.mainFrame.framesInSubtree || [])) {
+        if (frame === view.webContents.mainFrame) continue;
+        try { if (await frame.executeJavaScript(probe)) { owning = frame; break; } }
+        catch (e) { /* skip */ }
+      }
+      if (!owning) {
+        try { inTop = !!(await this.evaluate(probe, tabId)); } catch (e) { inTop = false; }
+      }
+    }
+    if (!owning && !inTop) {
+      // 连锚点都找不到：明确说"选择器没命中任何元素"，而不是笼统的
+      // "no file input found"（后者会让人以为选择器命中了但里面没 input）。
+      return {
+        success: false,
+        method: 'frame-file-inject',
+        error: 'upload target not found: no element matches '
+          + JSON.stringify(cands[0] || target) + (cands.length > 1 ? ' (nor its ancestors ' + JSON.stringify(cands.slice(1)) + ')' : '')
+          + ' — pass the control that OPENS the file picker, or a CSS selector for it',
+        candidates: cands,
+      };
+    }
+    let buf;
+    try { buf = fs.readFileSync(filePath); } catch (e) {
+      return { success: false, method: 'frame-file-inject', error: 'cannot read file: ' + String((e && e.message) || e).slice(0, 160) };
+    }
+    const name = path.basename(filePath);
+    const ext = name.toLowerCase().slice(name.lastIndexOf('.'));
+    const mime = ext === '.png' ? 'image/png'
+      : (ext === '.jpg' || ext === '.jpeg') ? 'image/jpeg'
+        : ext === '.webp' ? 'image/webp'
+          : ext === '.gif' ? 'image/gif' : 'application/octet-stream';
+    // 内联 base64 直接走 frame.executeJavaScript —— 不受 WS 侧 evaluate 的
+    // 5000 字符守卫约束（那个守卫只拦 ui.evaluate 的 js 参数）。
+    const b64 = buf.toString('base64');
+    const refSel = JSON.stringify('[data-ai-id="' + target + '"]');
+    const js = `(function(){
+var C=${JSON.stringify(cands)};
+var REF=${refSel};
+var b64=${JSON.stringify(b64)};
+var name=${JSON.stringify(name)};
+var mime=${JSON.stringify(mime)};
+function isFileInput(e){return !!e&&e.tagName==='INPUT'&&e.type==='file';}
+function q(sel,root){try{return (root||document).querySelector(sel);}catch(e){return null;}}
+// 1) 先按 data-ai-id 找（ref 才是权威），再按选择器候选由长到短找。
+// 按 ref 找必须穿透 shadow：上传控件装在 Web Component 里时，顶层 querySelector
+// 拿不到，报出来是 "no-el" —— 看起来像没有上传入口，实际是查询路径够不着。
+var host=null,hostSel=null;
+var byRef=${findRefExpr('REF')};
+if(byRef){host=byRef;hostSel=REF;}
+for(var i=0;i<C.length&&!host;i++){var el=q(C[i]);if(el){host=el;hostSel=C[i];break;}}
+if(!host) return {ok:false,err:'no-el'};
+// <label for=...> 的点击会由浏览器直接激活目标 input、绕过 JS 层拦截 → 系统文件框
+// 会真的弹出来。所以遇到 label 先顺着 control 拿 input，拿不到就不点它。
+// 找后代同样要穿透 shadow（findDescExpr 会下钻 el.shadowRoot）：宿主可能是
+// <bili-*> 之类，真正的 input[type=file] 在它自己的影子树里。
+function labelInput(el){try{var c=el.control;if(isFileInput(c))return c;var n=el.querySelector&&${findDescExpr('el', JSON.stringify('input[type=file]'))};if(n)return n;}catch(e){}return null;}
+function find(root){
+  if(!root)return null;
+  if(isFileInput(root))return root;
+  if(root.tagName==='LABEL'){var li=labelInput(root);if(li)return li;}
+  var r=null;try{r=${findDescExpr('root', JSON.stringify('input[type=file]'))};}catch(e){r=null;}
+  return r;
+}
+var inp=find(host),via='direct';
+// 2) 点击捕获：接管原型 click（元素的 .click() 会走到这里），挡住系统框，
+//    同时暂时让 showOpenFilePicker 挂起，避免 File System Access API 那条路漏网。
+function captureOnce(t){
+  if(!t)return null;
+  var cap=null,proto=HTMLInputElement.prototype,orig=proto.click,origPicker=window.showOpenFilePicker;
+  try{window.showOpenFilePicker=function(){return new Promise(function(){});};}catch(e){}
+  proto.click=function(){if(this.type==='file'){cap=this;return;}try{return orig.apply(this,arguments);}catch(e){}};
+  try{t.click();}catch(e){}
+  try{proto.click=orig;}catch(e){}
+  try{window.showOpenFilePicker=origPicker;}catch(e){}
+  return cap;
+}
+var clicked=[];
+if(!inp){
+  inp=captureOnce(host);
+  if(inp)via='click';
+  else{
+    clicked.push((host.className||host.tagName||'').toString().slice(0,40));
+    // 3) 锚点自己点不出东西就往下探一层：只挑"长得像触发器"的、且真正可见的
+    //    后代，最多 8 次就收手（每次点击都可能改变页面状态，不能无限试）。
+    //    负向词表必须有：封面区里常驻一个「删除封面」按钮，类名带 cover，
+    //    正向匹配会命中它 —— 一旦可见就会被点掉用户的封面。
+    var RX=/upload|file|add|plus|replace|change|select|image|cover/i;
+    var BAD=/remove|delete|del-|trash|clear|cancel|close|drop/i;
+    var nodes=[],all=[];
+    try{all=host.querySelectorAll('button,label,[role=button],a,div,span,i');}catch(e){all=[];}
+    for(var k=0;k<all.length&&nodes.length<8;k++){
+      var e2=all[k],cls=String(e2.className||''),tag=e2.tagName,role=e2.getAttribute&&e2.getAttribute('role');
+      if(BAD.test(cls))continue;
+      if(!(RX.test(cls)||tag==='BUTTON'||tag==='LABEL'||tag==='A'||role==='button'))continue;
+      var rc=e2.getBoundingClientRect();
+      if(rc.width<2||rc.height<2)continue;   // 不可见的不点（0×0 的多是布局占位）
+      nodes.push(e2);
+    }
+    for(var j=0;j<nodes.length&&!inp;j++){
+      var nd=nodes[j];
+      if(nd.tagName==='LABEL'&&!labelInput(nd))continue;
+      inp=captureOnce(nd);
+      clicked.push((nd.className||nd.tagName||'').toString().slice(0,40));
+      if(inp)via='click-descendant';
+    }
+  }
+}
+if(!inp)inp=find(host);
+if(!inp)return {ok:false,err:'no-file-input',host_sel:hostSel,clicked:clicked};
+if(!inp.isConnected){
+  // 捕获到的 input 往往是"创建了但还没插进文档"（组件打算点完就丢），
+  // 挂在锚点下、藏起来：change 才能沿组件自己的 DOM 树冒泡到它的委托处理器。
+  try{inp.style.display='none';host.appendChild(inp);}catch(e){}
+}
+var bin=atob(b64),n=bin.length,arr=new Uint8Array(n);
+for(var m=0;m<n;m++)arr[m]=bin.charCodeAt(m);
+var file=new File([arr],name,{type:mime});
+var dt=new DataTransfer();dt.items.add(file);
+inp.files=dt.files;
+inp.dispatchEvent(new Event('change',{bubbles:true}));
+return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:clicked};
+})()`;
+    const res = owning ? await owning.executeJavaScript(js) : await this.evaluate(js, tabId);
+    if (!res || !res.ok) {
+      const err = (res && res.err) || 'upload-failed';
+      if (err === 'no-file-input') {
+        return {
+          success: false,
+          method: 'frame-file-inject',
+          error: 'found ' + JSON.stringify((res && res.host_sel) || target)
+            + ' but no <input type=file> appeared after clicking it'
+            + ' (clicked: ' + JSON.stringify((res && res.clicked) || []) + ')'
+            + ' — pass the element that OPENS the file picker (e.g. the "upload local file" menu item) as target',
+          candidates: cands,
+        };
+      }
+      return { success: false, method: 'frame-file-inject', error: err, candidates: cands };
+    }
+    // in_frame 如实反映实际执行位置：顶层文档上传（CSDN 那种）不应报 true。
+    return {
+      success: true,
+      method: 'frame-file-inject',
+      uploaded: res.name,
+      size: res.size,
+      in_frame: !!owning,
+      // 上传组件可能有三种入口状态，回执如实说明用了哪条路：
+      //   direct = input 本来就在；click = 点了锚点才创建；
+      //   click-descendant = 锚点里再往下探了一层才点出 input。
+      resolved_by: res.via || 'direct',
+      host_sel: res.host_sel === refSel ? '[data-ai-id]' : (res.host_sel || null),
+    };
   }
 
   // 通用文本输入（type/setContent 共用）：先让窗口/视图拿到焦点，再在页面里
@@ -2135,8 +2423,8 @@ class PageManager {
     } catch(e) {}
     // 定位可编辑区并原生聚焦（不做 DOM 全选——交给 Cmd+A 受信按键）
     const prep = await run(
-      `var el=document.querySelector('[data-ai-id="${aiId}"]');if(!el)return {ok:false,err:'no-ref'};` +
-      `var ed=el;if(ed.querySelector){var inner=ed.querySelector('[contenteditable=true],input,textarea');if(inner)ed=inner;}` +
+      `var el=${findRefExpr(JSON.stringify(aiId))};if(!el)return {ok:false,err:'no-ref'};` +
+      `var ed=el;if(ed.querySelector){var inner=${findDescExpr('ed', JSON.stringify('[contenteditable=true],input,textarea'))};if(inner)ed=inner;}` +
       `var editable=(ed.contentEditable==='true')||(ed.tagName==='TEXTAREA')||(ed.tagName==='INPUT');` +
       `if(!editable)return {ok:false,err:'not-editable'};` +
       `ed.focus();` +
@@ -2149,8 +2437,11 @@ class PageManager {
     // h2>blockquote>pre>ul>li 的套娃），editor_blocks 的 role 也随之失真。
     // 只在"确实已经没有文本内容"时拆，有内容的块一个都不动。
     const stripEmptyShells = () => run(
-      `var el=document.querySelector(${JSON.stringify('[data-ai-id="' + String(aiId) + '"]')});if(!el)return false;` +
-      `var ed=el;if(ed.querySelector){var inner=ed.querySelector('[contenteditable=true],input,textarea');if(inner)ed=inner;}` +
+      // 与上面 prep 同一口径（穿透 shadow 的 findRefExpr）。两处必须一致：
+      // prep 认得的元素、这里也要认得，否则"清空校验"读到空、把已经清干净的
+      // 编辑器判成没清掉，接着又拆一遍。
+      `var el=${findRefExpr(JSON.stringify(aiId))};if(!el)return false;` +
+      `var ed=el;if(ed.querySelector){var inner=${findDescExpr('ed', JSON.stringify('[contenteditable=true],input,textarea'))};if(inner)ed=inner;}` +
       `if(ed.tagName==='INPUT'||ed.tagName==='TEXTAREA')return false;` +
       `if(ed.contentEditable!=='true')return false;` +
       `if((ed.innerText||'').trim()!=='')return false;` +
@@ -2183,7 +2474,7 @@ class PageManager {
     // 每次全量重写都会把草稿标脏，重新触发编辑器自身的"草稿备份"/版本气泡——对
     // 相同文本的重复调用（重试/校正）不应让它反复闪烁。
     const curText = await run(
-      `var e=document.activeElement;return (e&&(e.innerText||e.value||''))||'';`
+      `var e=${deepActiveExpr()};return (e&&(e.innerText||e.value||''))||'';`
     );
     if (norm(curText) === norm(text)) {
       // "目标就是当前内容" 与 "目标本来就是空的" 必须区分开。
@@ -2220,8 +2511,8 @@ class PageManager {
       const at = opts.at === 'start' || opts.at === 'cursor' ? opts.at : 'end';
       if (at !== 'cursor') {
         await run(
-          `var el=document.querySelector(${JSON.stringify('[data-ai-id="' + String(aiId) + '"]')});if(!el)return false;` +
-          `var ed=el;if(ed.querySelector){var inner=ed.querySelector('[contenteditable=true],input,textarea');if(inner)ed=inner;}` +
+          `var el=${findRefExpr(JSON.stringify(String(aiId)))};if(!el)return false;` +
+          `var ed=el;if(ed.querySelector){var inner=${findDescExpr('ed', JSON.stringify('[contenteditable=true],input,textarea'))};if(inner)ed=inner;}` +
           `if(ed.tagName==='INPUT'||ed.tagName==='TEXTAREA'){var L=(ed.value||'').length;` +
           `var p=(${JSON.stringify(at)}==='start')?0:L;try{ed.setSelectionRange(p,p);}catch(e){}return true;}` +
           `if(ed.contentEditable!=='true')return false;` +
@@ -2251,14 +2542,14 @@ class PageManager {
         // 实测残留 "第一段<div>第二段</div><h2>第三段</h2>"。因此清完校验一次，
         // 仍有文本就换编辑器原生 selectAll+delete 再清一遍。
         const left = await run(
-          `var el=document.querySelector(${JSON.stringify('[data-ai-id="' + String(aiId) + '"]')});if(!el)return 0;` +
-          `var ed=el;if(ed.querySelector){var inner=ed.querySelector('[contenteditable=true],input,textarea');if(inner)ed=inner;}` +
+          `var el=${findRefExpr(JSON.stringify(String(aiId)))};if(!el)return 0;` +
+          `var ed=el;if(ed.querySelector){var inner=${findDescExpr('ed', JSON.stringify('[contenteditable=true],input,textarea'))};if(inner)ed=inner;}` +
           `return String((ed.innerText!=null?ed.innerText:ed.value)||'').trim().length;`
         );
         if (left > 0) {
           await run(
-            `var el=document.querySelector(${JSON.stringify('[data-ai-id="' + String(aiId) + '"]')});if(!el)return false;` +
-            `var ed=el;if(ed.querySelector){var inner=ed.querySelector('[contenteditable=true],input,textarea');if(inner)ed=inner;}` +
+            `var el=${findRefExpr(JSON.stringify(String(aiId)))};if(!el)return false;` +
+            `var ed=el;if(ed.querySelector){var inner=${findDescExpr('ed', JSON.stringify('[contenteditable=true],input,textarea'))};if(inner)ed=inner;}` +
             `try{ed.focus();document.execCommand('selectAll');document.execCommand('delete');}catch(e){}return true;`
           );
           await new Promise((r) => setTimeout(r, 150)); // 等编辑器状态提交
@@ -2269,7 +2560,7 @@ class PageManager {
     const paras = String(text == null ? '' : text).split('\n');
     // 段落内容快照：用来判断"这一下 Enter 到底有没有生效"。
     const snap = () => run(
-      `var e=document.activeElement;var t=String((e&&(e.innerText||e.value))||'');` +
+      `var e=${deepActiveExpr()};var t=String((e&&(e.innerText||e.value))||'');` +
       `var b=(e&&e.querySelectorAll)?e.querySelectorAll('p,div,br').length:0;` +
       `return {len:t.length,nl:(t.match(/\\n/g)||[]).length,blocks:b};`
     );
@@ -2295,7 +2586,7 @@ class PageManager {
     // 通用校验：非空文本要求内容包含目标文本；空文本要求已清空（只允许空块残留）。
     // 任一框架均可，无占位符/块数特判。
     const after = await run(
-      `var e=document.activeElement;return {text:(e.innerText||e.value||'')};`
+      `var e=${deepActiveExpr()};return {text:(e.innerText||e.value||'')};`
     );
     const want = norm(text);
     const got = norm(after && after.text);
@@ -2326,8 +2617,8 @@ class PageManager {
   async _clearInFrame(frame, aiId) {
     try {
       const r = await frame.executeJavaScript(`(function(){
-        var ref=document.querySelector('[data-ai-id="${aiId}"]');if(!ref)return {ok:false,reason:'no-ref'};
-        var e=ref;if(ref.querySelector){var inner=ref.querySelector('[contenteditable="true"],textarea,input[type="text"],input[type="search"],input[type="title"],input:not([type])');if(inner)e=inner;}
+        var ref=${findRefExpr(JSON.stringify(aiId))};if(!ref)return {ok:false,reason:'no-ref'};
+        var e=ref;if(ref.querySelector){var inner=${findDescExpr('ref', JSON.stringify('[contenteditable="true"],textarea,input[type="text"],input[type="search"],input[type="title"],input:not([type])'))};if(inner)e=inner;}
         var isInput=(e.tagName==='INPUT'||e.tagName==='TEXTAREA');
         var isCE=e.contentEditable==='true';
         if(!(isInput||isCE))return {ok:false,reason:'not-editable'};
@@ -2351,8 +2642,8 @@ class PageManager {
   async _selectAllFallback(view, aiId, tabId, frame) {
     const r = frame
       ? await frame.executeJavaScript(
-          `(function(){var el=document.querySelector('[data-ai-id="${aiId}"]');if(!el)return false;` +
-          `var ed=el;if(ed.querySelector){var inner=ed.querySelector('[contenteditable=true],input,textarea');if(inner)ed=inner;}` +
+          `(function(){var el=${findRefExpr(JSON.stringify(aiId))};if(!el)return false;` +
+          `var ed=el;if(ed.querySelector){var inner=${findDescExpr('ed', JSON.stringify('[contenteditable=true],input,textarea'))};if(inner)ed=inner;}` +
           `var s=window.getSelection();` +
           `if(s&&!s.isCollapsed&&s.toString().length>0)return true;` +
           `if(ed.tagName==='TEXTAREA'||ed.tagName==='INPUT'){var v=ed.value||'';if(v){ed.focus();ed.setSelectionRange(0,v.length);}return v.length>0;}` +
@@ -2364,8 +2655,8 @@ class PageManager {
           `s.removeAllRanges();s.addRange(rng);` +
           `return rng.toString().length>0;})()`)
       : await this.evaluate(
-          `(function(){var el=document.querySelector('[data-ai-id="${aiId}"]');if(!el)return false;` +
-          `var ed=el;if(ed.querySelector){var inner=ed.querySelector('[contenteditable=true],input,textarea');if(inner)ed=inner;}` +
+          `(function(){var el=${findRefExpr(JSON.stringify(aiId))};if(!el)return false;` +
+          `var ed=el;if(ed.querySelector){var inner=${findDescExpr('ed', JSON.stringify('[contenteditable=true],input,textarea'))};if(inner)ed=inner;}` +
           `var s=window.getSelection();` +
           `if(s&&!s.isCollapsed&&s.toString().length>0)return true;` +
           `if(ed.tagName==='TEXTAREA'||ed.tagName==='INPUT'){var v=ed.value||'';if(v){ed.focus();ed.setSelectionRange(0,v.length);}return v.length>0;}` +
@@ -2558,6 +2849,15 @@ class PageManager {
         url: String(validatedURL || ''),
         error_code: errorCode,
         error: String(errorDescription || ''),
+      });
+      // 同一件事落盘。错误页在界面上看得见，但"哪个 tab、哪个网址、错误码多少"
+      // 一旦进程退出就查不回来了（load_failed 只是一次内存广播）。
+      recordError('nav_fail', {
+        tab: tabId,
+        url: String(validatedURL || ''),
+        error_code: errorCode,
+        error: String(errorDescription || ''),
+        error_page: 'shown',
       });
       // 错误页本身加载成功后清掉防重入标记，否则同 tab 后续失败都不显示。
       view.webContents.once('did-finish-load', () => {
@@ -2799,11 +3099,12 @@ class PageManager {
 
   _layoutView(view) {
     const bounds = this.window.getContentBounds();
+    const inset = this._bottomInset || 0;
     view.setBounds({
       x: 0,
       y: config.tabBarHeight,
       width: bounds.width,
-      height: bounds.height - config.tabBarHeight,
+      height: Math.max(0, bounds.height - config.tabBarHeight - inset),
     });
   }
 

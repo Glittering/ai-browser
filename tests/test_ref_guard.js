@@ -47,6 +47,102 @@ describe('refShapeError — reject shapes that cannot be ids', () => {
   });
 });
 
+// ---- CSS 选择器作为 target（仅 upload） ----
+// 坑的来源：CSDN 的封面输入框没有 data-ai-id，只能用
+// `.container-coverimage-box .el-upload__input` 定位；旧逻辑见到空白就当
+// "可见文案"拒掉，逼得调用方退化成单类名选择器碰运气。
+import { looksLikeCssSelector } from '../src/shared/ref_guard.cjs';
+
+describe('refShapeError — upload 接受 CSS 选择器', () => {
+  it('RG-6: 带空格的组合选择器在 upload 下放行', () => {
+    for (const sel of [
+      '.container-coverimage-box .el-upload__input',
+      '.upload-button > input[type="file"]',
+      '#panel .cover',
+      '[data-testid="cover"] input',
+    ]) {
+      expect(refShapeError(sel, { allowSelector: true }), sel).toBeNull();
+    }
+  });
+
+  it('RG-6b: 同一个选择器在别的动作下仍被拒（只有 upload 解析选择器）', () => {
+    const e = refShapeError('.container-coverimage-box .el-upload__input');
+    expect(e).toContain('looks like visible text');
+  });
+
+  it('RG-6c: 放行选择器不能把页面文案一起放进来', () => {
+    // 中文文案：即便开了 allowSelector 也必须拒
+    for (const label of ['点击 发布按钮', '添加封面 从本地上传', '选择 文件']) {
+      expect(refShapeError(label, { allowSelector: true }), label).toContain('looks like visible text');
+    }
+    // 英文文案：没有选择器结构符（. # [ > *），不能被误当成后代选择器
+    for (const label of ['Publish now', 'Choose File', 'upload local file']) {
+      expect(refShapeError(label, { allowSelector: true }), label).not.toBeNull();
+    }
+  });
+
+  it('RG-6d: looksLikeCssSelector 的边界', () => {
+    expect(looksLikeCssSelector('.el-upload__input')).toBe(true);
+    expect(looksLikeCssSelector('#f')).toBe(true);
+    expect(looksLikeCssSelector('*')).toBe(true);
+    expect(looksLikeCssSelector('div > input')).toBe(true);
+    expect(looksLikeCssSelector('Publish now')).toBe(false);   // 无结构符
+    expect(looksLikeCssSelector('.封面')).toBe(false);          // 含 CJK
+    expect(looksLikeCssSelector('')).toBe(false);
+    expect(looksLikeCssSelector(null)).toBe(false);
+    // 逗号/分号不属于选择器常用字符集 → 不当选择器（防自然语言长句）
+    expect(looksLikeCssSelector('.a, .b')).toBe(false);
+  });
+
+  it('RG-6e: 普通 ref 不受影响', () => {
+    for (const ok of ['e:button-12', 'axf-3-1', 'submit-btn', 'app']) {
+      expect(refShapeError(ok, { allowSelector: true }), ok).toBeNull();
+    }
+  });
+});
+
+// 选择器的回退候选：上传组件在"已有文件"状态会把上传区（连同内部那个永久隐藏的
+// file input）整个卸载，只剩祖先容器。整条选择器查不到元素时，得靠祖先当锚点把它
+// 重新点出来 —— 否则 `.box .el-upload__input` 这种写法必然失败。
+import { selectorAncestors } from '../src/shared/ref_guard.cjs';
+
+describe('selectorAncestors — 由长到短的回退候选', () => {
+  it('RG-7: 后代选择器逐层退到祖先', () => {
+    expect(selectorAncestors('.container-coverimage-box .el-upload__input'))
+      .toEqual(['.container-coverimage-box .el-upload__input', '.container-coverimage-box']);
+    expect(selectorAncestors('.a .b .c')).toEqual(['.a .b .c', '.a .b', '.a']);
+    // 纯标签链里没有任何结构符，按 refShapeError 的口径本来就不算选择器
+    // （防止 "Publish now" 这类英文文案被当成后代选择器），这里保持一致。
+    expect(selectorAncestors('a b c')).toEqual(['a b c']);
+  });
+
+  it('RG-7b: 单段选择器原样返回（没有更短的退路）', () => {
+    expect(selectorAncestors('.el-upload__input')).toEqual(['.el-upload__input']);
+    expect(selectorAncestors('#cover')).toEqual(['#cover']);
+  });
+
+  it('RG-7c: 显式复合子只退到祖先，不做组合子放宽', () => {
+    // 把 `>` 放宽成后代只会加大误命中面（可能点到页面别处的 input），而回退的
+    // 目的单一：找到"这一层还在"的祖先当锚点。所以不给放宽版本。
+    expect(selectorAncestors('.box > input[type="file"]')).toEqual(['.box > input[type="file"]', '.box']);
+  });
+
+  it('RG-7d: 属性值/伪类参数里的空格不拆开', () => {
+    expect(selectorAncestors('.a [title="x y"] .b'))
+      .toEqual(['.a [title="x y"] .b', '.a [title="x y"]', '.a']);
+    expect(selectorAncestors('.a:not(.b .c) .d'))
+      .toEqual(['.a:not(.b .c) .d', '.a:not(.b .c)']);
+  });
+
+  it('RG-7e: data-ai-id 形状的 target 不受影响（原样单元素）', () => {
+    for (const ref of ['e:button-12', 'axf-3-1', 'submit-btn', 'app']) {
+      expect(selectorAncestors(ref), ref).toEqual([ref]);
+    }
+    expect(selectorAncestors('')).toEqual([]);
+    expect(selectorAncestors(null)).toEqual([]);
+  });
+});
+
 // ---- deadline：paste 已在 P1-2 覆盖；这里回归 actionDeadlineMs 对 paste 的缩放 ----
 import { actionDeadlineMs } from '../src/shared/deadline.js';
 

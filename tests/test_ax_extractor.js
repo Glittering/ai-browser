@@ -4,7 +4,7 @@
 // textbox+multiline, div[role=button] fake buttons, position:fixed modal dialog)
 // and asserts the AX -> protocol TreeNode mapping + data-ai-id fusion.
 import { describe, it, expect } from 'vitest';
-import { normalizeAxTree, mergeFrameTrees, modalsFromAx, diffAx, filterInteractive, liteSnapshot, diffLite } from '../src/main/axExtractor.js';
+import { normalizeAxTree, mergeFrameTrees, modalsFromAx, filterInteractive, liteSnapshot, diffLite } from '../src/main/axExtractor.js';
 
 // helpers to build a raw AXNode succinctly (matches CDP wire shape)
 const bool = (value) => ({ type: 'boolean', value });
@@ -90,45 +90,13 @@ describe('modalsFromAx()', () => {
   });
 });
 
-describe('diffAx() — non-committing reveal diff (plan §9.5 / A)', () => {
-  it('AX-009: reports the submenu entries newly revealed by a hover', () => {
-    const before = [
-      node(1, 'menuitem', '创作中心', { props: [{ name: 'focusable', value: bool(true) }] }),
-      node(2, 'menuitem', '写文章', { props: [{ name: 'focusable', value: bool(true) }] }),
-    ];
-    // After hovering 创作中心, a folded 写文章 entry materializes.
-    const after = [
-      node(1, 'menuitem', '创作中心', { props: [{ name: 'focusable', value: bool(true) }] }),
-      node(2, 'menuitem', '写文章', { props: [{ name: 'focusable', value: bool(true) }] }),
-      node(3, 'menuitem', '内容管理', { props: [{ name: 'focusable', value: bool(true) }], backendDOMNodeId: 30001 }),
-    ];
-    const { revealed, hidden } = diffAx(before, after);
-    expect(revealed.map((r) => r.label)).toContain('内容管理');
-    expect(revealed.find((r) => r.label === '内容管理').id).toBe('ax-30001'); // stable backendDOMNodeId key
-    expect(hidden).toHaveLength(0);
-  });
-
-  it('AX-010: hides entries that disappear after the pointer moves away', () => {
-    const before = [
-      node(1, 'menuitem', '创作中心', { props: [] }),
-      node(2, 'menuitem', '写文章', { props: [], backendDOMNodeId: 20001 }),
-    ];
-    const after = [node(1, 'menuitem', '创作中心', { props: [] })];
-    const { revealed, hidden } = diffAx(before, after);
-    expect(revealed).toHaveLength(0);
-    expect(hidden.map((h) => h.label)).toContain('写文章');
-  });
-
-  it('AX-011: non-interactive newly-presented nodes are omitted', () => {
-    const before = [node(1, 'menuitem', '创作中心', { props: [] })];
-    const after = [
-      node(1, 'menuitem', '创作中心', { props: [] }),
-      node(9, 'statictext', '说明性文字', { props: [] }),
-    ];
-    const { revealed } = diffAx(before, after);
-    expect(revealed).toHaveLength(0); // statictext isn't interactive
-  });
-});
+// 这里原本有 3 条测 diffAx() 的用例（AX-009 / 010 / 011），已随 diffAx 一起删除。
+// ui.peek 不再用 AX 做差异比较，改用 DOM 语义树（tests/test_tree_diff.js）。
+//
+// 其中 AX-011 的断言是"非交互的新节点必须被省略"——这条语义正是 peek 看不见
+// 自绘菜单的元凶：菜单项在 AX 里是无名的 generic（文字跑到子节点 StaticText 去了），
+// 既不满足 interactiveRoles 也不可聚焦，于是被整片滤掉。翻转之后的行为由
+// test_tree_diff.js 的 TD-3 守住：自绘的 generic 菜单项必须报出来。
 
 describe('mergeFrameTrees() — OOPIF down-drill (P0)', () => {
   // Main frame: one paragraph textbox. Child frame: richtext editor already

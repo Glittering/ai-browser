@@ -31,7 +31,14 @@ describe('MCP tool list (token-cost guard)', () => {
     //     连错误都没有 —— 最隐蔽的一类 success ≠ done。这个工具是让 agent 能问到
     //     "文件在哪儿"的唯一入口。下载是异步的，塞进 click 返回值会让 agent 在错的
     //     时间点看到空列表，所以必须是独立查询。
-    expect(MCP_TOOLS).toHaveLength(19);
+    // 19 → 20（有意变更）：
+    //   + browse_errors：2026-10-17 亲眼看到的现象 —— 界面弹一个原生框说
+    //     "A JavaScript error occurred in the main process"，用户点掉之后
+    //     **没有任何地方**能查到它崩在哪（主进程当时一处错误处理都没有，栈只活在
+    //     那个框里）。事故的核心不是"缺日志"，而是"事后无法证明发生过什么"。
+    //     现在异常同步落盘到 ~/.ai-browser/logs/error.jsonl，这个工具是让 agent
+    //     自己就能问到"刚才报过什么错"的入口 —— 从"靠人复述"变成"可自查"。
+    expect(MCP_TOOLS).toHaveLength(20);
   });
 
   it('新增的两个工具都保持精简描述（护栏：描述长度是每轮都要付的成本）', () => {

@@ -6,9 +6,31 @@
 // 3. EXECUTE ACTION — click, type, setContent, select, etc.
 // ============================================================
 
+// 按 data-ai-id 找元素，**穿透影子根**。
+//
+// document.querySelector 不跨 shadow boundary：Web Component 里的元素（B站 opus
+// 的 <bili-comments>、YouTube 的 <ytd-*>、各设计系统的 <ui-*>）即使抽取层给了
+// data-ai-id，这里的顶层查询也找不到，报出来只是一句
+// "Target not found for ref: xxx" —— 看起来像"元素不存在"，实际是"查询路径够不着"。
+// 实测（2026-10-17）：B站帖子详情页的评论输入框就在 bili-comments 的 shadow root 里。
+function findRef(root, elementId) {
+  var el = null;
+  try { el = root.querySelector('[data-ai-id="' + elementId + '"]'); } catch (e) { el = null; }
+  if (el) return el;
+  var all;
+  try { all = root.querySelectorAll("*"); } catch (e) { return null; }
+  for (var i = 0; i < all.length; i++) {
+    var sr = all[i].shadowRoot;
+    if (!sr) continue;
+    var hit = findRef(sr, elementId);
+    if (hit) return hit;
+  }
+  return null;
+}
+
 function executeAction(elementId, action, params) {
   params = params || {};
-  var el = document.querySelector('[data-ai-id="' + elementId + '"]');
+  var el = findRef(document, elementId);
   if (!el) return { success: false, error: "Target not found for ref: " + elementId };
 
   try {
@@ -224,4 +246,4 @@ function doSetContent(el, text, format) {
   return { success: true, chars: innerText.length, blocks: editor.querySelectorAll ? editor.querySelectorAll("div, p").length : 0 };
 }
 
-module.exports = { executeAction };
+module.exports = { executeAction, findRef };
