@@ -19,7 +19,7 @@ const HELP = `ai-browser ${pkg.version}
 
 Usage:
   ai-browser [start]          Launch the visible AI Browser window
-  ai-browser mcp              Run the MCP stdio server (17 browse_* tools)
+  ai-browser mcp              Run the MCP stdio server (20 browse_* tools)
   ai-browser --version        Print version
   ai-browser --help           Show this help
 

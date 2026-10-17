@@ -11,14 +11,20 @@ semantic tree (roles / labels / values / actions, stable `data-ai-id` per elemen
 not screenshots. Input is trusted CDP keyboard/mouse events. A human can use the
 window's mouse and keyboard at any time (login, QR scan, CAPTCHA, payment).
 
-Two equivalent interfaces: **MCP stdio** (17 `browse_*` tools) and a raw WebSocket
+Two equivalent interfaces: **MCP stdio** (20 `browse_*` tools) and a raw WebSocket
 JSON-RPC API at `ws://localhost:9223` (`ui.*` methods).
 
 ## Requirements
 
 - Node.js **≥ 18**
 - A desktop session (GUI app): macOS or Linux. Windows is experimental/untested.
-- ~100 MB for the Electron binary (prepared on first launch / `npm install`, from GitHub releases).
+- ~110 MB download for the Electron engine (prepared on first launch / `npm install`, from GitHub
+  releases); it expands to ~242 MB on disk. Do not judge the install by the download size alone.
+
+> **Which channel should a human use?** If they just want to click the app, point them at the macOS
+> `.dmg` on the GitHub Releases page (README "Option C") — no Node.js needed. This npx path is for
+> agents and for machines that already have Node. The two cooperate: if the packaged app is already
+> running, the MCP server reuses it instead of downloading a second Electron.
 
 ## Install
 

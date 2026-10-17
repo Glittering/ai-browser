@@ -105,6 +105,41 @@ npm start
 A 1280×800 window opens and the terminal prints `AI Browser WS server listening on ws://localhost:9223`.
 (The first tab opens on the default start page; ignore it and navigate away.)
 
+### Option C — macOS install package (for humans, not agents)
+
+A prebuilt `.dmg` lives on the [GitHub Releases](https://github.com/Glittering/ai-browser/releases) page
+(~109 MB, expands to ~253 MB — most of it is the bundled Chromium engine, which *is* the product).
+Drag **AI Browser** to `/Applications` and launch it. No Node.js required.
+
+Two things to know before you download it:
+
+- **It is not notarized.** macOS Gatekeeper will refuse to open it on the first try. Right-click the
+  app → **Open**, confirm once, and it runs normally afterwards. (A paid Apple Developer account is
+  what removes this step; until then, this is the honest cost.)
+- **Use it as a *second* channel, not a replacement.** If you only drive the browser through an agent,
+  Option A (`npx`) is still the better fit — the version is managed by npm and the MCP config needs no
+  absolute path. The `.dmg` is for people who want a normal double-click app.
+
+The two channels cooperate: when the packaged app is already running, an `npx`-launched MCP server
+finds it on port 9223 and reuses it instead of downloading a second copy of Electron — so you get one
+browser, one login session, whichever way you start it.
+
+Only macOS `arm64` is built. Windows and Linux are not packaged yet, because neither has been
+verified on this project — see [Compatibility](#compatibility).
+
+To build the package yourself:
+
+```bash
+npm install
+node scripts/build_dmg.cjs              # current arch
+node scripts/build_dmg.cjs --arch arm64 # or x64
+```
+
+Output lands in `dist/`. The script uses `@electron/packager` plus macOS's built-in `hdiutil`
+(no external binary downloads); the reasoning — including why `electron-builder` refuses to build
+this project — is documented in
+[`docs/DEPENDENCY_AND_DISTRIBUTION_AUDIT.md`](docs/DEPENDENCY_AND_DISTRIBUTION_AUDIT.md).
+
 ---
 
 ## Connect your agent
