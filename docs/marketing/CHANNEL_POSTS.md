@@ -125,7 +125,7 @@ macOS/Linux 已测，Windows 还没测。欢迎拍砖，也特别想听听你们
 | 掘金长文 | D+2 | https://juejin.cn/post/7697024318929633320 | ✅ 2026-10-16 21:00 已发布（分类"人工智能"+标签"人工智能"）；草稿箱已无该文；踩坑：发布弹窗"添加标签"为必填（红*），缺标签时前端静默失败、仅弹行内错误"至少添加一个标签"，曾误判"发布成功" |
 | B 站视频 | D+2 | | 46s 竖屏已就绪 |
 | 头条 | D+3 | | 账号已登录 |
-| CSDN 博客 | D+1 | （未发布） | ❌ **2026-10-17 03:00 复核：此前记录的原因(草稿已存/发布按钮无响应/401)全部作废 —— 真相是登录态已丢失**。`editor.csdn.net/md/` 与 `mp.csdn.net` 均 302 到 `passport.csdn.net/login?code=applets`，`www.csdn.net` 顶部明写"未登录"；cookie 里只剩 `uuid_tt_dd`/`fid`/`UN` 等埋点 cookie，无 `UserName`/`UserInfo`/`UserToken`；`localStorage` 中也没有任何草稿残留 —— 所谓"5086 字已写入并自动存草稿"从未真正落到服务器，且当时未验证就写入记录。**发布按钮无响应的真因大概率是会话中途失效，而非 bizapi 401**（401 只是会话失效后同一现象的上游表现）。另有：高频自动化触发了 CSDN 滑块人机验证。**需本人重新登录一次，登录后由 agent 重新注入正文发布** |
+| CSDN 博客 | D+1 | https://blog.csdn.net/weixin_39287419/article/details/168241019 | ✅ **2026-10-17 13:40 已发布并验证**（标题正确、正文 13933 字、文章页可访问）。此前记录作废：登录态曾丢失导致误判，本次会话登录态恢复后重走全流程成功。**关键经验**：① 每步先 `ui.auth_state` 验登录态（本次新加的能力）；② 标签为 el-autocomplete，合成 `click()` 不吃，须 `ui.act press ArrowDown` + `Enter` 受信选中；③ `ui.evaluate` 不等 Promise，含 `await` 的 IIFE 会返回 `{}`，必须拆成"触发→等待→点选"两段式；④ 发布结果以 URL 跳到 `mp.csdn.net/mp_blog/creation/success/<id>` + 文章页 200 + 正文可读为准，不轻信 toast；⑤ 创作声明如实选"部分内容由AI辅助生成" |
 | 头条文章 | D+3 | https://www.toutiao.com/article/7697326423064773160/ | ✅ 2026-10-17 01:59 已提交，**02:40 已过审变为"已发布"**（pgc_id=7697326423064773160，首发标记）；走通「预览并发布→确认发布」两段式流程；ProseMirror 合成 paste（text/html）注入成功 |
 | B 站视频 | D+2 | https://www.bilibili.com/video/BV15RJb6oERJ/ | ✅ 2026-10-17 02:30 已投递成功（demo_vertical.mp4 + img_cover_bilibili.jpg 封面 + 标题/简介/6 标签/创作声明"内容无需标注"）；BV15RJb6oERJ 已分配、页面已上线（转码中，标题待同步）；提示"个人空间封面 16:9 未修"（4:3 已确认，可后续编辑修补） |
 | ~~linux.do~~ | — | — | ❌ 放弃（需推荐码） |

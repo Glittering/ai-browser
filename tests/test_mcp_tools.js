@@ -31,7 +31,7 @@ describe('MCP tool list (token-cost guard)', () => {
     //     连错误都没有 —— 最隐蔽的一类 success ≠ done。这个工具是让 agent 能问到
     //     "文件在哪儿"的唯一入口。下载是异步的，塞进 click 返回值会让 agent 在错的
     //     时间点看到空列表，所以必须是独立查询。
-    expect(MCP_TOOLS).toHaveLength(17);
+    expect(MCP_TOOLS).toHaveLength(18);
   });
 
   it('新增的两个工具都保持精简描述（护栏：描述长度是每轮都要付的成本）', () => {

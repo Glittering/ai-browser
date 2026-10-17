@@ -37,7 +37,25 @@ ipcRenderer.on("ai:extract", function(_event, params) {
     // Return empty fallback
     ipcRenderer.send("ai:tree", {
       tree: { id: "root", role: "generic", label: "[error: " + e.message + "]", states: ["visible"], actions: [], bounds: { x: 0, y: 0, width: 0, height: 0 } },
-      context: { modals: [], forms: [], session: {}, stats: {} },
+      context: { modals: [], forms: [], session: {}, auth_wall: null, stats: {} },
+      id: id
+    });
+  }
+});
+
+// Context-only request — 登录态 / 登录墙自查用（ui.auth_state）。
+// 只回 context，不建整棵树：长任务里每个关键步骤前都要问一次，建树的成本
+// （以及它带来的 token 成本）在这里纯属浪费。
+ipcRenderer.on("ai:context", function(_event, params) {
+  params = params || {};
+  var id = params.id;
+  try {
+    var ctx = extractPageContext();
+    ipcRenderer.send("ai:tree", { tree: null, context: ctx, id: id });
+  } catch(e) {
+    ipcRenderer.send("ai:tree", {
+      tree: null,
+      context: { modals: [], forms: [], session: {}, auth_wall: null, stats: {} },
       id: id
     });
   }

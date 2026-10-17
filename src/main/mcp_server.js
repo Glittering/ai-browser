@@ -246,6 +246,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return { content: [{ type: 'text', text: JSON.stringify(result) }] };
     }
 
+    case 'browse_auth_state': {
+      const result = await wsClient.call('ui.auth_state', { tab: args.tab });
+      return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+    }
+
     case 'browse_list_tabs': {
       const result = await wsClient.call('ui.list_tabs', {});
       return { content: [{ type: 'text', text: JSON.stringify(result) }] };

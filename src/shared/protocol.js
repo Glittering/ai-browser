@@ -59,6 +59,7 @@ export function parseMessage(msg) {
 export const VALID_METHODS = [
   'ui.get_tree',
   'ui.act',
+  'ui.auth_state',
   'ui.navigate',
   'ui.repaint',
   'ui.snapshot',

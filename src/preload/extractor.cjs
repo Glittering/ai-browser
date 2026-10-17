@@ -5,6 +5,7 @@
 var valueContract = require("../shared/value_contract.cjs");
 var truncateNodeValue = valueContract.truncateNodeValue;
 var sensitiveInputKind = valueContract.sensitiveInputKind;
+var authWallLib = require("../shared/auth_wall.cjs");
 
 // ============================================================
 // 1. EXTRACT TREE — DOM → semantic tree with bounds + states
@@ -898,20 +899,34 @@ function extractPageContext() {
   }
   var requiredHints = scanRequiredHints();
 
-  // SESSION — more robust detection
-  var hasPwdInput = document.querySelector("input[type=password]");
-  var bodyText = document.body.innerText || "";
-  var isLoginPage = bodyText.indexOf("登录") >= 0 || bodyText.indexOf("Sign In") >= 0 ||
-    document.title.indexOf("登录") >= 0 || document.URL.indexOf("login") >= 0 || document.URL.indexOf("signin") >= 0;
-  var hasAvatar = document.querySelector("[class*=avatar],img[class*=avatar],img[class*=user]");
-  // Cookie-based check
-  var hasLoginCookie = document.cookie.indexOf("token") >= 0 || document.cookie.indexOf("session") >= 0
-    || document.cookie.indexOf("auth") >= 0;
-  var loggedIn = !hasPwdInput && !isLoginPage && (hasAvatar !== null || hasLoginCookie || bodyText.length > 1000);
+  // SESSION / AUTH WALL — 见 src/shared/auth_wall.cjs 顶部的事故注释。
+  // 旧实现在这里犯过两个错，都已修正：
+  //   1. document.cookie.indexOf("token") >= 0 —— CSDN 未登录时 cookie 里有
+  //      csrfToken，子串命中，于是 logged_in 被判成 true（主动谎报）；
+  //   2. bodyText.length > 1000 也算登录证据 —— CSDN 登录页正文远超 1000 字。
+  // 现在 cookie 按名字判（csrf 类显式排除），并且新增顶层 auth_wall 硬信号。
+  var hasPwdInput = !!document.querySelector("input[type=password]");
+  var hasAvatar = !!document.querySelector("[class*=avatar],img[class*=avatar],img[class*=user]");
+  var authWall = authWallLib.detectAuthWall({
+    url: document.URL,
+    hasPasswordInput: hasPwdInput,
+  });
+  var login = authWallLib.looksLoggedIn({
+    url: document.URL,
+    hasPasswordInput: hasPwdInput,
+    hasAvatar: hasAvatar,
+    cookieString: document.cookie,
+  });
 
   return {
     title: document.title,
     url: document.URL,
+    // 登录墙硬信号。detected=true 时，任何"操作怎么没生效"的排查都该先停下：
+    // 当前 tab 大概率不在目标站点的工作页，而在它的登录页。
+    // reason: 'auth_host' | 'login_path' | 'password_field'；matched 是命中的那一段。
+    auth_wall: authWall.detected
+      ? { detected: true, reason: authWall.reason, matched: authWall.matched, url: document.URL }
+      : null,
     forms: formList.length ? formList : null,
     modals: modals.length ? modals : null,
     // 顶层报错/提示/必填：都不依赖容器 class 是否含 modal 关键词，普通页面也能读到。
@@ -923,7 +938,7 @@ function extractPageContext() {
     field_errors: fieldErrors.length ? fieldErrors : null,
     hints: topHints.length ? topHints : null,
     required_hints: requiredHints.length ? requiredHints : null,
-    session: { logged_in: loggedIn },
+    session: { logged_in: login.logged_in, evidence: login.evidence },
     stats: {
       inputs: document.querySelectorAll("input:not([type=hidden])").length,
       buttons: document.querySelectorAll("button").length,

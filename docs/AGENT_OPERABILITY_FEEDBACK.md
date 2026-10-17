@@ -181,11 +181,22 @@
 ## 5. 待办清单
 
 - [x] P0-2 输入校验假阴性 —— 已修，含单测，全量回归通过
+- [x] P1-3 登录态信号 —— 已修（`src/shared/auth_wall.cjs` + `context.auth_wall` + `ui.auth_state` + MCP `browse_auth_state`），真实站点 15/15 通过
 - [ ] P0-1 `ui.screenshot` / `browse_screenshot` 视口截图
 - [ ] P1-1 `get_tree` 跨帧自动路由（或至少给出 `frame_hints` 提示）
 - [ ] P1-2 `ui.act {action:'paste', html}`（含 OOPIF 支持）
-- [ ] P1-3 `context.auth_wall` + `ui.auth_state`
 - [ ] P2-1 列表行标题保留
 - [ ] P2-2 `states.required` / `states.invalid` / `context.validation_errors`
 - [ ] P2-3 `ui.navigate { wait_until }`
-- [ ] CSDN：登录态恢复后重新注入正文并发布（依赖真人登录一次）
+- [x] CSDN：登录态恢复后重新注入正文并发布 —— 已于 2026-10-17 13:40 完成
+
+### 5.1 P1-3 落地时新发现的两个调用侧坑（2026-10-17，修 CSDN 发布时实测）
+
+这两个不在原清单里，但都是这次真实撞上的，记下来避免重复踩：
+
+1. **`ui.evaluate` 不等 Promise。** 页面里写 `(async () => { await ...; return 'x' })()` 会原样返回一个 Promise 对象，序列化后是 `{}`。
+   任何"点了之后等一会儿再读"的逻辑都必须拆成两次调用（触发 → sleep → 点选），
+   或者改用支持等待的原语。这是本次 CSDN 标签/声明两次设置"看起来成功了其实没动"的直接原因。
+2. **`ui.act` 的 `target` 是 ref，不是 label。** 传 `target: '发布'` 会得到
+   `Target not found for ref: 发布` —— 调用方必须先 `ui.get_tree` 拿节点 id。
+   错误信息其实说清了（"for ref"），但第一次见到很容易以为支持文本标签。

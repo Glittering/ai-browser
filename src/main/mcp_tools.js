@@ -123,6 +123,18 @@ export const MCP_TOOLS = [
     }
   },
   {
+    name: 'browse_auth_state',
+    title: 'Check login / auth-wall state',
+    description: 'Is this tab still logged in, or bounced to a login wall? auth_wall.detected=true means stop debugging and re-authenticate first. logged_in is heuristic; auth_wall is the signal to trust.',
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tab: { type: 'integer', description: 'Tab id (default: active tab).' }
+      }
+    }
+  },
+  {
     name: 'browse_list_tabs',
     title: 'List tabs',
     description: 'List open tabs (id, url, title, active).',

@@ -517,6 +517,52 @@ class PageManager {
     return res;
   }
 
+  // 登录态 / 登录墙自查。长任务里每个关键步骤前都可以问一次，成本只是走一次
+  // extractPageContext（不建树）。
+  //
+  // 为什么单独开一个原语而不是让调用方自己去 getTree().context 里翻：CSDN 那次
+  // 事故里，登录态信息其实一直在 context 里，但它是个不显眼的小字段，且当时的
+  // 判定还是错的（csrfToken 子串命中 "token" → 谎报已登录）。显式暴露成
+  // "问一句就答一句"的原语，才能让"先验登录态"变成低成本的第一步。
+  async authState(tabId) {
+    const tid = tabId !== undefined ? tabId : this.activeTab;
+    const view = this._getView(tid);
+    if (!view) return { ok: false, error: 'no-such-tab', tab: tid };
+    try {
+      const res = await new Promise((resolve, reject) => {
+        const id = ++this._requestId;
+        this._pendingRequests.set(id, { resolve, reject });
+        view.webContents.send('ai:context', { id });
+        setTimeout(() => {
+          if (this._pendingRequests.has(id)) {
+            this._pendingRequests.delete(id);
+            reject(new Error('authState timeout'));
+          }
+        }, 5000);
+      });
+      const ctx = (res && res.context) || {};
+      const wall = ctx.auth_wall || null;
+      return {
+        ok: true,
+        tab: tid,
+        url: ctx.url || null,
+        auth_wall: wall,
+        // 兼容旧形状：session.logged_in 仍从 context 取，但语义已收紧（见
+        // shared/auth_wall.cjs）。auth_wall.detected 是硬事实，优先级高于它。
+        logged_in: ctx.session ? !!ctx.session.logged_in : null,
+        evidence: (ctx.session && ctx.session.evidence) || [],
+        // 一句话结论，方便直接读：调用方不必自己组合字段。
+        verdict: wall && wall.detected
+          ? 'AUTH_WALL — this tab is on a login page, not the site you meant to operate'
+          : (ctx.session && ctx.session.logged_in
+            ? 'looks-logged-in (heuristic)'
+            : 'not-logged-in (heuristic) — verify before continuing'),
+      };
+    } catch (e) {
+      return { ok: false, error: e.message, tab: tid };
+    }
+  }
+
   // AX probe read layer (P0). Additive — the default getTree path is untouched.
   // Reuses the per-tab shared debugger: enables the Accessibility + DOM domains
   // into the same reference-counted _cdpTabs entry as Network/Runtime, so teardown

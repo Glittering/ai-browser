@@ -301,6 +301,14 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
             send({ jsonrpc: '2.0', id, result });
             break;
           }
+          case 'ui.auth_state': {
+            // 登录态 / 登录墙自查。长任务里每个关键步骤前问一次，成本近似为零。
+            // auth_wall.detected=true 是硬事实（URL 命中登录域 / 页面上有密码框），
+            // 此时任何"操作没生效"的排查都该先停下 —— 你大概不在目标站点的工作页。
+            const result = await pageManager.authState(tabId);
+            send({ jsonrpc: '2.0', id, result });
+            break;
+          }
           case 'ui.peek': {
             // A (plan §9.5): safely reveal a folded/hoverable affordance and
             // return the AX diff. Non-committing (hover only).
