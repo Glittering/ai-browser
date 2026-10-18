@@ -183,12 +183,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         target: args.target,
         params: {
           text: args.text,
+          // paste：富文本 HTML。schema 里声明了这个字段，之前这里漏了转发 ——
+          // MCP 调用方传 html 会被静默丢弃，回执 "paste called with neither
+          // html nor text"。B站图文只能发纯文本版就是这个原因。
+          html: args.html,
           value: args.value,
           url: args.url,
           keep_tab: args.keep_tab,
           file: args.file,
           offset: args.offset,
           limit: args.limit,
+          timeout_ms: args.timeout_ms,
           // drag：终点与端点锚点。to_x/to_y 是绝对视口坐标（用于拖到空白处，
           // 例如平移画布）；to_target 是落到另一个元素上（例如连线）。
           // 这些名字与 raw WS 层完全一致 —— 归一由 page_manager._cdpDrag 单点负责，
