@@ -387,7 +387,7 @@ for (const name of deps) {
 | README / `llms-install.md` 写进 dmg 渠道 | ✅ **已完成（2026-10-18）**：README 的 Install 小节已重排为「Option A 安装包（推荐）→ Option B npx（agent 通道）→ Option C 源码（备选）」，并写明右键 → 打开、两渠道协同；`llms-install.md` 补了安装优先级说明 |
 | 代码签名 + 公证 | 未做，需要 $99/年 Apple 开发者账号 |
 | x64 架构的 dmg | 未构建（当前只打了 arm64）。`node scripts/build_dmg.cjs --arch x64` 可出，但未验证 |
-| 应用图标 | ✅ **已完成（2026-10-18）**，见下方第四节。注意：packager **不会**自动拾取 `build/icon.icns`，必须显式传 `icon` 选项 |
+| 应用图标 | ✅ **已完成（2026-10-19 改版，随 1.3.1 发布）**，见下方第四节。注意：packager **不会**自动拾取 `build/icon.icns`，必须显式传 `icon` 选项 |
 
 ### 第四节：应用图标（2026-10-18 初版，2026-10-19 改版）
 
