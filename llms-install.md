@@ -19,16 +19,20 @@ JSON-RPC API at `ws://localhost:9223` (`ui.*` methods).
 - Node.js **≥ 18**
 - A desktop session (GUI app): macOS or Linux. Windows is experimental/untested.
 - ~110 MB download for the Electron engine (prepared on first launch / `npm install`, from GitHub
-  releases); it expands to ~242 MB on disk. Do not judge the install by the download size alone.
+  releases); it expands to ~245 MB on disk. Do not judge the install by the download size alone.
 
-> **Which channel should a human use?** If they just want to click the app, point them at the macOS
-> `.dmg` on the GitHub Releases page (README "Option C") — no Node.js needed. This npx path is for
-> agents and for machines that already have Node. The two cooperate: if the packaged app is already
-> running, the MCP server reuses it instead of downloading a second Electron.
+> **Installation priority.** The prebuilt macOS `.dmg` (README "Option A") is the recommended
+> install for humans: one file, no Node.js, no dependency tree. The npx path below is for agents
+> and for machines that already have Node — it is also how the MCP server gets registered, so it
+> stays necessary even when the packaged app is installed. The two cooperate: if the packaged app
+> is already running, the MCP server reuses it on port 9223 instead of downloading a second
+> Electron. Source install is the fallback — only when no package fits, the package misbehaves,
+> or the code itself needs changes; it pulls ~276 MB of dependencies plus the engine.
 
 ## Install
 
-Preferred — npm package [`@glittering0717/ai-browser`](https://www.npmjs.com/package/@glittering0717/ai-browser),
+For agents (this is also the MCP bridge) — npm package
+[`@glittering0717/ai-browser`](https://www.npmjs.com/package/@glittering0717/ai-browser),
 no clone needed:
 
 ```bash
@@ -86,7 +90,7 @@ call can take longer if the engine download hasn't happened yet — the progress
 A long-lived shared window is also fine — run the `start` command manually; a second launch only
 focuses the existing window (single instance lock).
 
-## The 17 tools
+## The 20 tools
 
 - `browse_navigate` — load a URL in the active or given tab.
 - `browse_get_tree` — semantic tree + context (modals, toasts, required-field

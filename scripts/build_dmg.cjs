@@ -30,6 +30,7 @@
 
 const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 
 const root = path.resolve(__dirname, '..');
@@ -64,8 +65,12 @@ function parseArgs(argv) {
 //                   **就是** Electron，asar 里再放一份纯属浪费；src 里所有
 //                   `from 'electron'` 都由 Electron 内置模块系统解析，不经过
 //                   node_modules。（这一点和 electron-builder 的默认行为一致。）
+//   build/           图标母版与中间产物。打包只需要 build/icon.icns 这一个
+//                    文件（由下面的 icon 选项显式指定，从源目录读取），
+//                    目录里的 svg/png/iconset 都不该随包分发；src 里也没有
+//                    任何地方引用 build/。
 const IGNORE = new RegExp(
-  '(^|\\/)(\\.git|outputs|docs|e2e|tests|dist|node_modules\\/\\.cache|node_modules\\/\\.bin|node_modules\\/electron|tools\\/_oneoff)(\\/|$)'
+  '(^|\\/)(\\.git|outputs|docs|e2e|tests|dist|build|node_modules\\/\\.cache|node_modules\\/\\.bin|node_modules\\/electron|tools\\/_oneoff)(\\/|$)'
 );
 
 function run(cmd, args, opts = {}) {
@@ -95,6 +100,30 @@ function mb(bytes) {
   return (bytes / 1024 / 1024).toFixed(1) + ' MB';
 }
 
+// @electron/packager 默认走 downloadElectronZip 从 GitHub 拉 Electron zip。
+// 本机到 GitHub 的连接不稳定（间歇性 502 / fetch failed），而
+// ~/Library/Caches/electron/<hash>/ 下通常已经有下载好的 zip。
+// 这里探测缓存：有对应版本的 zip 就用 electronZipDir 指过去（packager 的
+// getElectronZipPath 见到这个选项就直接用本地文件，完全不联网），
+// 没有才回落到在线下载。注意 electronZipDir 要求目录里躺着
+// electron-v<version>-<platform>-<arch>.zip。
+function findElectronZipDir(version, platform, arch) {
+  const cacheRoot = path.join(os.homedir(), 'Library', 'Caches', 'electron');
+  const zipName = `electron-v${version}-${platform}-${arch}.zip`;
+  let entries = [];
+  try {
+    entries = fs.readdirSync(cacheRoot, { withFileTypes: true });
+  } catch (_) {
+    return null;
+  }
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    const dir = path.join(cacheRoot, e.name);
+    if (fs.existsSync(path.join(dir, zipName))) return dir;
+  }
+  return null;
+}
+
 function main() {
   const args = parseArgs(process.argv.slice(2));
   // @electron/packager v20 是纯 ESM（"type": "module" + exports 只指向 dist/index.js），
@@ -115,6 +144,15 @@ function build(packager, args) {
   console.log(`[build] ${APP_NAME} ${pkg.version} — darwin/${args.arch}`);
   console.log(`[build] ignore: ${IGNORE}`);
 
+  // electron 的实际版本以 node_modules 里装的那份为准（package.json 里是 ^ 范围）
+  const electronVersion = require('electron/package.json').version;
+  const zipDir = findElectronZipDir(electronVersion, 'darwin', args.arch);
+  if (zipDir) {
+    console.log(`[build] electron zip: 使用本地缓存 ${zipDir}（不联网）`);
+  } else {
+    console.log(`[build] electron zip: 本地无缓存，将从 GitHub 下载 v${electronVersion}`);
+  }
+
   packager({
     dir: root,
     name: APP_NAME,
@@ -123,14 +161,22 @@ function build(packager, args) {
     out: OUT_DIR,
     overwrite: true,
     ignore: IGNORE,
+    electronZipDir: zipDir || undefined,
     // 只打生产依赖：npm prune --production 会把 devDependencies（vitest、jsdom、
     // @electron/packager 自己）从安装包里剔掉。用户侧少一整套测试工具链。
     prune: true,
     asar: true,
     appBundleId: 'com.glittering.ai-browser',
     appCategoryType: 'public.app-categories.productivity',
-    // 没有图标资源（仓库里没有 .icns/.ico），用 Electron 默认图标。
-    // 要换图标：放一个 build/icon.icns，packager 会自动拾取。
+    // 图标必须显式传 icon 选项。@electron/packager 的 mac.js copyIcon() 在
+    // `!this.opts.icon` 时直接 return —— 它**不会**自动去 build/ 里找
+    // icon.icns（老版 electron-packager 的行为，v20 已经没有了）。
+    // normalizeIconExtension 只在源目录路径上 existsSync，与 IGNORE 无关，
+    // 所以 build/ 可以同时留在 ignore 列表里，不进安装包。
+    icon: path.join(root, 'build', 'icon.icns'),
+    // 图标母版是 build/icon.svg，由 scripts/render_icon.cjs 用项目自带的
+    // Chromium 栅格化，再经 sips + iconutil 打成 icns。改图标走这条链，
+    // 不要直接改 png。
   })
     .then((paths) => {
       const appPath = paths[0];

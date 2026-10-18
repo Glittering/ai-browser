@@ -11,7 +11,7 @@
   <img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue.svg">
   <img alt="Electron" src="https://img.shields.io/badge/built%20with-Electron%2033-9cf">
   <img alt="Platforms" src="https://img.shields.io/badge/platforms-macOS%20%E2%80%A2%20Linux-blueviolet">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-428%20unit%20%2B%20428%20e2e-2ea043">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-658%20unit%20%2B%20447%20e2e-2ea043">
   <img alt="MCP" src="https://img.shields.io/badge/spec-MCP%20(stdio)-f5b23b">
 </p>
 
@@ -28,7 +28,7 @@
 </p>
 
 **What it is.** An Electron app that exposes its tabs over two equivalent interfaces — an MCP server
-(17 `browse_*` tools) and a raw WebSocket JSON-RPC API (`ws://localhost:9223`, methods `ui.*`). Your
+(20 `browse_*` tools) and a raw WebSocket JSON-RPC API (`ws://localhost:9223`, methods `ui.*`). Your
 agent navigates, reads a structured semantic tree (`role` / `label` / `value` / `states` / `actions`),
 and clicks or types by `data-ai-id`. There is no screenshot step and no OCR: `src/` contains no
 capture call at all.
@@ -44,11 +44,36 @@ is a conversation between the agent and the user, not a browser API.
 
 ## Install
 
-Requires **Node ≥ 18** and a desktop session (this is a GUI app).
+**Install the prebuilt package unless you have a reason not to.** Option A is one file you
+double-click: no Node.js, no dependency tree, no build step. Source install (Option C) pulls a
+~276 MB `node_modules` plus a ~100 MB Electron engine download on top — only use it when no
+package fits your platform, the package misbehaves, or you specifically need to run from source.
 
-### Option A — npx (recommended for MCP users)
+### Option A — macOS install package (recommended)
 
-The package is published as [`@glittering0717/ai-browser`](https://www.npmjs.com/package/@glittering0717/ai-browser); no clone needed:
+Grab `AI-Browser-<version>-arm64.dmg` from
+[GitHub Releases](https://github.com/Glittering/ai-browser/releases) (~110 MB to download,
+~245 MB on disk — most of it is the bundled Chromium engine, which *is* the product). Open the
+dmg, drag **AI Browser** to `/Applications`, launch it. Done.
+
+Two things to know before you download it:
+
+- **It is not notarized.** macOS Gatekeeper will refuse to open it on the first try. Right-click
+  the app → **Open**, confirm once, and it runs normally afterwards. (A paid Apple Developer
+  account is what removes this step; until then, this is the honest cost.)
+- **Only macOS `arm64` is built.** Windows and Linux have no package yet, because neither has
+  been verified on this project — see [Compatibility](#compatibility).
+
+Agents still connect through the MCP server (Option B below), and the two channels cooperate:
+when the packaged app is already running, the MCP server finds it on port 9223 and **reuses it
+instead of spawning a second copy of Electron** — one browser, one login session, whichever way
+you start it. So "package for the engine + `npx` for the MCP bridge" is the normal agent setup
+too.
+
+### Option B — npx (the agent channel)
+
+The package is published as [`@glittering0717/ai-browser`](https://www.npmjs.com/package/@glittering0717/ai-browser);
+no clone needed:
 
 ```bash
 npx -y @glittering0717/ai-browser --help
@@ -60,16 +85,21 @@ To open the visible browser window directly:
 npx -y @glittering0717/ai-browser start
 ```
 
-The first launch prepares the Electron engine (~100 MB, downloaded once). npm ≥ 11 blocks
-dependency install scripts by default — the launcher detects that and runs Electron's own
-downloader itself, so nothing extra is needed. If the download from GitHub releases is slow or
-blocked (common on mainland-China networks), point it at a mirror:
+Requires **Node ≥ 18** and a desktop session (this is a GUI app). If a launch needs its own
+engine, the first run prepares it (~100 MB, downloaded once). npm ≥ 11 blocks dependency install
+scripts by default — the launcher detects that and runs Electron's own downloader itself, so
+nothing extra is needed. If the download from GitHub releases is slow or blocked (common on
+mainland-China networks), point it at a mirror:
 
 ```bash
 ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ npx -y @glittering0717/ai-browser start
 ```
 
-### Option B — from source
+### Option C — from source (fallback)
+
+Use this when there is no package for your platform, the package gives you trouble, or you need
+to modify the code. It is the heaviest of the three: `npm install` pulls the full dependency
+tree (~276 MB), then the Electron engine (~100 MB) on top.
 
 ```bash
 git clone https://github.com/Glittering/ai-browser.git
@@ -89,8 +119,8 @@ Or make it sticky by creating a `.npmrc` in the project root:
 electron_mirror=https://npmmirror.com/mirrors/electron/
 ```
 
-Confirm the binary actually landed before blaming anything else — a missing binary still leaves you
-with an "install that succeeded":
+Confirm the binary actually landed before blaming anything else — a missing binary still leaves
+you with an "install that succeeded":
 
 ```bash
 ls node_modules/electron/dist
@@ -104,28 +134,6 @@ npm start
 
 A 1280×800 window opens and the terminal prints `AI Browser WS server listening on ws://localhost:9223`.
 (The first tab opens on the default start page; ignore it and navigate away.)
-
-### Option C — macOS install package (for humans, not agents)
-
-A prebuilt `.dmg` lives on the [GitHub Releases](https://github.com/Glittering/ai-browser/releases) page
-(~109 MB, expands to ~253 MB — most of it is the bundled Chromium engine, which *is* the product).
-Drag **AI Browser** to `/Applications` and launch it. No Node.js required.
-
-Two things to know before you download it:
-
-- **It is not notarized.** macOS Gatekeeper will refuse to open it on the first try. Right-click the
-  app → **Open**, confirm once, and it runs normally afterwards. (A paid Apple Developer account is
-  what removes this step; until then, this is the honest cost.)
-- **Use it as a *second* channel, not a replacement.** If you only drive the browser through an agent,
-  Option A (`npx`) is still the better fit — the version is managed by npm and the MCP config needs no
-  absolute path. The `.dmg` is for people who want a normal double-click app.
-
-The two channels cooperate: when the packaged app is already running, an `npx`-launched MCP server
-finds it on port 9223 and reuses it instead of downloading a second copy of Electron — so you get one
-browser, one login session, whichever way you start it.
-
-Only macOS `arm64` is built. Windows and Linux are not packaged yet, because neither has been
-verified on this project — see [Compatibility](#compatibility).
 
 To build the package yourself:
 
@@ -164,8 +172,9 @@ can instead point `command: "node"` at `/absolute/path/to/ai-browser/src/main/mc
 **You do not need to start the browser yourself.** On the first `browse_*` call the MCP server probes
 port 9223; if nothing is listening it spawns Electron detached and waits up to 30 seconds for the
 WebSocket server (the very first call may additionally spend time preparing the engine). If you would
-rather keep one long-lived window shared by every client, run `npx -y @glittering0717/ai-browser start`
-(or `npm start` from source) in a terminal — a second launch just focuses the existing window.
+rather keep one long-lived window shared by every client, launch the **AI Browser** app you installed
+in Option A (or run `npx -y @glittering0717/ai-browser start`, or `npm start` from source) — a second
+launch just focuses the existing window.
 
 `examples/AGENT_INSTRUCTIONS.md` has a copy-paste prompt you can drop into a `CLAUDE.md`, Cursor Rule,
 or any system prompt; it teaches the tool loop, the token-saving params, and when to ask a human.

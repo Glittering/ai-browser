@@ -383,11 +383,33 @@ for (const name of deps) {
 
 | 项 | 状态 |
 |---|---|
-| CI 打 tag 自动构建 dmg 并挂 GitHub Release | 未做。`ci.yml` 目前只有单测；且 CI 产物同样是未签名/未公证的 |
-| README / `llms-install.md` 写进 dmg 渠道 | **部分已做**：README 加了安装包小节并写明「右键 → 打开」；`llms-install.md` 待补一句「人用 dmg、agent 用 npx」 |
+| CI 打 tag 自动构建 dmg 并挂 GitHub Release | 未做。`ci.yml` 目前只有单测；且 CI 产物同样是未签名/未公证的。1.3.0 的 dmg 目前只在构建机本地 |
+| README / `llms-install.md` 写进 dmg 渠道 | ✅ **已完成（2026-10-18）**：README 的 Install 小节已重排为「Option A 安装包（推荐）→ Option B npx（agent 通道）→ Option C 源码（备选）」，并写明右键 → 打开、两渠道协同；`llms-install.md` 补了安装优先级说明 |
 | 代码签名 + 公证 | 未做，需要 $99/年 Apple 开发者账号 |
 | x64 架构的 dmg | 未构建（当前只打了 arm64）。`node scripts/build_dmg.cjs --arch x64` 可出，但未验证 |
-| 应用图标 | 仓库里没有 `.icns`，目前用 Electron 默认图标。放一个 `build/icon.icns` 即可被 packager 自动拾取 |
+| 应用图标 | ✅ **已完成（2026-10-18）**，见下方第四节。注意：packager **不会**自动拾取 `build/icon.icns`，必须显式传 `icon` 选项 |
+
+### 第四节：应用图标（2026-10-18 追加）
+
+设计：`build/icon.svg`（1024² 母版）—— 紫色渐变圆角方块里一个白色浏览器窗口，窗口里是一棵
+**语义节点树**。产品主张是「人看像素，agent 读语义树」，图标就是这句话的字面解。
+两层构成保证 16px 下剪影仍可辨（树糊成一团，但"方块里有结构"读得出来）。
+
+一键重建链：`scripts/render_icon.cjs`（在 Electron 下运行）——SVG → 2048² PNG → 10 个
+iconset 尺寸 → `build/icon.icns`。用项目自带的 Chromium 渲染，零新增依赖；中间位图已进
+`.gitignore`，只提交母版 SVG 和 icns。
+
+**两个值得记住的发现：**
+
+1. **`@electron/packager` 不会自动拾取 `build/icon.icns`。** `mac.js` 的 `copyIcon()` 在
+   `!this.opts.icon` 时直接 return——v20 早已没有老版 electron-packager 的约定。
+   （本文档第三步表格里原来写的"放一个 build/icon.icns 即可被 packager 自动拾取"是**错的**，
+   按那条做出来的是默认原子图标。必须显式 `icon: 'build/icon.icns'`。）
+2. **`npx asar extract-file <archive> <路径>` 会把文件平铺写到当前目录，静默覆盖同名文件。**
+   我为了核对包内版本跑了 `asar extract-file app.asar package.json`，它把 asar 里那份
+   **被 packager 按设计净化过的** package.json（删掉 devDependencies/scripts/publishConfig）
+   覆盖到了仓库根目录的源文件上。要核对包内文件，先 `cd` 到一个空目录再跑。
+   （dmg 本身是在覆盖之前构建的，产物无损；源文件已从 git 恢复。）
 
 ### 不做（以及为什么）
 

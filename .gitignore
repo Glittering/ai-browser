@@ -6,6 +6,11 @@ dist/
 Electron.app/
 cache/
 screenshots/
+# 图标链的可再生产物：母版 build/icon.svg 与构建输入 build/icon.icns 要提交，
+# 中间位图由 scripts/render_icon.cjs 一键重建，不入库。
+build/icon.png
+build/icon@2x.png
+build/icon.iconset/
 # 验证过程落盘的截图等证据产物（outputs/verify-YYYY-MM-DD/）。只作当场取证用，
 # 不进仓库 —— 一次验收就能到几十 MB。
 outputs/

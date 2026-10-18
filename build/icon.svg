@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!--
+    AI Browser 图标母版（build/icon.svg）
+
+    设计意图：产品的核心主张是"给人看像素，给 agent 读语义树"。所以图标就是一个
+    浏览器窗口，但窗口里不是一坨抽象网页，而是一棵**结构化的节点树** ——
+    "同一个页面，但看得懂"。
+
+    构成只有两层，保证 16px 下仍可辨认：
+      ① 圆角方块 + 渐变（品牌色块，远看是一个紫色方块）
+      ② 白色窗口 + 节点树（近看才知道是"浏览器里的结构"）
+    交通灯圆点是"窗口"的最强暗示，尺寸给到最小，小尺寸下自然融为纹理。
+
+    配色：靛蓝 #4F46E5 → 紫 #7C3AED（同色系推移，不引第三色相）。
+  -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4F46E5"/>
+      <stop offset="1" stop-color="#7C3AED"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- ① 满出血圆角方块：macOS 不会替图标重新裁切，形状必须自己画 -->
+  <rect x="0" y="0" width="1024" height="1024" rx="229" fill="url(#bg)"/>
+  <ellipse cx="300" cy="230" rx="560" ry="500" fill="url(#glow)"/>
+
+  <!-- ② 浏览器窗口：尺寸贴合树，留白控制在 42px 左右。
+       窗口比树大一大圈的话，树就变成"窗口里的小图案"，图标立刻显虚。 -->
+  <rect x="216" y="292" width="592" height="458" rx="58" fill="#FFFFFF" fill-opacity="0.97"/>
+  <line x1="244" y1="364" x2="780" y2="364" stroke="#E7E9F2" stroke-width="3"/>
+  <circle cx="260" cy="328" r="14" fill="#FF5F57"/>
+  <circle cx="300" cy="328" r="14" fill="#FFBD2E"/>
+  <circle cx="340" cy="328" r="14" fill="#28C840"/>
+
+  <!-- 语义树：连线先画，节点后画，节点盖住线头，不用算切点。
+       横纵比控制在 1.5:1 左右才像"树"，拉成 2:1 就变成一张网。
+       节点和线必须给足分量 —— 图标缩到 16px 时，细线会直接消失。 -->
+  <g stroke="#6366F1" stroke-width="20" stroke-linecap="round">
+    <line x1="512" y1="435" x2="372" y2="579"/>
+    <line x1="512" y1="435" x2="652" y2="579"/>
+    <line x1="372" y1="579" x2="288" y2="699"/>
+    <line x1="372" y1="579" x2="456" y2="699"/>
+    <line x1="652" y1="579" x2="568" y2="699"/>
+    <line x1="652" y1="579" x2="736" y2="699"/>
+  </g>
+  <circle cx="512" cy="435" r="50" fill="#4338CA"/>
+  <circle cx="372" cy="579" r="40" fill="#6366F1"/>
+  <circle cx="652" cy="579" r="40" fill="#6366F1"/>
+  <circle cx="288" cy="699" r="30" fill="#A5B4FC"/>
+  <circle cx="456" cy="699" r="30" fill="#A5B4FC"/>
+  <circle cx="568" cy="699" r="30" fill="#A5B4FC"/>
+  <circle cx="736" cy="699" r="30" fill="#A5B4FC"/>
+</svg>
