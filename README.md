@@ -1,6 +1,10 @@
 <h1 align="center">AI Browser</h1>
 
 <p align="center">
+  <b>中文读者请看这里：<a href="README-CN.md">README-CN.md（3 分钟速读 + 中文安装指引）</a></b>
+</p>
+
+<p align="center">
   <b>A real browser whose only operator is your agent.</b><br>
   It reads pages as a semantic tree instead of screenshots, acts through trusted browser input —
   and because it is a normal, visible Electron window, a human can reach for the mouse at any time.
