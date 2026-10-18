@@ -102,7 +102,13 @@ export function createWsClient({
 
         // Attempt failed — release this socket's connect-phase listeners fully so
         // its later error/close can't touch live state (MW-4).
-        try { ws.removeAllListeners(); ws.close(); } catch (_e) {}
+        // ⚠️ close() 一个还在 CONNECTING 的 socket 会异步再发一次 'error'
+        // （"WebSocket was closed before the connection was established"）。
+        // removeAllListeners 把 connect-phase 的 once('error') 也摘了，这个迟到
+        // 的 error 就没有监听器 → EventEmitter 直接 throw → 整个 MCP server 进程
+        // 崩掉，lazy launch 重试循环根本走不到（表现为"首次调用必崩"）。
+        // 挂一个 no-op error 兜底：迟到事件只被吞掉，不影响 MW-4 的状态隔离。
+        try { ws.removeAllListeners(); ws.on('error', () => {}); ws.close(); } catch (_e) {}
         const err = connectionErr || new Error('connection refused');
         // eslint-disable-next-line no-console
         if (attempt > 0 && attempt % 4 === 0) console.error('[mcp] ws reconnect attempt', attempt, '-', err.message);
