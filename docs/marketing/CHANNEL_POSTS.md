@@ -131,3 +131,4 @@ macOS/Linux 已测，Windows 还没测。欢迎拍砖，也特别想听听你们
 | ~~linux.do~~ | — | — | ❌ 放弃（需推荐码） |
 | ~~NodeSeek~~ | — | — | ❌ 放弃（需推荐码） |
 | B 站图文（专栏） | D+2 | https://www.bilibili.com/opus/1259878383752314888 | ✅ 2026-10-17 03:00 已发布（标题《给 AI 装了一个"浏览器"，它自己会写稿发稿了》，正文 2589 字）。**关键纠正**：此前判定"B站文章编辑器 SPA 挂空、不可用"是错的 —— 真正入口是 `/platform/upload/text/edit`（会 302 到 `/text/new-edit`），正文编辑器在**跨进程 iframe** `member.bilibili.com/york/read-editor` 里，`ui.get_tree` 必须带 `ax:true` 才会做 OOPIF 合并并暴露 `editor=richtext` 节点，同时要等足 ~25s。走 image=封面非必填；话题弹窗搜索无候选已跳过。发布后出现"点击查看"按钮，随后自动跳转 `upload-manager/opus` |
+| 简书文章 | 10-19 凌晨 | （编辑器地址 /writer#/notebooks/42785779/notes/60414375，公开链接待从个人主页取回） | ✅ 2026-10-19 02:00 已发布（《我不再让 AI 看截图了》2276 字，ai-browser 填写+发布全流程自动）；经验：①简书编辑器是 `.kalamu-area` contenteditable + `input._24i7u` 标题框；②paste 需要语义树 target（`browse_act paste target=ax-xxx`）；③type 也需要 target；④正文可直接 type Markdown 源文本，简书原样保留 |
