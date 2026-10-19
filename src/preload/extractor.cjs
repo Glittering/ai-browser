@@ -18,6 +18,25 @@ var frameProbe = require("../shared/frame_probe.cjs");
 // （旧元素沿用自身 data-ai-id，新元素却可能生成出同名的号），所以它只增不减。
 var AI_ID_SEQ = 0;
 
+// document.cookie 在 **opaque origin** 上会**抛 SecurityError**，不是返回空串。
+// 哪些页面是 opaque origin：about:blank、sandbox 属性的 iframe、data: 文档、
+// 导航失败后 Chromium 留下的空白页。
+//
+// 2026-10-19 实测事故：`ui.new_tab` 给一个打不开的域名，标签页停在 about:blank，
+// 于是 extractPageContext 在这里抛 SecurityError，**整个抽取器崩掉**，
+// bridge 的兜底把异常文本塞进一个节点当树返回 —— 调用方看到的是"页面只有
+// 一个节点"，而不是"读数失败"。一个可选字段（cookie 只用于登录态启发式）
+// 炸掉了整条读路径，这是纯粹的自伤。
+function readCookieSafely() {
+  try {
+    return document.cookie || "";
+  } catch (e) {
+    // 拿不到就当没有：登录态判定本来就把"没有 cookie 证据"当作未登录倾向，
+    // 这个降级方向是安全的（宁可说"需要确认登录"，不可谎报已登录）。
+    return "";
+  }
+}
+
 // ---- 必填 / 已判错（P2-2）----------------------------------------------
 // 这两条判定同时服务两处输出：语义树的 node.states 与 context.fields[].required。
 // 两个地方必须给同一个答案 —— 树里说"可选"而 context 说"必填"，比只给一处更糟。
@@ -1389,7 +1408,7 @@ function extractPageContext() {
     url: document.URL,
     hasPasswordInput: hasPwdInput,
     hasAvatar: hasAvatar,
-    cookieString: document.cookie,
+    cookieString: readCookieSafely(),
   });
 
   return {
@@ -1426,7 +1445,24 @@ function extractPageContext() {
       inputs: document.querySelectorAll("input:not([type=hidden])").length,
       buttons: document.querySelectorAll("button").length,
       links: document.querySelectorAll("a[href]").length,
-      iframes: document.querySelectorAll("iframe").length
+      // 没有 href 的锚点（onclick / JS 驱动）。它们仍然是可点目标，而 a[href]
+      // 数不到 —— 超星泛雅的章节条目就是这一类。只报 links 会让人以为这页
+      // 一个链接都没有（实测该页 links=2、links_without_href=6）。
+      links_without_href: (function() {
+        try { return document.querySelectorAll("a:not([href])").length; } catch(e) { return 0; }
+      })(),
+      iframes: document.querySelectorAll("iframe").length,
+      // 页面**看得见的文字**总量 —— 文字覆盖率的分母（见 shared/doc_coverage.js）。
+      // 用 innerText 而不是 textContent：前者是浏览器算出来的"渲染后可见文字"，
+      // display:none / 折叠 / visibility:hidden 都不算。
+      // 它和上面几个 querySelectorAll 在同一次页面内扫描里，没有额外 IPC 往返；
+      // innerText 会触发一次布局，但这次读数只在 get_tree 时发生。
+      text_chars: (function() {
+        try {
+          var t = document.body && document.body.innerText;
+          return t ? String(t).replace(/[\s\u00a0]+/g, " ").trim().length : 0;
+        } catch(e) { return 0; }
+      })()
     }
   };
 }

@@ -209,4 +209,37 @@ describe('context.modals[].fields[] — 与 forms[].fields[] 同构', () => {
     const f = ((ctx.modals || [])[0].fields || [])[0];
     expect(f.error).toBe('姓名不能为空');
   });
+
+  // ------------------------------------------------------------------
+  // CTX-026：opaque origin 上 document.cookie 会**抛** SecurityError，
+  // 不是返回空串。2026-10-19 实测：ui.new_tab 给一个打不开的域名，
+  // 标签页停在 about:blank（opaque origin），extractPageContext 在
+  // `cookieString: document.cookie` 处抛出，**整个抽取器崩掉** ——
+  // bridge 的兜底把异常文本塞进一个节点当树返回，调用方看到的是
+  // "页面只有一个节点"，而不是"读数失败"。
+  //
+  // 一条可选的启发式字段（cookie 只喂登录态判定）炸掉整条读路径，
+  // 属于纯粹的自伤。这里钉住：拿不到 cookie 时要降级，不许崩。
+  // ------------------------------------------------------------------
+  it('CTX-026: document.cookie 抛异常（opaque origin）时，context 仍返回', () => {
+    document.body.innerHTML = '<div id="w">课程门户</div>';
+    renderAll();
+    Object.defineProperty(document, 'cookie', {
+      configurable: true,
+      get() {
+        throw new Error("Failed to read the 'cookie' property from 'Document': Access is denied for this document.");
+      },
+    });
+    try {
+      const ctx = ns.extractPageContext();
+      expect(ctx).toBeTruthy();
+      expect(ctx.stats).toBeTruthy();
+      expect(ctx.title).toBe(document.title);
+      // 降级方向必须是"不确定"，不能是"已登录"：拿不到 cookie 证据时
+      // 谎报已登录会让调用方在登录页上继续操作。
+      expect(ctx.session && ctx.session.logged_in).not.toBe(true);
+    } finally {
+      delete document.cookie; // 移除实例上的 getter，恢复原型上的 accessor
+    }
+  });
 });

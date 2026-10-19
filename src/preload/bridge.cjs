@@ -46,10 +46,16 @@ ipcRenderer.on("ai:extract", function(_event, params) {
     ipcRenderer.send("ai:tree", { tree: tree, context: ctx, id: id });
   } catch(e) {
     console.error("[bridge] extractTree crash:", e.message, e.stack);
-    // Return empty fallback
+    // 兜底必须**声明自己是兜底**。
+    // 旧实现只把异常文本塞进一个节点的 label 就当树返回了：调用方看到一张
+    // "只有一个节点、没有可操作元素"的页面，无从判断是"页面本来就空"还是
+    // "我们没读成"。2026-10-19 实测在 about:blank 上就踩到了（document.cookie
+    // 在 opaque origin 抛 SecurityError），而那一刻 page_coverage 也只能给
+    // null —— 又一个"失败"和"没内容"长得一样的例子。
+    // 现在 read_ok/read_error 显式写进 context，main 侧会保留它。
     ipcRenderer.send("ai:tree", {
       tree: { id: "root", role: "generic", label: "[error: " + e.message + "]", states: ["visible"], actions: [], bounds: { x: 0, y: 0, width: 0, height: 0 } },
-      context: { modals: [], forms: [], session: {}, auth_wall: null, stats: {} },
+      context: { modals: [], forms: [], session: {}, auth_wall: null, stats: {}, read_ok: false, read_error: String(e && e.message || e) },
       id: id
     });
   }
@@ -67,7 +73,7 @@ ipcRenderer.on("ai:context", function(_event, params) {
   } catch(e) {
     ipcRenderer.send("ai:tree", {
       tree: null,
-      context: { modals: [], forms: [], session: {}, auth_wall: null, stats: {} },
+      context: { modals: [], forms: [], session: {}, auth_wall: null, stats: {}, read_ok: false, read_error: String(e && e.message || e) },
       id: id
     });
   }
