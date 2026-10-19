@@ -10,6 +10,7 @@
     "bin",
     "scripts",
     "src",
+    "skills",
     "tools/coverage_probe.cjs",
     "examples/AGENT_INSTRUCTIONS.md",
     "examples/mcp-config.json",

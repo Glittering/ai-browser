@@ -13,7 +13,7 @@
 // 优化方案见 docs/PLAN_SKILL_API_V2.md。
 
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { MCP_TOOLS } from '../src/main/mcp_tools.js';
@@ -99,5 +99,65 @@ describe('API 预算：工具 schema 的每轮固定成本', () => {
       expect(typeof t.description, `${t.name} 缺 description`).toBe('string');
       expect(t.description.trim().length, `${t.name} 的 description 是空的`).toBeGreaterThan(8);
     }
+  });
+});
+
+// ── 技能包预算 ──────────────────────────────────────────────────────────
+// 入口文档是"冷启动必须读的那一段"。它一旦膨胀，就会退回到 2026-10 之前那种
+// "新会话先读 3,000 token 才知道怎么开始"的状态，所以在这里卡死。
+// 深层知识放 references/，按需读，不受这个预算约束。
+const ENTRY_BUDGET_BYTES = 2_600;
+const MAX_REFERENCES = 6;
+
+const skillsRoot = join(ROOT, 'skills');
+const skillDirs = readdirSync(skillsRoot, { withFileTypes: true })
+  .filter((d) => d.isDirectory() && existsSync(join(skillsRoot, d.name, 'SKILL.md')))
+  .map((d) => d.name);
+
+describe('技能包：能否被客户端"装一次、之后自动发现"', () => {
+  it('S-1: skills/ 必须随 npm 包分发（曾经漏发，导致用户永远拿不到技能）', () => {
+    const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
+    expect(pkg.files, 'package.json 的 files 里没有 skills —— 用户装不到技能').toContain('skills');
+  });
+
+  it('S-2: 至少有一个技能，且每个技能都有合法 frontmatter', () => {
+    expect(skillDirs.length).toBeGreaterThan(0);
+    for (const s of skillDirs) {
+      const md = readFileSync(join(skillsRoot, s, 'SKILL.md'), 'utf8');
+      expect(md.startsWith('---'), `${s}/SKILL.md 缺 frontmatter`).toBe(true);
+      const fm = md.slice(3, md.indexOf('\n---', 3));
+      expect(/^name:\s*\S+/m.test(fm), `${s} 缺 name`).toBe(true);
+      expect(/^description:/m.test(fm), `${s} 缺 description`).toBe(true);
+      // description 是唯一决定"要不要加载这个技能"的东西，太空就没法触发了
+      expect(fm.length, `${s} 的 description 太短，触发不了`).toBeGreaterThan(120);
+    }
+  });
+
+  it('S-3: 入口 SKILL.md 不超预算（冷启动成本闸门）', () => {
+    const entry = join(skillsRoot, 'ai-browser', 'SKILL.md');
+    const bytes = readFileSync(entry).length;
+    console.log(`\n  入口 SKILL.md ${bytes} B ≈ ${Math.round(bytes / 1.9)} token（预算 ${ENTRY_BUDGET_BYTES} B）`);
+    expect(bytes, `入口 SKILL.md ${bytes}B 超过预算 ${ENTRY_BUDGET_BYTES}B`).toBeLessThanOrEqual(
+      ENTRY_BUDGET_BYTES
+    );
+  });
+
+  it('S-4: 入口里链接的 references 必须真实存在（死链会让 agent 卡在半路）', () => {
+    const entryDir = join(skillsRoot, 'ai-browser');
+    const md = readFileSync(join(entryDir, 'SKILL.md'), 'utf8');
+    const links = [...md.matchAll(/references\/[\w.-]+\.md/g)].map((m) => m[0]);
+    expect(links.length, '入口没有指向任何 reference，深层知识无处可去').toBeGreaterThan(0);
+    for (const rel of links) {
+      expect(existsSync(join(entryDir, rel)), `死链：${rel}`).toBe(true);
+    }
+    const refs = readdirSync(join(entryDir, 'references')).filter((f) => f.endsWith('.md'));
+    expect(refs.length, 'references 太多，等于没分层').toBeLessThanOrEqual(MAX_REFERENCES);
+  });
+
+  it('S-5: 兜底说明书必须够小（它是应急卡片，不是教程）', () => {
+    const p = join(ROOT, 'examples', 'AGENT_INSTRUCTIONS.md');
+    const bytes = readFileSync(p).length;
+    console.log(`  兜底 AGENT_INSTRUCTIONS.md ${bytes} B ≈ ${Math.round(bytes / 1.9)} token`);
+    expect(bytes, `兜底说明书 ${bytes}B 又长回去了（曾经 12,168B）`).toBeLessThanOrEqual(3_200);
   });
 });

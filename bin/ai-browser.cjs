@@ -4,6 +4,7 @@
 //   ai-browser            launch the visible browser window (foreground)
 //   ai-browser start      same
 //   ai-browser mcp        run the MCP stdio server (used by MCP clients)
+//   ai-browser skill      list / install bundled agent skills
 //   ai-browser --version
 //   ai-browser --help
 //
@@ -20,12 +21,17 @@ const HELP = `ai-browser ${pkg.version}
 Usage:
   ai-browser [start]          Launch the visible AI Browser window
   ai-browser mcp              Run the MCP stdio server (20 browse_* tools)
+  ai-browser skill [list|install|print]
+                              Install the bundled agent skills into your client
   ai-browser --version        Print version
   ai-browser --help           Show this help
 
 The browser exposes:
   • MCP server over stdio (this command's "mcp" subcommand)
   • Raw WebSocket JSON-RPC on ws://localhost:9223 (ui.* methods)
+
+Agent skills ship in this package. Install them once with "ai-browser skill install"
+and every new session picks them up automatically — no manual instruction pasting.
 
 Docs: https://github.com/Glittering/ai-browser
 `;
@@ -53,6 +59,12 @@ async function main() {
       // Importing the module starts the stdio server (its main() runs on load).
       const serverPath = path.join(__dirname, '..', 'src', 'main', 'mcp_server.js');
       await import(pathToFileURL(serverPath).href);
+      break;
+    }
+    case 'skill': {
+      // 技能装进客户端的技能目录 —— 装一次，之后每次新会话自动发现。
+      const { run } = require('../scripts/skill.cjs');
+      process.exit(run(argv.slice(1)));
       break;
     }
     case '--version':
