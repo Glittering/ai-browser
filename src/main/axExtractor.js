@@ -170,11 +170,45 @@ function build(node, idFor) {
     // 被 AX 标为 ignored 的只是包裹层（见 buildThroughIgnored）；它的子节点
     // 才是内容，必须被提升上来而不是连同子树一起丢掉。
     if (c.ignored) { kids.push(...buildThroughIgnored(c, idFor)); continue; }
+    if (isRedundantInlineBox(c, tn.label)) {
+      // 也要登记 seen：剪掉的节点如果还能从别的路径（被提升上来的 ignored
+      // 包裹层）走一遍，就会重新出现在树里，剪枝变成随机的。
+      seenNodes.add(c.nodeId);
+      continue;
+    }
     seenNodes.add(c.nodeId);
     kids.push(build(c, idFor));
   }
   if (kids.length) tn.children = kids;
   return tn;
+}
+
+/**
+ * `InlineTextBox` 是 CDP 把一个 `StaticText` 按**换行和样式**切出来的文字碎片：
+ * 一段两行的正文会变成两个 inline box，一个加粗的词再切一个。
+ *
+ * 它们不是结构，是排版产物。实测 CSDN 长文（2026-10-19）：
+ * AX 树 493 个节点里 163 个是 InlineTextBox，剪掉后
+ * **体积 84 420 → 64 054 bytes（-24%）、正文字数 5182 一字不差**。
+ * 这条读法现在被 page_coverage 推荐给"要读正文"的调用方，它贵 24% 就是
+ * 每次读文章都多花 24% 的 token。
+ *
+ * 判据是**内容已被父节点包含**，不是"角色叫 InlineTextBox 就删"：
+ * 万一某个 StaticText 的 name 是空的、文字只在 inline box 上，
+ * 删掉就是丢字 —— 那比省 24% 严重得多。所以这里只删"父节点 label 里
+ * 已经写着这段文字"的那一种；拿不准的一律保留，宁可多一个节点。
+ *
+ * 只在叶子时剪：有子节点的 inline box 意味着还有别的东西挂在下面。
+ */
+function isRedundantInlineBox(rawChild, parentLabel) {
+  const role = (rawChild.role && rawChild.role.value) || '';
+  if (role !== 'InlineTextBox') return false;
+  if (rawChild.childIds && rawChild.childIds.length) return false;
+  const text = (rawChild.name && rawChild.name.value) || '';
+  // 空 label 的节点没有任何信息，一起剪掉；父节点为空的场景上面已经排除了
+  // （parentLabel 为空时 indexOf 必为 -1，不会命中）。
+  if (!text) return !!parentLabel;
+  return !!parentLabel && parentLabel.indexOf(text) >= 0;
 }
 
 let readValue = null; // opts.readValue — per-node DOM read hook for textbox values

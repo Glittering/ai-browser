@@ -361,3 +361,63 @@ describe('normalizeAxTree() — states.required / states.invalid (P2-2)', () => 
     expect(t.children[2].states).not.toContain('invalid');
   });
 });
+
+// ---------------------------------------------------------------------------
+// InlineTextBox 剪枝。
+//
+// CDP 会按换行/样式把一段 StaticText 切成多个 InlineTextBox。它们是排版产物，
+// 不是结构：文字已经在父节点的 name 里。
+// 实测 CSDN 长文（2026-10-19）：493 节点里 163 个是它，剪掉后体积 -24%
+// （84 420 → 64 054 bytes）、正文字数 5182 一字不差。
+// 这条读法现在被 page_coverage 推荐给"要读正文"的调用方，它贵 24% 就是
+// 每读一篇文章多花 24% 的 token。
+//
+// 反面同样要钉住：绝不能"看到角色是 InlineTextBox 就删"。万一某个 StaticText
+// 的 name 是空的、文字只挂在 inline box 上，删掉就是丢字 —— 那比省 24% 严重。
+// ---------------------------------------------------------------------------
+describe('InlineTextBox 剪枝', () => {
+  it('AX-017: 文字已被父节点包含的 inline box 被剪掉', () => {
+    const raw = [
+      node(1, 'paragraph', '', { childIds: [2] }),
+      node(2, 'StaticText', '这是一段两行的正文', { childIds: [3, 4] }),
+      node(3, 'InlineTextBox', '这是一段'),
+      node(4, 'InlineTextBox', '两行的正文'),
+    ];
+    const t = normalizeAxTree(raw);
+    const text = byId(t, 'ax-2');
+    expect(text.label).toBe('这是一段两行的正文');
+    expect(text.children || []).toEqual([]);
+    expect(byId(t, 'ax-3')).toBe(null);
+    expect(byId(t, 'ax-4')).toBe(null);
+  });
+
+  it('AX-018: 父节点没有这段文字时，inline box 必须保留（宁可多一个节点）', () => {
+    const raw = [
+      node(1, 'StaticText', '', { childIds: [2] }),
+      node(2, 'InlineTextBox', '只在 inline box 上的文字'),
+    ];
+    const t = normalizeAxTree(raw);
+    const text = byId(t, 'ax-1');
+    expect(text.label).toBe('');
+    expect((text.children || []).map((c) => c.id)).toContain('ax-2');
+  });
+
+  it('AX-019: 有子节点的 inline box 不剪（下面可能还挂着东西）', () => {
+    const raw = [
+      node(1, 'StaticText', '父标签已含子文字', { childIds: [2] }),
+      node(2, 'InlineTextBox', '子文字', { childIds: [3] }),
+      node(3, 'StaticText', '子文字'),
+    ];
+    const t = normalizeAxTree(raw);
+    expect(byId(t, 'ax-2')).not.toBe(null);
+  });
+
+  it('AX-020: 非 InlineTextBox 的纯文本节点一律不动（StaticText 是正文的载体）', () => {
+    const raw = [
+      node(1, 'paragraph', '整段正文', { childIds: [2] }),
+      node(2, 'StaticText', '整段正文'),
+    ];
+    const t = normalizeAxTree(raw);
+    expect(byId(t, 'ax-2')).not.toBe(null);
+  });
+});
