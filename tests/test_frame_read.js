@@ -128,6 +128,31 @@ describe('子帧内容读取器 — 没有可点元素的正文', () => {
     expect(out.nodes.map((n) => n.label)).toContain('已完成');
   });
 
+  it('FR-6b: 标题里套 span 时不能丢字（"已完成任务点: 0/4"）', () => {
+    // 实测：只取元素自己的直接文本子节点会得到 "已完成任务点: /4" —— 数字在
+    // <span> 里，而那个数字是这一行唯一有用的信息。
+    const out = run('<h3>已完成任务点: <span>0</span>/4</h3>');
+    expect(out.nodes[0].role).toBe('heading');
+    expect(out.nodes[0].label).toBe('已完成任务点: 0/4');
+  });
+
+  it('FR-6c: 可交互行让位给它里面的 <a>（否则一个章节在树里出现两次）', () => {
+    // 实测结构：<div role="link" tabindex="0">1.1 标题 <b>1</b></div> 里面包着
+    // <a>1.1 标题</a>。两个都能点、文字几乎一样，全留下 6 个章节会变成 12 个节点。
+    const out = run('<div role="link" tabindex="0"><a>1.1 标题</a><b>1</b></div>');
+    expect(out.nodes).toHaveLength(1);
+    expect(out.nodes[0].role).toBe('link');
+    expect(out.nodes[0].label).toBe('1.1 标题');
+  });
+
+  it('FR-6d: javascript:void(0) 不算地址（否则调用方会拿它去 navigate）', () => {
+    const out = run('<a href="javascript:void(0)">章节</a><a href="https://x.test/real">真链接</a>');
+    const js = out.nodes.find((n) => n.label === '章节');
+    const real = out.nodes.find((n) => n.label === '真链接');
+    expect(js.url).toBeUndefined();
+    expect(real.url).toBe('https://x.test/real');
+  });
+
   it('FR-7: 空的/纯布局的帧返回 null 而不是空壳（合并方据此跳过）', () => {
     const out = run('<div><div><span></span></div></div>');
     expect(out).toBe(null);

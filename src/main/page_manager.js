@@ -1474,6 +1474,14 @@ class PageManager {
     }
 
     const preloadRes = await this._executeViaPreload(action, target, params, tid);
+    // preload 只在**顶层文档**里查 data-ai-id。目标住在跨进程帧里时，它必然
+    // 报 Target not found —— 而树里明明有那个 ref（focus 就是这样：click/type
+    // 各自有 OOPIF 分支，focus 没有）。这里补一次帧内原生动作，只在"找不到"
+    // 时触发，不去抢其它失败原因的处理权。
+    if (preloadRes && preloadRes.success === false && isTargetMissError(preloadRes.error)) {
+      const inFrame = await this._actInOwningFrame(view, action, target, tid);
+      if (inFrame) return inFrame;
+    }
     // preload 合成点击也可能触发 window.open → 新 tab，同样回报 opened_tab。
     if (action === 'click' && preloadRes && preloadRes.success) {
       preloadRes.opened_tab = await this._awaitOpenedTab(tid, params.keep_tab === true, actionStartedAt, params, target);
@@ -1483,6 +1491,41 @@ class PageManager {
       preloadRes.clicked_via = 'preload-click';
     }
     return preloadRes;
+  }
+
+  // === 帧内原生动作（跨进程子帧里那些"preload 够不到"的动作）===
+  // 只处理少数几个有明确原生等价物的动作，并且**只在顶层报 target miss 后**
+  // 调用。返回 null 表示"不是我该管的"，让原错误照常上报。
+  // 为什么不在这里补 type/paste/upload：它们各自有 OOPIF 分支（受信输入、
+  // 合成 ClipboardEvent、DOM.setFileInputFiles），抢过来只会绕开那些更可靠的实现。
+  async _actInOwningFrame(view, action, target, tabId) {
+    if (action !== 'focus' && action !== 'click') return null;
+    let frame = null;
+    try { frame = await this._owningFrameFor(view, target, tabId); } catch (_) { frame = null; }
+    if (!frame) return null;
+    const js = `(function(){
+      var el=${findRefExpr(JSON.stringify(String(target)))};
+      if(!el) return {__miss:true};
+      if(${JSON.stringify(action)}==='focus'){
+        try{ el.scrollIntoView({block:'nearest',behavior:'instant'}); }catch(e){}
+        try{ el.focus(); }catch(e){}
+        return {success:true, focused: document.activeElement===el};
+      }
+      try{ el.scrollIntoView({block:'center',behavior:'instant'}); }catch(e){}
+      try{ el.click(); }catch(e){ return {success:false, error:String(e&&e.message||e).slice(0,200)}; }
+      return {success:true};
+    })()`;
+    try {
+      const r = await frame.executeJavaScript(js);
+      if (!r || r.__miss) return null;
+      if (r.success === false) return { success: false, error: r.error || 'frame action failed', method: 'frame-js' };
+      const out = { success: true, target, method: 'frame-js' };
+      if (action === 'click') out.clicked_via = 'frame-native';
+      else out.focused = r.focused !== false;
+      return out;
+    } catch (e) {
+      return null;
+    }
   }
 
   // === 只读取全量 node.value（ui.act {action:'get_value'}）===

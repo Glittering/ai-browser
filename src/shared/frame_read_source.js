@@ -56,14 +56,6 @@ function frameRead(prefix) {
   function norm(s) {
     return String(s == null ? '' : s).replace(/[\s\u00a0]+/g, ' ').trim();
   }
-  function ownText(el) {
-    var s = '';
-    for (var i = 0; i < el.childNodes.length; i++) {
-      var c = el.childNodes[i];
-      if (c && c.nodeType === 3) s += c.nodeValue;
-    }
-    return norm(s);
-  }
   function clip(s) {
     return s.length > LABEL_CAP ? s.slice(0, LABEL_CAP - 1) + '\u2026' : s;
   }
@@ -116,7 +108,10 @@ function frameRead(prefix) {
       else if (tag === 'TEXTAREA') editor_type = 'textarea';
       else if (tag === 'INPUT') editor_type = 'textbox';
       var url = '';
-      if (tag === 'A' && e.href) url = String(e.href);
+      // `href="javascript:void(0)"` 不是地址，是"点我"的另一种写法。照搬进树里
+      // 会让调用方以为可以拿它去 navigate（然后失败），也会让它以为这个链接有
+      // 真实目标。丢掉它，节点仍然是 link + click。
+      if (tag === 'A' && e.href && !/^\s*javascript:/i.test(String(e.href))) url = String(e.href);
       picked.push({
         el: e, interactive: true, role: role, label: clip(label), editor_type: editor_type, url: url,
         bounds: { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) }
@@ -124,11 +119,11 @@ function frameRead(prefix) {
       continue;
     }
 
-    // 内容块：**先取自己的直接文本**。祖先（li 里套 p、td 里套 span）如果自己
-    // 没有直接文本，它的文字一定来自后代 —— 交给后代去说，避免同一句话在树里
-    // 出现两三次。没有直接文本时才回落到 innerText（很多站点的标题是
-    // <h2><span>...</span></h2>，span 不在选择器里，回落才不会漏）。
-    var t = ownText(e) || norm(e.innerText || '');
+    // 内容块：用 innerText（含后代文字）。**不能用"只取直接文本"**：超星的
+    // "已完成任务点: <span>0</span>/4" 是 <h3> 里套 span，只取直接文本会得到
+    // "已完成任务点: /4" —— 数字丢了，而这正是这一行唯一有用的信息。
+    // 祖先重复的问题不靠这里解决，靠下面第二趟"祖先让位给后代"。
+    var t = norm(e.innerText || e.textContent || '');
     if (!t) continue;
     var crole = 'text';
     if (tag === 'H1' || tag === 'H2' || tag === 'H3' || tag === 'H4' || tag === 'H5' || tag === 'H6' || aria === 'heading') crole = 'heading';
@@ -140,22 +135,50 @@ function frameRead(prefix) {
     });
   }
 
-  // 第二趟：内容块让位给后代。一个 li 包着 a，留下 a；一个 td 包着 p，留下 p。
-  // 只对内容块做这个判断 —— 可交互节点是动作目标，不能因为包着别人就消失。
+  // 第二趟：祖先让位给后代 —— 谁更具体谁留下。
+  //
+  // 实测（超星泛雅章节行）：一行是
+  //   <div role="link" tabindex="0" class="catalog_title">1.1 标题 <b>1</b></div>
+  //     └─ <a class="clicktitle">1.1 标题</a>
+  // 两个都能点、文字几乎一样。全留下 = 6 个章节变成 12 个节点，全是噪声。
+  //
+  // 规则按"谁更可能是真正的动作目标"来分：
+  //   可交互 ← 可交互：留**里面那个**（里面的是 a/button，是最精确的目标；
+  //                  外面那层通常是整行包装，点里面那层照样冒泡上去）
+  //   内容块 ← 任何后代：留后代（后代的文字更具体，祖先只是把它们拼在一起）
+  //   可交互 ← 内容块：留可交互，内容块让位（否则"链接"和它里面的"标题"各来一次）
   var kept = [];
   for (var i = 0; i < picked.length; i++) {
     var it = picked[i];
     var shadowed = false;
-    if (!it.interactive) {
-      for (var j = 0; j < picked.length; j++) {
-        if (j === i) continue;
-        var o = picked[j];
-        if (o.el === it.el) continue;
-        try { if (it.el.contains(o.el)) { shadowed = true; break; } } catch (e3) { /* 跨文档不会发生 */ }
-      }
+    for (var j = 0; j < picked.length; j++) {
+      if (j === i) continue;
+      var o = picked[j];
+      if (o.el === it.el) continue;
+      try {
+        if (!it.el.contains(o.el)) continue; // o 不是 it 的后代
+      } catch (e3) { continue; /* 跨文档不会发生 */ }
+      if (o.interactive || !it.interactive) { shadowed = true; break; }
     }
     if (!shadowed) kept.push(it);
   }
+
+  // 第二趟半：内容块如果被某个**活着的**可交互祖先包着，也让位。
+  var final = [];
+  for (var f = 0; f < kept.length; f++) {
+    var node0 = kept[f];
+    if (!node0.interactive) {
+      var underInteractive = false;
+      for (var g = 0; g < kept.length; g++) {
+        var o2 = kept[g];
+        if (g === f || !o2.interactive) continue;
+        try { if (o2.el.contains(node0.el)) { underInteractive = true; break; } } catch (e5) { /* ignore */ }
+      }
+      if (underInteractive) continue;
+    }
+    final.push(node0);
+  }
+  kept = final;
 
   // 第三趟：产出节点。**两类都写 data-ai-id**：树里出现的 ref 必须能用
   // ui.act / ui.evaluate 路由回这个帧（见 page_manager._owningFrame）。
