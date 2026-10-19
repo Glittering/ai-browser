@@ -701,6 +701,16 @@ It exits non-zero below 80% so you can drop it into CI. Measured on 2026-10-17 (
 CSDN): **82% / 97% / 88%** before the click-boundary fix, **100% / 100% / 100%** after, at ~40ms
 per `ui.get_tree`.
 
+> **Those three numbers were measuring the wrong denominator.** Until 2026-10-19 the tool only
+> counted the top document: on a page whose body lives in a cross-process iframe it reported
+> "4 click targets, 100% usable, 0 gaps" while the entire course catalogue was invisible. It now
+> measures every `frame-N` it can reach and **prints how many frames it could not** — an
+> unmeasured area inside the denominator is worse than a wrong measurement. Re-measured
+> 2026-10-19: Baidu 100%, CSDN 99% (8 cross-process frames now counted, 2 residual gaps),
+> and the 超星 course page 82% with the 2 remaining gaps named explicitly. The write-up of this
+> class of mistake — a metric that silently excludes the part that matters — is
+> [`docs/POSTMORTEM_FRAME_VISIBILITY.md`](docs/POSTMORTEM_FRAME_VISIBILITY.md).
+
 Two things the numbers do **not** cover, so you do not chase them: an element the page gives no
 readable name (image-only links with no `alt` — 53% of Bilibili's clickable nodes) can never get a
 label without inventing one, and a canvas has no DOM to read at all. Those are genuine boundaries,

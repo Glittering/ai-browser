@@ -18,6 +18,10 @@ outputs/
 # archive it so CI/repros don't break, keep the one real asset tracked.
 tools/**
 !tools/browser.cjs
+# coverage_probe.cjs 是 README 里写明的覆盖度量入口（低于 80% 退出码 1，可进 CI）。
+# 它被 tools/** 一并忽略过，于是文档教用户跑一个仓库里根本不存在的脚本 ——
+# 和这次事故同一个毛病：说法和事实不一致。它属于"真资产"，跟着 browser.cjs 一起跟踪。
+!tools/coverage_probe.cjs
 # 一次性调试探针请勿提交到 e2e/：只跑一次的定位脚本请挪到 tools/_oneoff/（已被 tools/** 忽略，只移不删）。
 e2e/_probe/**
 # 发稿物料里的一次性抓包正文与二进制配图不进仓库，避免 git add -A 误提交。
