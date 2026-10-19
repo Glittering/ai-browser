@@ -23,16 +23,15 @@ contextBridge.exposeInMainWorld("__ai_browser__", {
   sendDiff: function(changes) { ipcRenderer.send("ai:diff", changes); },
   // window.open 垫片的桥（主 world 侧脚本见 main/window_open_shim_source.js）。
   // contextIsolation 下 preload 改不了页面的 window.open（那是 isolated
-  // world 的 window），所以垫片本体由 CDP 注入进主 world，只把这三个
-  // fire-and-forget 的出口经 contextBridge 暴露给它。
-  windowOpen: function(token, url, name) {
-    ipcRenderer.send("ai:window_open", { token: token, url: url, name: name || "" });
-  },
-  windowOpenNav: function(token, url) {
-    ipcRenderer.send("ai:window_open_nav", { token: token, url: url });
-  },
-  windowOpenClose: function(token) {
-    ipcRenderer.send("ai:window_open_close", { token: token });
+  // world 的 window），所以垫片本体由 CDP 注入进主 world，只把这一个
+  // 出口经 contextBridge 暴露给它。
+  // ⚠️ arity 必须固定为 4：contextBridge 两岸参数数量不一致时调用会抛错
+  // （实测：垫片少传一个参数 → 抛错被 catch 吞掉 → window.open 静默返回
+  // null，站点拿到的还是"弹窗被拦"的老症状）。垫片侧所有调用都传满 4 个。
+  windowOpenBridge: function(op, token, url, name) {
+    if (op === 'open') ipcRenderer.send('ai:window_open', { token: token, url: url, name: name || '' });
+    else if (op === 'nav') ipcRenderer.send('ai:window_open_nav', { token: token, url: url });
+    else if (op === 'close') ipcRenderer.send('ai:window_open_close', { token: token });
   }
 });
 

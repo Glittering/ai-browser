@@ -2782,9 +2782,8 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     // 导航阶段发出的 POST 全部丢失 —— agent 永远拿不到它们的请求体。
     // 关闭开关：AI_BROWSER_NETWORK_CAPTURE=0 或 ui.network_configure{enabled:false}。
     this._ensureNetworkCapture(tabId, view);
-    // window.open 垫片：与抓包同理，必须在**首次导航之前**注入，否则首屏
-    // 页面脚本拿到的 window.open 是原生的（站点首屏就绑定点击行为的场景）。
-    this._ensureWindowOpenShim(tabId, view);
+    // window.open 垫片不在这里调：它返回的 Promise 要被下面的首次导航等
+    // （见文件末尾 navWhenShimReady），在这里提前调会消耗掉首次注入。
 
     // Mask automation fingerprint: remove Electron from UA
     view.webContents.setUserAgent(config.userAgent);
@@ -2814,11 +2813,35 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
       // （configure({reload:true}) 可以补齐）。
       const install = () => { this._ensureCanvasHook(tabId, view).catch(() => false); };
       view.webContents.once('did-finish-load', install);
-      if (url) {
-        view.webContents.loadURL(url);
-      }
-    } else if (url) {
-      view.webContents.loadURL(url);
+    }
+    // window.open 垫片注入：CDP 命令在**未导航的空 webContents** 上会挂住
+    // （实测 Page.enable 都 1.5s 不 resolve —— renderer 没就绪，命令无人
+    // 处理）。所以先 load about:blank 把 renderer 垫起来，did-finish-load
+    // 后再发注入命令，最后才 loadURL 真实 URL —— 这样首屏 document 一定
+    // 带着垫片（addScriptToEvaluateOnNewDocument 注册后跨导航持久）。
+    // 占位 tab（window.open 的空窗口，url=null）就停在 about:blank 等
+    // location 赋值来导航；赋值到达时注入通常早已完成（源页面 ajax 往返
+    // 至少几十毫秒），基本不存在竞态。
+    const wc0 = view.webContents;
+    const targetUrl = url || null;
+    if (wc0 && !wc0.isDestroyed()) {
+      let proceeded = false;
+      const proceed = () => {
+        if (proceeded) return;
+        proceeded = true;
+        Promise.resolve(this._ensureWindowOpenShim(tabId, view)).finally(() => {
+          if (targetUrl && wc0 && !wc0.isDestroyed()) {
+            wc0.loadURL(targetUrl).catch(() => {});
+          }
+        });
+      };
+      // 兜底：about:blank 的 did-finish-load 万一来不了（renderer 异常、
+      // 视图尚未 attach 等），也不能把真实导航永久挂住——1.2s 后照常放行，
+      // 最坏退化成"首屏没有垫片"（与修复前一致），而不是打不开页面。
+      const guard = setTimeout(proceed, 1200);
+      if (guard.unref) guard.unref();
+      wc0.loadURL('about:blank').catch(() => {});
+      wc0.once('did-finish-load', () => { clearTimeout(guard); proceed(); });
     }
 
     // Force repaint after load — BrowserView content can be loaded but not
@@ -3484,34 +3507,50 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
 
   // window.open 垫片注入（见 window_open_shim_source.js 顶部注释）。
   // contextIsolation 下 preload 改不了页面可见的 window.open，只能经
-  // Page.addScriptToEvaluateOnNewDocument 注入主 world。命令必须在 tab 的
-  // 首次 loadURL 之前发（newTab 里紧挨 _ensureNetworkCapture 调用），否则
-  // 首屏页面脚本绑定的就是原生 window.open。
+  // Page.addScriptToEvaluateOnNewDocument 注入主 world。
+  //
+  // ⚠️ 必须在 renderer 就绪后调用：未导航的空 webContents 上 CDP 命令无人
+  // 处理会挂住（实测 Page.enable 1.5s 不 resolve）。newTab 的做法是先
+  // load about:blank，did-finish-load 后再调这里。
   // 幂等：每个 tab 只注册一次（_windowOpenShimTabs 记账）；跨导航自动保留
   // 正是 addScriptToEvaluateOnNewDocument 的语义，不需要重复注册。
   _ensureWindowOpenShim(tabId, view) {
-    if (this._windowOpenShimTabs.has(tabId)) return;
-    try {
-      const wc = view.webContents;
-      if (!wc || typeof wc.debugger?.attach !== 'function') return;
-      if (!this._cdpTabs.has(tabId)) {
-        wc.debugger.attach('1.3');
-        const entry = { wc, domains: new Set() };
-        this._cdpTabs.set(tabId, entry);
-        wc.debugger.on('message', (_event, method, params) => this._onCdpMessage(tabId, method, params));
-      }
-      // 异步命令，不等结果：注入失败的最坏后果是退化为原生 window.open
-      // （deny → null），与不装垫片之前一致，不阻塞 tab 创建。
-      Promise.resolve(wc.debugger.sendCommand('Page.addScriptToEvaluateOnNewDocument', {
-        source: WINDOW_OPEN_SHIM_SOURCE,
-        runForSubFrames: true,
-      })).catch((e) => {
+    if (this._windowOpenShimTabs.has(tabId)) return Promise.resolve(true);
+    this._windowOpenShimTabs.add(tabId);
+    // async IIFE：注入要 await（Page.enable → addScript 有序），但函数本身
+    // 仍返回 Promise（调用方 .finally 等它）。
+    return (async () => {
+      try {
+        const wc = view.webContents;
+        if (!wc || typeof wc.debugger?.attach !== 'function') return false;
+        if (!this._cdpTabs.has(tabId)) {
+          wc.debugger.attach('1.3');
+          const entry = { wc, domains: new Set() };
+          this._cdpTabs.set(tabId, entry);
+          wc.debugger.on('message', (_event, method, params) => this._onCdpMessage(tabId, method, params));
+        }
+        // ⚠️ 必须先 Page.enable：Page 域 agent 未启用时，
+        // addScriptToEvaluateOnNewDocument 发出去会**挂住不回**（实测 1.5s
+        // 超时也不 resolve，首屏页面因此永远拿不到垫片）。enable 后再注入。
+        await withDeadline(
+          wc.debugger.sendCommand('Page.enable'),
+          1500,
+          'window_open_page_enable'
+        );
+        await withDeadline(
+          wc.debugger.sendCommand('Page.addScriptToEvaluateOnNewDocument', {
+            source: WINDOW_OPEN_SHIM_SOURCE,
+            runForSubFrames: true,
+          }),
+          1500,
+          'window_open_shim_inject'
+        );
+        return true;
+      } catch (e) {
         console.error('[window_open] shim inject failed:', tabId, e && e.message);
-      });
-      this._windowOpenShimTabs.add(tabId);
-    } catch (e) {
-      console.error('[window_open] shim setup failed:', tabId, e && e.message);
-    }
+        return false;
+      }
+    })();
   }
 
   // 抓包用的 Network 域：默认在 tab 创建后、首个导航前启用。
