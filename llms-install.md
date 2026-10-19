@@ -11,8 +11,9 @@ semantic tree (roles / labels / values / actions, stable `data-ai-id` per elemen
 not screenshots. Input is trusted CDP keyboard/mouse events. A human can use the
 window's mouse and keyboard at any time (login, QR scan, CAPTCHA, payment).
 
-Two equivalent interfaces: **MCP stdio** (20 `browse_*` tools) and a raw WebSocket
-JSON-RPC API at `ws://localhost:9223` (`ui.*` methods).
+Two equivalent interfaces: **MCP stdio** (17 `browse_*` tools) and a raw WebSocket
+JSON-RPC API at `ws://localhost:9223` (`ui.*` methods). A CLI (`ai-browser call ui.xxx`) speaks
+the same JSON-RPC and needs **no registration at all** — see "Fastest path" below.
 
 ## Requirements
 
@@ -65,6 +66,28 @@ ls node_modules/electron/dist   # must contain Electron.app (macOS)
 Optional end-to-end check: `npx -y @glittering0717/ai-browser start` (or `npm start` from source) opens
 a 1280×800 window and logs `AI Browser WS server listening on ws://localhost:9223`.
 
+## Fastest path — works with zero registration
+
+If you just need to drive the browser now, skip the MCP section entirely. The CLI reaches the
+same engine, and **starts the browser itself if it is not running** (idempotent; no separate
+`start` step):
+
+```bash
+npm i -g @glittering0717/ai-browser     # or: npm link  (from a source checkout)
+ai-browser call ui.navigate '{"url":"https://example.com"}'
+ai-browser call ui.get_tree '{"subset":"interactive"}'
+ai-browser call ui.act '{"action":"click","target":"e:a-3"}'
+```
+
+No global install? Prefix every command with `npx -y @glittering0717/ai-browser`.
+
+Why this matters more than it looks: registering an MCP server passes through **three gates the
+agent does not control** — the config file, a one-time trust/approval for executing a local
+program, and the client's tool snapshot taken at session start. If any one of them has not
+completed, `browse_*` simply does not exist in the tool list, and the symptom is identical to
+"the capability is not installed". A weaker model then spends a long time concluding it is
+misconfigured. The CLI has none of those gates: it only needs the command to run.
+
 ## Register as an MCP server
 
 Add this to the client config (Claude Desktop config, `~/.cursor/mcp.json`, project `.mcp.json`,
@@ -105,7 +128,7 @@ call can take longer if the engine download hasn't happened yet — the progress
 A long-lived shared window is also fine — run the `start` command manually; a second launch only
 focuses the existing window (single instance lock).
 
-## The 20 tools
+## The 17 tools
 
 - `browse_navigate` — load a URL in the active or given tab.
 - `browse_get_tree` — semantic tree + context (modals, toasts, required-field
@@ -142,10 +165,24 @@ focuses the existing window (single instance lock).
   `switch` sets the default target for later calls, so you rarely pass `tab`.
 - `browse_quit` — shut the whole browser down and release the process.
 
-Prefer MCP when an agent client drives the browser. For shell / CI / debugging there is a CLI
-that speaks the same JSON-RPC: `ai-browser status`, `ai-browser call ui.list_tabs`,
-`ai-browser call ui.navigate '{"url":"..."}'`. One implementation, three doors — no separate
-script needed to call a method.
+**Which door should you use?** Prefer the **CLI** unless the tool list already contains
+`browse_*`. MCP is a nicer interface (schemas are self-describing) but it is not under your
+control; the CLI is. Both hit one implementation (`page_manager`) — there is no capability that
+only exists over MCP.
+
+```bash
+ai-browser status                                   # is it running? pid / port / tabs
+ai-browser ensure                                   # start it if needed, then exit
+ai-browser call ui.list_tabs
+ai-browser call ui.navigate '{"url":"..."}'
+```
+
+CLI method names are the tool names with `browse_` → `ui.` (`get_tree`, `act`, `navigate`,
+`evaluate`, `scroll`, `wait`, `screenshot`, `errors`, `capabilities`, `downloads`, `quit`,
+`auth_state`, `repaint`). The four that do not map one-to-one: `tabs` → `ui.list_tabs` /
+`ui.new_tab` / `ui.close_tab` / `ui.set_active_tab`; `network` → `ui.network_list` /
+`ui.network_get`; `canvas` → `ui.canvas_list` / `ui.canvas_read` / `ui.canvas_capture` /
+`ui.canvas_configure`; `diff` → `ui.snapshot` / `ui.diff`.
 
 There is no `browse_subscribe` and no `browse_network_body`: real-time events are
 raw-WebSocket only (`ui.subscribe`), because MCP stdio drops server→client

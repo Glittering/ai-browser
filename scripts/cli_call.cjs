@@ -22,25 +22,33 @@
 // 选项：
 //   --port <n>       默认 9223（也读 AI_BROWSER_WS_PORT）
 //   --timeout <ms>   默认 30000
+//   --no-start       连不上**不要**自动拉起浏览器（脚本里想快速失败时用）
 //   --compact        单行输出（默认就是紧凑 JSON，加这个只是显式）
 //   --pretty         缩进输出（给人看时用）
+//
+// 关于自动拉起（2026-10-20 改）：`call` 连不上时默认会先把浏览器拉起来再重试一次。
+// 理由：agent 装完包应该一条命令就能干活，而不是先学"要 start 再 call"两步。
+// `status` 不这么做 —— 它问的是"在跑吗"，回答了"不在"才算答对。
 'use strict';
 
 const WS_PORT_DEFAULT = 9223;
 const TIMEOUT_DEFAULT = 30000;
 
 function parseArgs(argv) {
-  const out = { port: null, timeout: TIMEOUT_DEFAULT, pretty: false, rest: [] };
+  const out = { port: null, timeout: TIMEOUT_DEFAULT, pretty: false, start: true, rest: [] };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--port') { out.port = Number(argv[++i]); continue; }
     if (a === '--timeout') { out.timeout = Number(argv[++i]); continue; }
     if (a === '--pretty') { out.pretty = true; continue; }
     if (a === '--compact') { out.pretty = false; continue; }
+    if (a === '--no-start') { out.start = false; continue; }
     out.rest.push(a);
   }
   if (!out.port || !Number.isFinite(out.port)) {
-    const envPort = Number(process.env.AI_BROWSER_WS_PORT);
+    // AI_BROWSER_PORT 是 Electron 侧（src/shared/config.js）用的名字，读它才和
+    // "AI_BROWSER_PORT=9701 ai-browser ensure" 这种用法对得上；WS_PORT 是历史别名。
+    const envPort = Number(process.env.AI_BROWSER_PORT ?? process.env.AI_BROWSER_WS_PORT);
     out.port = Number.isFinite(envPort) && envPort > 0 ? envPort : WS_PORT_DEFAULT;
   }
   if (!Number.isFinite(out.timeout) || out.timeout <= 0) out.timeout = TIMEOUT_DEFAULT;
@@ -103,7 +111,7 @@ function rpcCall({ port, timeout, method, params }) {
     ws.on('error', (e) => {
       clearTimeout(timer);
       const hint = /ECONNREFUSED/i.test(e.message)
-        ? `浏览器没在 127.0.0.1:${port} 上跑。先 \`ai-browser start\`（MCP 客户端会自己拉起），或用 --port 指定别的端口。`
+        ? `浏览器没在 127.0.0.1:${port} 上跑。\`ai-browser ensure\` 会拉起它，\`ai-browser start\` 是前台启动。`
         : e.message;
       done(reject, Object.assign(new Error(hint), { code: 'connect_failed' }));
     });
@@ -138,7 +146,43 @@ async function runCall(argv) {
     printResult(result, opt.pretty);
     return 0;
   } catch (e) {
-    process.stderr.write(`[ai-browser] ${e.message}\n`);
+    // 连不上 → 默认把浏览器拉起来再试一次（见文件头"关于自动拉起"）。
+    // 只在 connect_failed 时做：方法不存在、参数错这类不该去启动进程。
+    if (e.code !== 'connect_failed' || !opt.start) {
+      process.stderr.write(`[ai-browser] ${e.message}\n`);
+      return 1;
+    }
+    const { ensureRunning } = require('./ensure_running.cjs');
+    try {
+      const info = await ensureRunning({
+        port: opt.port,
+        log: (m) => process.stderr.write(m + '\n'),
+      });
+      if (info.started) process.stderr.write(`[ai-browser] browser started (via ${info.via})\n`);
+      const result = await rpcCall({ port: opt.port, timeout: opt.timeout, method, params });
+      printResult(result, opt.pretty);
+      return 0;
+    } catch (e2) {
+      // ensure 的报错已经带原因和下一步；原始连接错误作为补充，别只丢一句 ECONNREFUSED。
+      process.stderr.write(`[ai-browser] ${e2.message}\n`);
+      return 1;
+    }
+  }
+}
+
+/** `ai-browser ensure` — 只负责把浏览器弄到"能连"的状态，不调任何业务方法。 */
+async function runEnsure(argv) {
+  const opt = parseArgs(argv);
+  const { ensureRunning } = require('./ensure_running.cjs');
+  try {
+    const info = await ensureRunning({
+      port: opt.port,
+      log: (m) => process.stderr.write(m + '\n'),
+    });
+    printResult({ ...info, port: info.port ?? opt.port }, opt.pretty);
+    return 0;
+  } catch (e) {
+    printResult({ running: false, port: opt.port, error: e.message }, opt.pretty);
     return 1;
   }
 }
@@ -175,4 +219,4 @@ function readStdin() {
   }
 }
 
-module.exports = { runCall, runStatus, parsePayload, parseArgs, rpcCall, WS_PORT_DEFAULT };
+module.exports = { runCall, runStatus, runEnsure, parsePayload, parseArgs, rpcCall, WS_PORT_DEFAULT };

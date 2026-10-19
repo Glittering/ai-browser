@@ -25,6 +25,8 @@ Usage:
                               Install the bundled agent skills into your client
   ai-browser call <method> [json|-]
                               Call one JSON-RPC method and print the result
+                              (starts the browser first if it is not running)
+  ai-browser ensure           Start the browser if needed, then exit (idempotent)
   ai-browser status           Is the browser running? pid / port / tabs
   ai-browser --version        Print version
   ai-browser --help           Show this help
@@ -81,6 +83,13 @@ async function main() {
     case 'status': {
       const { runStatus } = require('../scripts/cli_call.cjs');
       process.exit(await runStatus(argv.slice(1)));
+      break;
+    }
+    case 'ensure': {
+      // 只把浏览器弄到"能连"的状态，然后退出。存在的理由：让 `call` 之外还有一条
+      // **显式**的启动动作，脚本/CI 里想先起再调时用它（幂等，已在跑就是 no-op）。
+      const { runEnsure } = require('../scripts/cli_call.cjs');
+      process.exit(await runEnsure(argv.slice(1)));
       break;
     }
     case '--version':

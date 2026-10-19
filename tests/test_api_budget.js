@@ -197,4 +197,33 @@ describe('技能包：能否被客户端"装一次、之后自动发现"', () =>
     }
     expect(missing, `技能引用了不存在的工具：${missing.join(', ')}`).toEqual([]);
   });
+
+  it('S-7: 技能里提到的每个 ui.* 方法都必须真实存在于 WS 层', () => {
+    // 与 S-6 同一个理由，换一条门：2026-10-20 起技能把 CLI 路径写成**第一入口**
+    // （MCP 要过客户端三道闸门，CLI 不用）。CLI 全靠手写方法名，写错一个字符
+    // 的后果和调一个不存在的工具一样 —— 弱模型只会得到 "Method not found"，
+    // 然后开始猜。所以方法名必须对着 ws_server.js 的 case 逐个校验。
+    //
+    // 真相来源是源码：`case 'ui.xxx':`。手维护一份清单一定会漂。
+    const wsSrc = readFileSync(join(ROOT, 'src', 'main', 'ws_server.js'), 'utf8');
+    const real = new Set([...wsSrc.matchAll(/case '(ui\.[a-z_]+)'/g)].map((m) => m[1]));
+    expect(real.size, 'ws_server.js 里一个 ui.* 都没解析到，正则失效了').toBeGreaterThan(20);
+
+    const entryDir = join(skillsRoot, 'ai-browser');
+    const files = [join(entryDir, 'SKILL.md')];
+    const refDir = join(entryDir, 'references');
+    if (existsSync(refDir)) {
+      for (const f of readdirSync(refDir).filter((x) => x.endsWith('.md'))) files.push(join(refDir, f));
+    }
+    const bad = [];
+    for (const f of files) {
+      const md = readFileSync(f, 'utf8');
+      for (const m of md.matchAll(/\bui\.[a-z][a-z_]*\b/g)) {
+        // 文档里偶尔出现 `ui.xxx` / `ui.*` 这类占位，不参与校验
+        if (/^ui\.x+$/.test(m[0])) continue;
+        if (!real.has(m[0]) && bad.indexOf(m[0]) < 0) bad.push(`${m[0]} @ ${f.split('/').pop()}`);
+      }
+    }
+    expect(bad, `技能引用了不存在的 WS 方法：${bad.join(', ')}`).toEqual([]);
+  });
 });

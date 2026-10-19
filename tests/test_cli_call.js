@@ -42,9 +42,12 @@ function makePageManager() {
 }
 
 /** 跑一次 CLI，收集 stdout/stderr/exitCode。 */
-function run(args, { input = null } = {}) {
+function run(args, { input = null, env = null } = {}) {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [BIN, ...args], { cwd: ROOT });
+    const child = spawn(process.execPath, [BIN, ...args], {
+      cwd: ROOT,
+      env: env ? { ...process.env, ...env } : process.env,
+    });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (d) => { stdout += d.toString(); });
@@ -113,11 +116,26 @@ describe('ai-browser call', () => {
     expect(r.stderr).toMatch(/Method not found \(ui\.no_such_method\)/);
   });
 
-  it('CLI-8: 端口上没东西 → 退出码 1，且提示"下一步做什么"而不是 ECONNREFUSED 原文', async () => {
-    const r = await run(['call', 'ui.list_tabs', '--port', '9']);
+  it('CLI-8: 端口上没东西 + --no-start → 退出码 1，且提示"下一步做什么"而不是 ECONNREFUSED 原文', async () => {
+    // --no-start 是必须的：默认行为会在连不上时先去拉起浏览器（见 CLI-9），
+    // 那样这条用例就变成"测启动"而不是"测报错文案"了。
+    const r = await run(['call', 'ui.list_tabs', '--port', '9', '--no-start']);
     expect(r.code).toBe(1);
     expect(r.stderr).toMatch(/没在 127\.0\.0\.1:9 上跑/);
     expect(r.stderr).toMatch(/ai-browser start/);
+  });
+
+  it('CLI-9: 默认会尝试拉起浏览器 —— 失败时说出原因，而不是把球踢回给使用者', async () => {
+    // 这条守的是"零配置"那个决定：`call` 连不上不该只回一句"你先启动"。
+    // 真的去 spawn Electron 会很慢而且会开窗口，所以用 AI_BROWSER_ELECTRON_BIN
+    // 指一个不存在的二进制：ensure 立刻失败，正好检查它**说不说原因**。
+    const r = await run(['call', 'ui.list_tabs', '--port', '9'], {
+      env: { AI_BROWSER_ELECTRON_BIN: '/nonexistent/Electron' },
+    });
+    expect(r.code).toBe(1);
+    // 关键区别：不是"你没启动"，而是"我试着启动了，失败原因是 X"。
+    expect(r.stderr).not.toMatch(/没在 127\.0\.0\.1:9 上跑/);
+    expect(r.stderr).toMatch(/could not start the browser|ENOENT|no such file/i);
   });
 });
 

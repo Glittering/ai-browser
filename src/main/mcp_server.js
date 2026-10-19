@@ -9,14 +9,11 @@ import {
   ListResourcesRequestSchema,
   ListResourceTemplatesRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
-import net from 'node:net';
-import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-// Shared Electron-binary resolver. npm >= 11 blocks dependency install scripts
-// by default (so plain `npx` leaves electron without its engine); the resolver
-// self-heals by running electron's bundled installer on first launch.
-import electronResolve from '../../scripts/electron_resolve.cjs';
+// 启动逻辑与 CLI 共用一份（scripts/ensure_running.cjs）。曾经这里有一份私有实现，
+// 结果 MCP 能自动拉起浏览器、CLI 不能 —— 同一件事两个行为。
+import ensureMod from '../../scripts/ensure_running.cjs';
 import { MCP_TOOLS } from './mcp_tools.js';
 import { actParams, networkParams } from './mcp_args.js';
 import { evaluateGuardError } from '../shared/guards.js';
@@ -33,96 +30,29 @@ const ELECTRON_PORT = config.wsPort;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// App/package root — identical layout in a git checkout and inside
-// node_modules/@glittering0717/ai-browser: src/main/ → up two levels.
-const APP_ROOT = path.resolve(__dirname, '..', '..');
-const { resolveElectronBinary } = electronResolve;
+const { ensureRunning, checkPort } = ensureMod;
 
 // Persistent WS client — one reused connection with incrementing ids.
 // Lazy launch: no Electron is started at boot. The first browse_* call that
-// fails to connect triggers `ensureRunning`, which spawns Electron on demand
-// (ensureElectronRunning is idempotent). `ensureElectronRunning` is a hoisted
-// function declaration, so referencing it here is safe.
+// fails to connect triggers `ensureRunning`, which starts Electron on demand.
+//
+// 2026-10-20: the launch logic moved to scripts/ensure_running.cjs so the CLI
+// (`ai-browser call` / `ai-browser ensure`) shares ONE implementation with this
+// server. Duplicating it here is what made "install and use" a two-step dance
+// for CLI callers: MCP auto-started the browser, the CLI did not.
 const wsClient = createWsClient({
   url: WS_URL,
   timeout: WS_TIMEOUT,
-  ensureRunning: ensureElectronRunning,
+  ensureRunning: () => ensureBrowser(),
 });
 
-// Probe whether the Electron WS server is already listening on the port.
-function checkPort(port) {
-  return new Promise((resolve) => {
-    const sock = net.connect({ port, host: '127.0.0.1' });
-    let done = false;
-    const finish = (ok) => { if (!done) { done = true; sock.destroy(); resolve(ok); } };
-    sock.once('connect', () => finish(true));
-    sock.once('error', () => finish(false));
-    setTimeout(() => finish(false), 500);
+/** 拉起浏览器（幂等）。失败时抛带原因的 Error，由 mcp_ws 并进最终错误信息。 */
+async function ensureBrowser() {
+  const info = await ensureRunning({
+    port: ELECTRON_PORT,
+    log: (m) => console.error('[mcp] ' + m),
   });
-}
-
-function waitForPort(port, timeoutMs) {
-  const start = Date.now();
-  return new Promise(async (resolve) => {
-    while (Date.now() - start < timeoutMs) {
-      if (await checkPort(port)) return resolve(true);
-      await new Promise(r => setTimeout(r, 500));
-    }
-    resolve(false);
-  });
-}
-
-// Spawn Electron detached so it survives this MCP subprocess.
-//
-// 两个坑都是实测踩出来的（2026-10-12）：
-//
-// ① `ELECTRON_RUN_AS_NODE` 必须删掉。本机 shell 就带着它，此时 `electron .` 会
-//    被当作普通 Node 运行，拿 Node 加载 ESM 入口直接崩，端口永不监听，而报错是
-//    一串 Node 的 ESM 栈 —— 完全不提 Electron。e2e 脚本都删了它，只有这里漏了。
-//    详见 scripts/start.cjs 顶部。
-//
-// ② 启动失败必须**说出来**。此前这里 return false，而 mcp_ws.js 又把它 catch 掉
-//    吞了，于是 agent 先重试 120 秒，最后只拿到 "WS reconnect timeout:
-//    connection refused" —— 没有任何线索表明浏览器根本没起来，更别说为什么。
-//    现在抛一个带原因的 Error，由 mcp_ws 并进最终错误信息。
-async function ensureElectronRunning() {
-  if (await checkPort(ELECTRON_PORT)) return true;
-  console.error('[mcp] port 9223 not listening — spawning the ai-browser Electron app');
-  // Spawn the electron binary directly (resolved from this package's
-  // dependencies), pointed at the app root. Do NOT shell out to `npm start`:
-  // npm is not guaranteed on PATH for MCP clients, and on Windows the
-  // executable is npm.cmd — direct spawn avoids both classes of failure.
-  // AI_BROWSER_LAUNCHED_BY_AGENT：告诉 Electron 它是被 agent 拉起来的，因此
-  // 窗口出现时**不要**抢焦点（showInactive）—— 否则 agent 第一次连上来就会把
-  // 用户正在做的事打断。人手动 `ai-browser` / `npm start` 时没有这个变量。
-  const childEnv = { ...process.env, AI_BROWSER_LAUNCHED_BY_AGENT: '1' };
-  delete childEnv.ELECTRON_RUN_AS_NODE;
-  let child;
-  try {
-    child = spawn(resolveElectronBinary(), [APP_ROOT], {
-      cwd: APP_ROOT,
-      detached: true,
-      stdio: 'ignore',
-      env: childEnv,
-    });
-  } catch (e) {
-    throw new Error(`could not start the browser: ${e.message}`);
-  }
-  child.unref();
-  // 子进程自己提前退出（例如上面那个 Node ESM 崩溃）时，等满 30 秒是纯浪费 ——
-  // 而且会掩盖真实原因。这里挂一个 exit 监听，把退出码留给下面的诊断。
-  let earlyExit = null;
-  child.on('exit', (code, signal) => { earlyExit = { code, signal }; });
-  // Give Electron up to 30s to start the WS server.
-  const ok = await waitForPort(ELECTRON_PORT, 30000);
-  if (!ok) {
-    const why = earlyExit
-      ? `Electron exited early (code=${earlyExit.code}, signal=${earlyExit.signal}) — a common cause is ELECTRON_RUN_AS_NODE being set in the environment, or the electron binary being missing (check node_modules/electron/dist)`
-      : 'Electron did not come up within 30s (slow first-run binary download? try ELECTRON_MIRROR for users behind a slow network)';
-    console.error('[mcp] ' + why);
-    throw new Error(`could not start the browser: ${why}`);
-  }
-  return true;
+  return info.running;
 }
 
 const server = new Server(
