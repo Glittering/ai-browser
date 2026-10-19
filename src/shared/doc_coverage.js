@@ -183,7 +183,7 @@ export function pageCoverage(input) {
     }
     base.over_measured = true;
     base.hint = `the tree carries ${tree} chars but this page only has ${page} measurable visible chars `
-      + `(${main} main + ${sameOrigin} same-origin iframe + ${frame} cross-process frame) — `
+      + `(${main} main + ${sameOrigin} same-origin iframe + ${shadow} shadow DOM + ${frame} cross-process frame) — `
       + 'the numerator is larger than the denominator, so the denominator is missing a surface '
       + '(text inside shadow DOM, or a frame we could not measure). Treat this page\'s coverage as unknown, '
       + 'not as 100%: read with get_tree {ax:true} and judge by the content';

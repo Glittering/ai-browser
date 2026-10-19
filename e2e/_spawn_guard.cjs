@@ -26,19 +26,34 @@ let installed = false;
 // 收尾的状态**（cookie 固化只对真实 profile 有意义）。所以这里直接 SIGKILL
 // 整个进程组：同步、不可忽略、包含 renderer / GPU 助手进程。
 // 代价是可以忽略的，收益是"跑完测试电脑上不会多出一堆白窗口"。
-function killAll() {
-  for (const c of Array.from(spawned)) {
-    if (!c || !c.pid) continue;
-    // 优先按进程组收割（含 renderer / GPU 助手进程）
+function killOne(c) {
+  if (!c || !c.pid) return;
+  // 优先按进程组收割（含 renderer / GPU 助手进程）
+  try {
+    process.kill(-c.pid, 'SIGKILL');
+  } catch {
     try {
-      process.kill(-c.pid, 'SIGKILL');
-    } catch {
-      try {
-        process.kill(c.pid, 'SIGKILL');
-      } catch {}
-    }
+      process.kill(c.pid, 'SIGKILL');
+    } catch {}
   }
+}
+
+function killAll() {
+  for (const c of Array.from(spawned)) killOne(c);
   spawned.clear();
+}
+
+/**
+ * 杀掉单个子进程并从登记表移除。
+ *
+ * 存在的理由：套件里"自己收尾"的写法一律是 `SIGTERM` 然后 `release`（停止追踪）。
+ * 实测这条在 focus_ws.cjs 上漏了三个实例（端口 9609/9610/9611 全被占着）——
+ * SIGTERM 之后进程只要没立刻死，release 又把它从追踪表里摘掉了，`exit` 钩子
+ * 再也看不见它。**先杀干净再 release**，顺序不能反。
+ */
+function killChild(child) {
+  killOne(child);
+  if (child) spawned.delete(child);
 }
 
 function install() {
@@ -74,6 +89,8 @@ module.exports = {
   release(child) {
     if (child) spawned.delete(child);
   },
+  /** 杀干净并释放（收尾用这个，别自己发 SIGTERM 再 release）。 */
+  killChild,
   killAll,
   install,
 };

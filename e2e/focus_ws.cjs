@@ -315,13 +315,11 @@ async function runGroup({ label, port, extraEnv, expectStealOnBoot, expectStealO
   }
 
   try { b.close(); } catch { /* ignore */ }
-  try {
-    process.kill(-child.pid, "SIGTERM");
-  } catch {
-    try { child.kill(); } catch { /* ignore */ }
-  }
-  guard.release(child);
-  await sleep(1500);
+  // 收尾必须"杀干净再放"，顺序反了就会漏：SIGTERM 只是请求退出，放掉追踪之后
+  // `process.on('exit')` 再也看不见这个子进程。实测本套件按组跑三遍，留下三个
+  // 实例占着 9609/9610/9611，后面 interact/upload 直接报"端口一直被占用"。
+  guard.killChild(child);
+  await sleep(300);
 }
 
 async function main() {

@@ -44,7 +44,21 @@ function parseVerdict(out) {
   return m ? { pass: Number(m[1]), fail: Number(m[2]) } : null;
 }
 
+// 端口被谁占着 —— "一直被占用"这句话如果不带 pid，排查要多花十分钟。
+// 实测 2026-10-20：focus 套件按组跑三遍、每组 SIGTERM 后立刻 release，
+// 留下三个实例占着 9609/9610/9611，后面 interact/upload 直接判"未知失败"，
+// 看起来像这两个套件坏了，其实是上一个套件没收拾干净。
+function portHolder(port) {
+  try {
+    const out = require('node:child_process')
+      .execFileSync('lsof', ['-nP', '-iTCP:' + port, '-sTCP:LISTEN', '-t'], { encoding: 'utf8' });
+    const pid = String(out).trim().split('\n')[0];
+    return pid || null;
+  } catch { return null; }
+}
+
 function runOne(suite, port) {
+  const holderBefore = portHolder(port);
   return new Promise((resolve) => {
     const t0 = Date.now();
     execFile(process.execPath, [path.join(ROOT, 'e2e', suite + '_ws.cjs')], {
@@ -54,7 +68,7 @@ function runOne(suite, port) {
     }, (err, stdout, stderr) => {
       const out = (stdout || '') + (stderr || '');
       resolve({
-        suite, port, ms: Date.now() - t0,
+        suite, port, ms: Date.now() - t0, holderBefore,
         code: err ? (String(err.code) === 'TIMEOUT' ? 'TIMEOUT' : err.code) : 0,
         verdict: parseVerdict(out),
         fails: out.split('\n').filter((l) => l.indexOf('FAIL |') >= 0).map((l) => l.trim().slice(0, 180)),
@@ -81,17 +95,26 @@ async function main() {
     );
     r.fails.forEach((f) => console.log('      ! ' + f));
     r.notes.forEach((n) => console.log('      ~ ' + n));
+    // 起跑前端口就被别人占着 → 这套件根本没机会跑。必须说清是谁占的，
+    // 否则结论是"这个套件坏了"，而真相是"上一个套件没收拾干净"。
+    if (r.holderBefore) {
+      console.log(`      ~ 起跑前 port=${r.port} 已被 pid ${r.holderBefore} 占用（不是本次拉起的，套件会拒绝跑）`);
+    }
   }
 
   const total = rows.reduce((a, r) => a + (r.verdict ? r.verdict.pass + r.verdict.fail : 0), 0);
   const totalFail = rows.reduce((a, r) => a + (r.verdict ? r.verdict.fail : 0), 0);
   // "没摘要"绝不能算通过 —— 上次就是把"没摘要"当成了"跑完了但崩溃"。
   const unknown = rows.filter((r) => !r.verdict).map((r) => r.suite);
+  // 端口被占 ≠ 产品坏了。分开报，否则"环境脏"会一直伪装成"代码回归"。
+  const envBad = rows.filter((r) => r.holderBefore || r.notes.some((n) => /一直被占用/.test(n)))
+    .map((r) => r.suite);
   const bad = rows.filter((r) => !r.verdict || r.verdict.fail > 0 || r.code !== 0).map((r) => r.suite);
 
   console.log('\n' + '='.repeat(58));
   console.log(`套件 ${rows.length} 个 | 断言 ${total} 项 | 失败 ${totalFail}`);
   if (unknown.length) console.log('⚠️  无摘要（必须查，不能当通过）: ' + unknown.join(', '));
+  if (envBad.length) console.log('⚠️  环境未清理（端口起跑前就被占，套件没跑）: ' + envBad.join(', '));
   console.log(bad.length ? '❌ 未通过: ' + bad.join(', ') : '✅ 全部通过');
   process.exit(bad.length ? 1 : 0);
 }
