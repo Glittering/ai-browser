@@ -42,37 +42,80 @@ export const MCP_TOOLS = [
   {
     name: 'browse_act',
     title: 'Act on element',
-    description: 'Act on an element by data-ai-id: click, type (append at caret), setContent (replace all), clear, focus, hover, scroll_to, upload, get_value (read-only), drag, press, wheel, paste.',
+    description: 'Act on a data-ai-id element. type appends at caret, setContent replaces all. Verb-specific params live in the group of the same name (click/read/press/wheel/drag).',
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     inputSchema: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['click', 'type', 'clear', 'focus', 'hover', 'scroll_to', 'upload', 'get_value', 'drag', 'press', 'wheel', 'paste'], description: 'Action.' },
-        html: { type: 'string', description: 'paste: HTML to inject (preferred). Editors convert it through their own paste pipeline (Draft.js/ProseMirror/Quill), so headings/code blocks/bold/lists survive. Plain text loses all formatting.' },
-        target: { type: 'string', description: 'Element data-ai-id from the semantic tree (e.g. e:button-12, axf-3-1) — NOT the visible label. Omit for press (keys go to the current focus); for drag you may also omit it and pass from_x/from_y to start from a bare point. upload also accepts a CSS selector (descendant selectors with spaces included), which is the only way to reach upload widgets that have no semantic node.' },
-        text: { type: 'string', description: 'Text to type (type/setContent). For paste: plain-text fallback used when html is absent.' },
-        value: { type: 'string', description: 'Value for select.' },
-        offset: { type: 'integer', description: 'get_value: start offset in Unicode code points (default 0).' },
-        limit: { type: 'integer', description: 'get_value: max code points to return (default 20000, hard cap 1000000).' },
-        url: { type: 'string', description: 'For click: click the link whose href matches this URL instead of guessing the target label.' },
-        keep_tab: { type: 'boolean', description: 'For click: keep the current tab active instead of auto-following a newly opened tab.' },
-        file: { type: 'string', description: 'Absolute path to upload (upload only). target may be the file input itself, the control that opens the picker, or — when the control has no semantic node at all — a CSS selector such as ".upload-button". Works inside cross-process iframes.' },
-        timeout_ms: { type: 'integer', description: 'Override the action deadline in ms (default 15000; type/setContent/drag/press scale with text length / duration / repeat; 1s floor, 300s cap). A timeout returns success=false, timed_out=true and warns the action may have partially applied.' },
-        to_target: { type: 'string', description: 'drag: data-ai-id to drop onto (e.g. drag from one node\'s output to another node to connect them).' },
-        dx: { type: 'number', description: 'drag: horizontal distance to move (use with dy instead of to_target).' },
-        dy: { type: 'number', description: 'drag: vertical distance to move.' },
-        to_x: { type: 'number', description: 'drag: absolute viewport x to end at (overrides dx).' },
-        to_y: { type: 'number', description: 'drag: absolute viewport y to end at.' },
-        from_x: { type: 'number', description: 'drag: explicit viewport x to start the drag at (no target needed — e.g. panning empty canvas).' },
-        from_y: { type: 'number', description: 'drag: explicit viewport y to start the drag at.' },
-        from_anchor: { type: 'string', enum: ['center', 'left', 'right', 'top', 'bottom'], description: 'drag: which point of target to grab; a side prefers that node\'s connection handle (default center).' },
-        to_anchor: { type: 'string', enum: ['center', 'left', 'right', 'top', 'bottom'], description: 'drag: which point of to_target to drop on.' },
-        hold: { type: 'array', items: { type: 'string' }, description: 'drag: modifier keys held during the drag (e.g. ["Shift"]).' },
-        button: { type: 'string', enum: ['left', 'middle', 'right'], description: 'drag: mouse button (default left). Canvas apps often pan on middle/right drag.' },
-        key: { type: 'string', description: 'press: a key name such as Delete, Escape, ArrowRight, Enter, or a combo like "Meta+a".' },
-        delta_x: { type: 'number', description: 'wheel: horizontal scroll amount (positive scrolls right).' },
-        delta_y: { type: 'number', description: 'wheel: vertical scroll amount. Negative scrolls up / zooms out; add hold:["Control"] for canvas zoom.' },
-        keys: { type: 'array', items: { type: 'string' }, description: 'press: sequence of keys to press in order.' },
+        action: { type: 'string', enum: ['click', 'type', 'setContent', 'clear', 'focus', 'hover', 'scroll_to', 'upload', 'get_value', 'drag', 'press', 'wheel', 'paste'], description: 'Verb. Verb-specific params live in the group of the same name.' },
+        target: { type: 'string', description: 'data-ai-id from the tree (e.g. e:button-12, axf-3-1) — NOT the visible label. Optional for press; for drag you may give drag.from instead. upload also accepts a CSS selector.' },
+        text: { type: 'string', description: 'type: appended at the caret. setContent: replaces all. paste: plain fallback when html is absent.' },
+        html: { type: 'string', description: 'paste: HTML, preferred — editors keep headings/lists/bold. Plain text loses formatting.' },
+        value: { type: 'string', description: 'Option value for a <select>.' },
+        file: { type: 'string', description: 'upload: absolute path. target may be the input, the trigger, or a CSS selector.' },
+        timeout_ms: { type: 'integer', description: 'Action deadline (default 15000; scales with work; 1s..300s). Timeout → success=false, timed_out=true, action may have partially applied.' },
+        click: {
+          type: 'object',
+          description: 'click only.',
+          properties: {
+            url: { type: 'string', description: 'Click the link whose href matches this URL instead of guessing which node in a composite card to hit.' },
+            keep_tab: { type: 'boolean', description: 'Keep the current tab active instead of auto-following a newly opened tab.' }
+          }
+        },
+        read: {
+          type: 'object',
+          description: 'get_value only — read-only: does not focus the element or fire input events.',
+          properties: {
+            offset: { type: 'integer', description: 'Start offset in Unicode code points (default 0).' },
+            limit: { type: 'integer', description: 'Max code points to return (default 20000, hard cap 1000000).' }
+          }
+        },
+        press: {
+          type: 'object',
+          description: 'press only. Keys go to the current focus, so target is optional.',
+          properties: {
+            key: { type: 'string', description: 'Delete, Escape, ArrowRight, Enter, or a combo like "Meta+a".' },
+            keys: { type: 'array', items: { type: 'string' }, description: 'Sequence to press in order.' }
+          }
+        },
+        wheel: {
+          type: 'object',
+          description: 'wheel only. Lands on target, or the viewport centre when target is omitted.',
+          properties: {
+            dx: { type: 'number', description: 'Horizontal delta (positive scrolls right).' },
+            dy: { type: 'number', description: 'Vertical delta. Negative scrolls up / zooms out.' },
+            hold: { type: 'array', items: { type: 'string' }, description: 'Modifiers held, e.g. ["Control"] to zoom a canvas.' }
+          }
+        },
+        drag: {
+          type: 'object',
+          description: 'drag only. Give from/to for absolute points, dx/dy for a relative move, or target_to to drop onto another element.',
+          properties: {
+            from: {
+              type: 'object',
+              description: 'Start point. Omit to start from target.',
+              properties: {
+                x: { type: 'number' },
+                y: { type: 'number' },
+                anchor: { type: 'string', enum: ['center', 'left', 'right', 'top', 'bottom'], description: 'A side prefers that node\'s connection handle.' }
+              }
+            },
+            to: {
+              type: 'object',
+              description: 'End point in viewport coords.',
+              properties: {
+                x: { type: 'number' },
+                y: { type: 'number' },
+                anchor: { type: 'string', enum: ['center', 'left', 'right', 'top', 'bottom'] }
+              }
+            },
+            dx: { type: 'number', description: 'Horizontal distance instead of to.x.' },
+            dy: { type: 'number', description: 'Vertical distance instead of to.y.' },
+            target_to: { type: 'string', description: 'data-ai-id to drop onto (e.g. connect one node\'s output to another).' },
+            hold: { type: 'array', items: { type: 'string' }, description: 'Modifiers held during the drag, e.g. ["Shift"].' },
+            button: { type: 'string', enum: ['left', 'middle', 'right'], description: 'Canvas apps often pan on middle/right drag.' }
+          }
+        },
         tab: { type: 'integer', description: 'Tab id (default: active tab).' }
       },
       required: ['action']
@@ -211,34 +254,58 @@ export const MCP_TOOLS = [
   {
     name: 'browse_network',
     title: 'Inspect network',
-    description: 'Query captured HTTP requests (Chrome Network panel): list/get/clear/configure. Captures method, headers and POST bodies; sensitive headers redacted by default.',
+    description: 'Query captured HTTP requests: list/get/clear/configure. Captures headers and POST bodies; sensitive headers redacted. Each op reads its own group: filters / include / body_offset / configure.',
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     inputSchema: {
       type: 'object',
       properties: {
         operation: { type: 'string', enum: ['list', 'get', 'clear', 'configure'], description: 'Operation.' },
-        tab: { type: 'integer', description: 'Tab id (default: active tab).' },
         network_id: { type: 'string', description: 'get: id from list.' },
-        method: { type: 'array', items: { type: 'string' }, description: 'list: filter by HTTP method.' },
-        url_contains: { type: 'string', description: 'list: URL substring filter.' },
-        status_min: { type: 'integer', description: 'list: minimum status.' },
-        status_max: { type: 'integer', description: 'list: maximum status.' },
-        resource_type: { type: 'array', items: { type: 'string' }, description: 'list: XHR/Fetch/Document/...' },
-        state: { type: 'array', items: { type: 'string' }, description: 'list: pending/finished/failed.' },
-        started_after: { type: 'string', description: 'list: ISO timestamp.' },
-        started_before: { type: 'string', description: 'list: ISO timestamp.' },
-        limit: { type: 'integer', description: 'list: page size (default 50, max 200).' },
-        before_seq: { type: 'integer', description: 'list: cursor from pagination.next_before_seq.' },
-        include_request_headers: { type: 'boolean' },
-        include_request_body: { type: 'boolean' },
-        include_response_headers: { type: 'boolean' },
-        include_response_body: { type: 'boolean' },
-        include_sensitive_headers: { type: 'boolean', description: 'Requires AI_BROWSER_NETWORK_SENSITIVE=1.' },
-        request_body_offset: { type: 'integer' },
-        response_body_offset: { type: 'integer' },
-        body_limit: { type: 'integer', description: 'Body page size (default 65536, max 262144).' },
-        enabled: { type: 'boolean', description: 'configure: turn capture on/off.' },
-        capture_bodies: { type: 'string', enum: ['none', 'api', 'all'], description: 'configure.' }
+        filters: {
+          type: 'object',
+          description: 'list only.',
+          properties: {
+            method: { type: 'array', items: { type: 'string' }, description: 'HTTP methods.' },
+            url_contains: { type: 'string', description: 'URL substring.' },
+            status_min: { type: 'integer' },
+            status_max: { type: 'integer' },
+            resource_type: { type: 'array', items: { type: 'string' }, description: 'XHR / Fetch / Document / …' },
+            state: { type: 'array', items: { type: 'string' }, description: 'pending / finished / failed.' },
+            started_after: { type: 'string', description: 'ISO timestamp.' },
+            started_before: { type: 'string', description: 'ISO timestamp.' },
+            limit: { type: 'integer', description: 'Page size (default 50, max 200).' },
+            before_seq: { type: 'integer', description: 'Cursor from pagination.next_before_seq.' }
+          }
+        },
+        include: {
+          type: 'object',
+          description: 'get only — what to bring back.',
+          properties: {
+            request_headers: { type: 'boolean' },
+            response_headers: { type: 'boolean' },
+            request_body: { type: 'boolean' },
+            response_body: { type: 'boolean' },
+            sensitive_headers: { type: 'boolean', description: 'Requires AI_BROWSER_NETWORK_SENSITIVE=1.' },
+            body_limit: { type: 'integer', description: 'Body page size (default 65536, max 262144).' }
+          }
+        },
+        body_offset: {
+          type: 'object',
+          description: 'get only — paginate a large body.',
+          properties: {
+            request: { type: 'integer' },
+            response: { type: 'integer' }
+          }
+        },
+        configure: {
+          type: 'object',
+          description: 'configure only.',
+          properties: {
+            enabled: { type: 'boolean', description: 'Turn capture on/off.' },
+            capture_bodies: { type: 'string', enum: ['none', 'api', 'all'] }
+          }
+        },
+        tab: { type: 'integer', description: 'Tab id (default: active tab).' }
       },
       required: ['operation']
     }

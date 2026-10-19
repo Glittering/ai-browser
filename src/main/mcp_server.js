@@ -18,6 +18,7 @@ import { fileURLToPath } from 'node:url';
 // self-heals by running electron's bundled installer on first launch.
 import electronResolve from '../../scripts/electron_resolve.cjs';
 import { MCP_TOOLS } from './mcp_tools.js';
+import { actParams, networkParams } from './mcp_args.js';
 import { evaluateGuardError } from '../shared/guards.js';
 // 截图体积上限（与 WS 侧共用同一把尺）：超过就不把图塞进上下文。
 import screenshotOpts from '../shared/screenshot_opts.cjs';
@@ -178,44 +179,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     case 'browse_act': {
+      // 参数映射收在 mcp_args.js 单点完成：schema 对 agent 暴露分组，
+      // page_manager 只认扁平。旧扁平参数继续被接受（向后兼容）。
       const result = await wsClient.call('ui.act', {
         action: args.action,
         target: args.target,
-        params: {
-          text: args.text,
-          // paste：富文本 HTML。schema 里声明了这个字段，之前这里漏了转发 ——
-          // MCP 调用方传 html 会被静默丢弃，回执 "paste called with neither
-          // html nor text"。B站图文只能发纯文本版就是这个原因。
-          html: args.html,
-          value: args.value,
-          url: args.url,
-          keep_tab: args.keep_tab,
-          file: args.file,
-          offset: args.offset,
-          limit: args.limit,
-          timeout_ms: args.timeout_ms,
-          // drag：终点与端点锚点。to_x/to_y 是绝对视口坐标（用于拖到空白处，
-          // 例如平移画布）；to_target 是落到另一个元素上（例如连线）。
-          // 这些名字与 raw WS 层完全一致 —— 归一由 page_manager._cdpDrag 单点负责，
-          // 这里不再做第二套映射（两套名字 = 迟早有一层不认识）。
-          to_target: args.to_target,
-          dx: args.dx,
-          dy: args.dy,
-          to_x: args.to_x,
-          to_y: args.to_y,
-          from_anchor: args.from_anchor,
-          from: (args.from_x !== undefined && args.from_y !== undefined)
-            ? { x: args.from_x, y: args.from_y }
-            : undefined,
-          to_anchor: args.to_anchor,
-          hold: args.hold,
-          button: args.button,
-          // press：单个键或按键序列
-          key: args.key,
-          keys: args.keys,
-          dx: args.delta_x,
-          dy: args.delta_y,
-        },
+        params: actParams(args),
         tab: args.tab
       });
       return { content: [{ type: 'text', text: JSON.stringify(result) }] };
@@ -302,33 +271,35 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     case 'browse_network': {
-      const result = args.operation === 'list' || args.operation === 'configure' || args.operation === 'clear'
+      const p = networkParams(args);
+      const isListLike =
+        args.operation === 'list' || args.operation === 'configure' || args.operation === 'clear';
+      const result = isListLike
         ? await wsClient.call('ui.network_' + args.operation, {
-            tab: args.tab,
-            method: args.method,
-            url_contains: args.url_contains,
-            status: (args.status_min !== undefined || args.status_max !== undefined)
-              ? { min: args.status_min, max: args.status_max } : undefined,
-            resource_type: args.resource_type,
-            state: args.state,
-            started_after: args.started_after,
-            started_before: args.started_before,
-            limit: args.limit,
-            before_seq: args.before_seq,
-            enabled: args.enabled,
-            capture_bodies: args.capture_bodies,
+            tab: p.tab,
+            method: p.method,
+            url_contains: p.url_contains,
+            status: p.status,
+            resource_type: p.resource_type,
+            state: p.state,
+            started_after: p.started_after,
+            started_before: p.started_before,
+            limit: p.limit,
+            before_seq: p.before_seq,
+            enabled: p.enabled,
+            capture_bodies: p.capture_bodies
           })
         : await wsClient.call('ui.network_get', {
-            tab: args.tab,
-            network_id: args.network_id,
-            include_request_headers: args.include_request_headers,
-            include_request_body: args.include_request_body,
-            include_response_headers: args.include_response_headers,
-            include_response_body: args.include_response_body,
-            include_sensitive_headers: args.include_sensitive_headers,
-            request_body_offset: args.request_body_offset,
-            response_body_offset: args.response_body_offset,
-            body_limit: args.body_limit,
+            tab: p.tab,
+            network_id: p.network_id,
+            include_request_headers: p.include_request_headers,
+            include_request_body: p.include_request_body,
+            include_response_headers: p.include_response_headers,
+            include_response_body: p.include_response_body,
+            include_sensitive_headers: p.include_sensitive_headers,
+            request_body_offset: p.request_body_offset,
+            response_body_offset: p.response_body_offset,
+            body_limit: p.body_limit
           });
       return { content: [{ type: 'text', text: JSON.stringify(result) }] };
     }

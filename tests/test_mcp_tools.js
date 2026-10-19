@@ -87,8 +87,21 @@ describe('MCP tool list (token-cost guard)', () => {
   it('browse_act exposes the read-only get_value action', () => {
     const act = MCP_TOOLS.find((t) => t.name === 'browse_act');
     expect(act.inputSchema.properties.action.enum).toContain('get_value');
-    expect(act.inputSchema.properties.offset).toBeTruthy();
-    expect(act.inputSchema.properties.limit).toBeTruthy();
+    // 2026-10-19：get_value 的 offset/limit 收进 read 分组（顶层参数 27→13）。
+    // 分组只是"读起来更省"；旧的扁平 offset/limit 仍被 mcp_args.actParams 接受，
+    // 见 tests/test_mcp_args.js 的 G-1。
+    expect(act.inputSchema.properties.read.properties.offset).toBeTruthy();
+    expect(act.inputSchema.properties.read.properties.limit).toBeTruthy();
+    expect(act.inputSchema.properties.offset).toBeUndefined();
+  });
+
+  it('browse_act 的 enum 必须覆盖处理层支持的每个动作（曾漏掉 setContent）', () => {
+    const act = MCP_TOOLS.find((t) => t.name === 'browse_act');
+    const verbs = act.inputSchema.properties.action.enum;
+    // page_manager._executeActionInner 里逐个分支处理的动作
+    for (const v of ['click', 'type', 'setContent', 'clear', 'focus', 'hover', 'scroll_to', 'upload', 'get_value', 'drag', 'press', 'wheel', 'paste']) {
+      expect(verbs, `enum 缺少 ${v}，严格校验的客户端会拒绝这个动作`).toContain(v);
+    }
   });
 
   it('has unique tool names', () => {

@@ -22,15 +22,21 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..');
 
 // ── 预算 ────────────────────────────────────────────────────────────────
-// P0 基线（2026-10-19）：先锁住现状，不许变差。
-// P2（参数分组瘦身）完成后应下调为：
-//   totalBytes 9,600 · maxToolBytes 1,600 · maxTopLevelParams 12
-// P3（工具收敛到 13 个）完成后应下调为：
-//   totalBytes 8,200 · maxTools 13
+// 预算只许往下走。改大必须在这里写明理由，否则 CI 红。
+//
+// 历史：
+//   P0 基线 17,600 B / 单工具 4,400 / 顶层参数 28 / 20 个工具
+//   P2 之后 17,100 B / 单工具 4,200 / 顶层参数 14   ← 当前
+//
+// ⚠️ P2 的实测结论（重要，别自欺）：**参数分组几乎不省字节。**
+// browse_act 27→13 个顶层参数、browse_network 23→7，但字节只从 17,502 降到
+// 17,033（−2.7%），因为 JSON Schema 的嵌套本身有结构开销（type/properties/
+// description 的包装）。分组换来的是**认知负荷减半**，不是 token 减半。
+// 字节的账要靠 P3（减少工具数）和描述瘦身来还 —— 那两个阶段完成后再下调。
 const BUDGET = {
-  totalBytes: 17_600,
-  maxToolBytes: 4_400,
-  maxTopLevelParams: 28,
+  totalBytes: 17_450,
+  maxToolBytes: 4_200,
+  maxTopLevelParams: 14,
   maxTools: 20,
 };
 
