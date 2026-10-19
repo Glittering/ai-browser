@@ -12,6 +12,7 @@ import { CanvasMonitor, isCanvasHookEnabled } from './canvas_monitor.js';
 import { buildCanvasHookSource } from './canvas_hook_source.js';
 // window.open("") + location 赋值模式的兼容垫片（主 world 源码，见文件头注释）
 import { WINDOW_OPEN_SHIM_SOURCE } from './window_open_shim_source.js';
+import { pickOpenedTab } from '../shared/opened_tab.js';
 import { diffValues, previewOf, safeByteLength, DEFAULT_SNAPSHOT_JS, DIFF_MAX_ENTRIES, evictOldest } from './snapshot_diff.js';
 import { withDeadline, actionDeadlineMs } from '../shared/deadline.js';
 import { DownloadMonitor } from './download_monitor.js';
@@ -309,7 +310,7 @@ class PageManager {
       // 与 setWindowOpenHandler 路径共用 _openedTabs：executeAction 的
       // auto-follow（点击后 Agent 视角跟到新 tab）对两种打开方式一致。
       if (sourceTabId !== null) {
-        this._openedTabs.set(sourceTabId, { id: childId, url: url || 'about:blank' });
+        this._openedTabs.set(sourceTabId, { id: childId, at: Date.now(), url: url || 'about:blank' });
       }
     });
 
@@ -1276,6 +1277,13 @@ class PageManager {
     const tid = tabId !== undefined ? tabId : this.activeTab;
     const view = this._getView(tid);
     if (!view) return { success: false, error: 'Tab not found' };
+    // 本次动作的开始时刻。用来判断"这个新标签是不是**这次**动作打开的" ——
+    // _openedTabs 里的条目可能来自更早的一次 window.open（例如 ui.evaluate 里
+    // 调 el.click() 触发的那种：它没有经过 act，所以没人消费那条记录）。
+    // 之前没有这个时间戳，陈旧条目会被下一次点击/悬停当成"我刚开了个标签"，
+    // 导致 opened_tab 报一个与本次操作无关的 tab（实测：hover 报出上一次
+    // 「进入学习」打开的 about:blank）。
+    const actionStartedAt = Date.now();
     // press 是唯一不要求目标的动作：快捷键通常挂在 document/window 上（删除节点、
     // 撤销重做、取消选中），发给"当前焦点"就是正确语义。
     // drag 给了显式起点坐标（params.from）时同样不要求目标 —— "从空白处起拖"正是
@@ -1313,7 +1321,7 @@ class PageManager {
           const res = await this._resolveClickByUrl(view, target, params.url, tid);
           if (!res || !res.success) return { ...(res || {}), success: false, opened_tab: null };
           // #3: 若此点击触发了 window.open → 新 tab，记录并默认接管焦点。
-          res.opened_tab = this._consumeOpenedTab(tid, params.keep_tab === true);
+          res.opened_tab = this._consumeOpenedTab(tid, params.keep_tab === true, actionStartedAt);
           return res;
         } catch (e) {
           return { success: false, error: String((e && e.message) || e).slice(0, 200), opened_tab: null };
@@ -1322,7 +1330,7 @@ class PageManager {
       try {
         await this._ensureAxHandles(view, tid);
         const via = await this._cdpPointerTarget(view, action, target, tid);
-        if (via) return { success: true, clicked_via: via, target, opened_tab: this._consumeOpenedTab(tid, params.keep_tab === true) };
+        if (via) return { success: true, clicked_via: via, target, opened_tab: this._consumeOpenedTab(tid, params.keep_tab === true, actionStartedAt) };
       } catch (e) { /* fall through to preload */ }
     } else if (action === 'type' || action === 'setContent' || action === 'clear') {
       try {
@@ -1400,7 +1408,7 @@ class PageManager {
     const preloadRes = await this._executeViaPreload(action, target, params, tid);
     // preload 合成点击也可能触发 window.open → 新 tab，同样回报 opened_tab。
     if (action === 'click' && preloadRes && preloadRes.success) {
-      preloadRes.opened_tab = this._consumeOpenedTab(tid, params.keep_tab === true);
+      preloadRes.opened_tab = this._consumeOpenedTab(tid, params.keep_tab === true, actionStartedAt);
       // 路径可区分：CDP 受信点击报 clicked_via='cdp-click'，回退路径报
       // 'preload-click'。两种都只报 success 的话，agent（和人）无从判断这一下
       // 到底是真实输入还是合成事件 —— 双发 bug 正是靠这个字段才暴露出来的。
@@ -1464,12 +1472,18 @@ class PageManager {
 
   // #3 helper: read & clear the "new tab opened by this source tab" entry.
   // Returns { id, url } or null. Unless keep===true, auto-activates the new tab.
-  _consumeOpenedTab(tid, keep) {
+  //
+  // startedAt（可选）：本次动作的开始时刻。只有**在这之后**记录的条目才算
+  // "这次动作开的"。没有它时，任何没被 act 消费的记录（例如 ui.evaluate 里
+  // el.click() 触发的 window.open）会一直挂在 map 里，被下一次点击/悬停
+  // 误当成"刚开的标签"。陈旧条目在读取时顺带清掉，避免长期堆积。
+  _consumeOpenedTab(tid, keep, startedAt) {
     const entry = this._openedTabs.get(tid);
     this._openedTabs.delete(tid);
-    if (!entry) return null;
-    if (keep !== true) this.setActive(entry.id);
-    return { id: entry.id, url: entry.url };
+    const mine = pickOpenedTab(entry, startedAt);
+    if (!mine) return null;
+    if (keep !== true) this.setActive(mine.id);
+    return { id: mine.id, url: mine.url };
   }
 
   // #2: 按目标 URL 定位并点击链接 —— 通用替代"猜卡片里的 <a>"。顶层在
@@ -2793,7 +2807,7 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
       const childId = self.newTab(urlToOpen);
       // Track which source tab opened a new tab so `executeAction` can report the
       // resulting tab and auto-follow it. Generic (any target=_blank / window.open).
-      self._openedTabs.set(tabId, { id: childId, url: urlToOpen });
+      self._openedTabs.set(tabId, { id: childId, at: Date.now(), url: urlToOpen });
       return { action: 'deny' };
     });
 
