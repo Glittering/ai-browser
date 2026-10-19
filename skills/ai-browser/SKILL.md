@@ -17,7 +17,15 @@ description: >-
 2. `browse_get_tree { subset: "interactive" }` → 从节点里取 `id`
 3. `browse_act { action: "click" | "type", target: "<id>", text? }`
 
-`success: true` **只代表动作发出去了，不代表页面变了**。
+`success: true` 只代表动作发出去了，不代表页面变了。**每个动作回执都带 `effect_state`，先看它**：
+
+| `effect_state` | 意思 | 下一步 |
+|---|---|---|
+| `committed` | 输入已派发且页面 ack | 别重试 |
+| `none` | 有证据表明页面**没被动过** | 修掉原因后可重试 |
+| `unknown` | 无法证明没动过（超时、事件派发后无回音、按了一半的键） | **先读页面状态**，盲目重试会提交两次 |
+
+`target` 找不到时会带 `stale_ref`：`true` = 页面变过（`ref_epoch` < `tree_epoch`），重读树拿新 ref；`ref_diagnosis: "never_seen"` = ref 本身错了，重读也没用，改传参。
 
 ## 卡住时的第一反应
 

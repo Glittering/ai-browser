@@ -13,6 +13,9 @@ import { buildCanvasHookSource } from './canvas_hook_source.js';
 // window.open("") + location 赋值模式的兼容垫片（主 world 源码，见文件头注释）
 import { WINDOW_OPEN_SHIM_SOURCE } from './window_open_shim_source.js';
 import { pickOpenedTab } from '../shared/opened_tab.js';
+// 动作回执自带的"页面到底动没动"三态，以及 ref 过期诊断（两个纯函数模块）。
+import { withEffectState, isTargetMiss as isTargetMissError } from '../shared/effect_state.js';
+import { newTracker, noteTree, diagnoseMissingRef } from '../shared/ref_epoch.js';
 import { diffValues, previewOf, safeByteLength, DEFAULT_SNAPSHOT_JS, DIFF_MAX_ENTRIES, evictOldest } from './snapshot_diff.js';
 import { withDeadline, actionDeadlineMs } from '../shared/deadline.js';
 import { DownloadMonitor } from './download_monitor.js';
@@ -700,7 +703,24 @@ class PageManager {
     // 的存在** —— B站图文编辑器（正文在 OOPIF 里）因此隐形了两小时，agent
     // 得出"编辑器没加载"的错误结论。现在默认读法自己补上这一步。
     if (!focusedOnly) await this._autoMergeOpaqueFrames(res, tid);
+    // 记下"这一版树里有哪些 ref"。之后 act 报 target_not_found 时，靠它区分
+    // 「ref 过期了」（页面变过，重读树即可）和「ref 从来没对过」（改传参）。
+    // 见 shared/ref_epoch.js 顶部注释。
+    this._noteTreeRefs(tid, res && res.tree);
     return res;
+  }
+
+  /** per-tab 的 ref 版本追踪器（懒建，避免动构造函数）。 */
+  _refTracker(tid) {
+    if (!this._refTrackers) this._refTrackers = new Map();
+    let t = this._refTrackers.get(tid);
+    if (!t) { t = newTracker(); this._refTrackers.set(tid, t); }
+    return t;
+  }
+
+  _noteTreeRefs(tid, tree) {
+    if (!tree) return;
+    try { noteTree(this._refTracker(tid), tree); } catch (_) { /* 追踪失败绝不影响读树 */ }
   }
 
   // 把跨进程子帧的内容读出来、合并进默认（DOM）树。轻量：只读子帧，
@@ -1250,27 +1270,62 @@ class PageManager {
    */
   async executeAction(action, target, params = {}, tabId) {
     const ms = actionDeadlineMs(action, params);
+    const tid = tabId !== undefined ? tabId : this.activeTab;
     try {
-      return await withDeadline(
+      const res = await withDeadline(
         this._executeActionInner(action, target, params, tabId),
         ms,
         `action:${action}`
       );
+      return this._annotateActResult(res, action, target, tid);
     } catch (e) {
       if (e && e.__deadline) {
         // 明确告诉 agent 两件事：① 它该重试/换策略；② 这个动作**可能已经部分生效**
         // （超时时指针可能已经按下、字符可能已经输入了一半）—— 后者必须说，否则
         // agent 会以为页面没被动过而直接重试，造成双倍输入。
-        return {
+        return this._annotateActResult({
           success: false,
           error: `${e.message} — the page's main thread is likely blocked; the action may have partially applied`,
           timed_out: true,
           deadline_ms: ms,
           action,
-        };
+        }, action, target, tid);
       }
       throw e;
     }
+  }
+
+  /**
+   * 动作回执的最终加工：补 effect_state / retry，以及 ref 过期诊断。
+   *
+   * 为什么集中在这一层而不是各分支里：_executeActionInner 有三十多处 return，
+   * 逐个补等于逐个漏（这条教训在 ui.act 的超时兜底上已经吃过一次 —— 那里也是
+   * 因为挂住的位置不止一个才上移到唯一出口）。唯一出口是唯一可靠的覆盖方式。
+   */
+  _annotateActResult(res, action, target, tid) {
+    if (!res || typeof res !== 'object') return res;
+    const extras = {};
+    // 只有"目标找不到"这一种失败需要额外诊断 —— 其它错误跟 ref 无关。
+    // 判定用 effect_state.js 导出的同一个函数，避免这里和分类器各写一套正则。
+    const isTargetMiss = isTargetMissError(res.error);
+    if (isTargetMiss && target) {
+      try {
+        const d = diagnoseMissingRef(target, this._refTracker(tid));
+        extras.stale_ref = d.stale_ref;
+        extras.ref_epoch = d.ref_epoch;
+        extras.tree_epoch = d.tree_epoch;
+        extras.ref_diagnosis = d.reason;
+        // 具体的、可执行的下一步，直接给出来。诊断 hint 比通用错误文案更有用，
+        // 所以这里覆盖 effect_hint 的位置由 withEffectState 之后合并。
+        extras.ref_hint = d.hint;
+        // 关键：ref 类失败一律不能算"照原样重试是安全的"。三种处境（过期 / 从没
+        // 见过 / 树里有 DOM 里没有）都意味着**同一个调用再发一次一定还失败**，
+        // 只是失败原因不同。effect_state 仍然是 none（确实没副作用），
+        // 但 retry 必须改成 verify_first，否则等于告诉 agent"可以再来一遍"。
+        extras.retry = 'verify_first';
+      } catch (_) { /* 诊断失败不影响主回执 */ }
+    }
+    return withEffectState(res, extras);
   }
 
   async _executeActionInner(action, target, params = {}, tabId) {
