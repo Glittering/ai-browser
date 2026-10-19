@@ -174,4 +174,27 @@ describe('技能包：能否被客户端"装一次、之后自动发现"', () =>
     console.log(`  兜底 AGENT_INSTRUCTIONS.md ${bytes} B ≈ ${Math.round(bytes / 1.9)} token`);
     expect(bytes, `兜底说明书 ${bytes}B 又长回去了（曾经 12,168B）`).toBeLessThanOrEqual(3_200);
   });
+
+  it('S-6: 技能里提到的每个 browse_* 工具都必须真实存在', () => {
+    // 为什么这条这么重要（2026-10-20）：用户拿一个 35B 的本地模型跑，
+    // 它读技能 → 照技能里的名字调工具 → 名字不存在 → 它无法区分"工具名写错了"
+    // 和"MCP 没挂上"，最后花了大量 token 去翻 mcp.json 也得不出结论。
+    // 弱模型没有"猜一下正确名字"的能力，所以技能里**不许出现不存在的工具名**。
+    const entryDir = join(skillsRoot, 'ai-browser');
+    const files = [join(entryDir, 'SKILL.md')];
+    const refDir = join(entryDir, 'references');
+    if (existsSync(refDir)) {
+      for (const f of readdirSync(refDir).filter((x) => x.endsWith('.md'))) files.push(join(refDir, f));
+    }
+    const known = new Set(MCP_TOOLS.map((t) => t.name));
+    const missing = [];
+    for (const f of files) {
+      const md = readFileSync(f, 'utf8');
+      // `browse_*`（星号）是"泛指"，不参与校验；只有具体的 browse_xxx 才算引用
+      for (const m of md.matchAll(/\bbrowse_[a-z][a-z_]*\b/g)) {
+        if (!known.has(m[0]) && missing.indexOf(m[0]) < 0) missing.push(`${m[0]} @ ${f.split('/').pop()}`);
+      }
+    }
+    expect(missing, `技能引用了不存在的工具：${missing.join(', ')}`).toEqual([]);
+  });
 });

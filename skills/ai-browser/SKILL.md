@@ -7,6 +7,11 @@ description: >-
 
 # ai-browser
 
+## 先看这一行
+
+`browse_*` 工具在不在？**不在 = MCP 没挂上，别去翻配置文件**，直接用 CLI（同一个 JSON-RPC，
+stdout 只有 result）：`ai-browser status`、`ai-browser call ui.navigate '{"url":"…"}'`。
+
 ## 三步（照抄即可）
 
 ```
