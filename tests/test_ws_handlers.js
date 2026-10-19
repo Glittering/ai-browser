@@ -256,3 +256,45 @@ describe('ws_server ui.act deadline (RPC boundary)', () => {
     expect(Date.now() - t0).toBeLessThan(5000);
   });
 });
+
+// ---------------------------------------------------------------------------
+// ui.set_active_tab 的回执契约
+//
+// 2026-10-19 实测事故：index.js 为了挂「地址栏跟随」给 setActive 套了包装却忘了
+// return，`const ok = pageManager.setActive(...)` 拿到 undefined，
+// JSON.stringify({ok: undefined}) 直接把键删掉 —— agent 收到 `{}`。
+// tab 其实切成功了（list_tabs 显示 active 已变），所以只看行为发现不了，
+// 只有盯回执才能发现。这里把回执形状锁死。
+// ---------------------------------------------------------------------------
+describe('ws_server ui.set_active_tab 回执', () => {
+  it('TAB-1: 切换成功回 {ok:true} —— agent 必须能拿到确认，不能是空对象', async () => {
+    pm.setActive = () => true;
+    const res = await rpc(client, 'ui.set_active_tab', { tab: 1 });
+    expect(res.result).toEqual({ ok: true });
+  });
+
+  it('TAB-2: tab 不存在回 {ok:false}，不能回空对象也不能报错', async () => {
+    pm.setActive = () => false;
+    const res = await rpc(client, 'ui.set_active_tab', { tab: 99 });
+    expect(res.result).toEqual({ ok: false });
+  });
+
+  it('TAB-3: 经过 index.js 同款包装后 ok 仍在（本事故的回归点）', async () => {
+    // 复刻 index.js 的调用方式：用 wrapSetActive 挂钩子，钩子里不做任何特别的事。
+    const { wrapSetActive } = await import('../src/shared/tab_hooks.js');
+    const fake = {
+      tabs: new Map([[1, {}], [2, {}]]),
+      activeTab: 1,
+      setActive(tabId) {
+        if (!this.tabs.has(tabId)) return false;
+        this.activeTab = tabId;
+        return true;
+      },
+    };
+    wrapSetActive(fake, () => {});
+    pm.setActive = fake.setActive.bind(fake);
+    const res = await rpc(client, 'ui.set_active_tab', { tab: 2 });
+    expect(res.result).toEqual({ ok: true });   // 事故时是 {}
+    expect(fake.activeTab).toBe(2);             // 副作用也照常发生
+  });
+});

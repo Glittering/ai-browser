@@ -7,6 +7,7 @@ import { startWSServer } from './ws_server.js';
 import { PageManager } from './page_manager.js';
 import { config } from '../shared/config.js';
 import { parseWatchdogTargets, isWatchdogEnabled } from '../shared/watchdog.js';
+import { wrapSetActive } from '../shared/tab_hooks.js';
 import { initErrorLog, recordError, markShutdown, getLogPath } from './error_log.js';
 import errorBanner from '../shared/error_banner.cjs';
 
@@ -498,12 +499,13 @@ function createWindow() {
     wc.on('did-navigate-in-page', push);
     wc.on('page-title-updated', push);
   };
-  const origSetActive = pageManager.setActive.bind(pageManager);
-  pageManager.setActive = function (tabId) {
-    origSetActive(tabId);
+  // 包一层只为了挂「地址栏跟随」这块副作用，返回值必须原样透传 ——
+  // ws_server 的 ui.set_active_tab 靠它回 { ok }（2026-10-19 测到过包装吞掉
+  // 返回值导致 agent 收到空回执的事故，见 shared/tab_hooks.js 注释）。
+  wrapSetActive(pageManager, (tabId) => {
     wireNavState(tabId);
     pushNavState();
-  };
+  });
   wireNavState(pageManager.activeTab);
   // 兜底轮询：只覆盖上面事件没抓到的情况（低频，成本可忽略）
   navStateInterval = setInterval(pushNavState, 1500);
