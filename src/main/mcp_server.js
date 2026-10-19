@@ -250,24 +250,31 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return { content: [{ type: 'text', text: JSON.stringify(slim) }] };
     }
 
-    case 'browse_list_tabs': {
-      const result = await wsClient.call('ui.list_tabs', {});
-      return { content: [{ type: 'text', text: JSON.stringify(result) }] };
-    }
-
-    case 'browse_new_tab': {
-      const result = await wsClient.call('ui.new_tab', { url: args.url || null });
-      return { content: [{ type: 'text', text: JSON.stringify(result) }] };
-    }
-
-    case 'browse_close_tab': {
-      const result = await wsClient.call('ui.close_tab', { tab: args.tab });
-      return { content: [{ type: 'text', text: JSON.stringify(result) }] };
-    }
-
-    case 'browse_set_active_tab': {
-      const result = await wsClient.call('ui.set_active_tab', { tab: args.tab });
-      return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+    case 'browse_tabs': {
+      // 4 个单动词工具（list/new/close/set_active）合并为一个。
+      // 理由：它们操作同一个实体（标签页），每个只承载一个动词，是工具数量
+      // 膨胀里最没有道理的一种。合并后参数只有 op/tab/url 三个。
+      const op = args.op;
+      if (op === 'list') {
+        const result = await wsClient.call('ui.list_tabs', {});
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      }
+      if (op === 'new') {
+        const result = await wsClient.call('ui.new_tab', { url: args.url || null });
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      }
+      if (op === 'close') {
+        const result = await wsClient.call('ui.close_tab', { tab: args.tab });
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      }
+      if (op === 'switch') {
+        const result = await wsClient.call('ui.set_active_tab', { tab: args.tab });
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      }
+      return {
+        content: [{ type: 'text', text: `Error: unknown op "${op}" — use list / new / close / switch` }],
+        isError: true
+      };
     }
 
     case 'browse_network': {

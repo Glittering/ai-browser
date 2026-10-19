@@ -19,7 +19,7 @@
 
 ## 多标签
 
-- `browse_list_tabs` 看现状；`browse_new_tab {url}` 新开；`browse_set_active_tab {tab}` 切换。
+- `browse_tabs {op:"list"}` 看现状；`{op:"new", url}` 新开；`{op:"switch", tab}` 切换。
 - 默认动作落在 **active tab** 上，所以切换是隐式上下文，不用每次传 `tab`。
 - `window.open` / `target="_blank"` 打开的新标签会被自动接管为 active（想留在原地传 `keep_tab:true`）。
 

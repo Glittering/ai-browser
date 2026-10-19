@@ -34,8 +34,28 @@ describe('version single-source consistency', () => {
     ).toBe(true);
   });
 
-  it('stays on the v1 semver line (breaking changes bump major to 2)', () => {
-    // 首个公开发布（npm / GitHub Release）是 v1.2.0；1.1.x 为发布前的开发版本号。
-    expect(VERSION).toMatch(/^1\.\d+\.\d+$/);
+  it('major 版本 ≥ 2 时必须同时存在迁移文档', () => {
+    // 首个公开发布是 v1.2.0。2026-10-19 起进入 v2（标签页工具合并为 browse_tabs），
+    // 这是一次有意的破坏性变更 —— 所以这条断言从"必须留在 1.x"改成
+    // "敢升 major，就必须写清楚怎么迁移"。
+    // 没有迁移文档的 major 升级 = 让用户自己猜，那比不升级更糟。
+    const major = Number(String(VERSION).split('.')[0]);
+    expect(Number.isInteger(major) && major >= 1).toBe(true);
+
+    if (major >= 2) {
+      const doc = path.join(root, `docs/MIGRATION_V${major}.md`);
+      const exists = (() => {
+        try {
+          return readFileSync(doc, 'utf8').length > 200;
+        } catch {
+          return false;
+        }
+      })();
+      expect(
+        exists,
+        `版本已经到 ${VERSION}，但找不到 docs/MIGRATION_V${major}.md（或内容太短）。\n` +
+          '破坏性变更必须配迁移文档：用户要知道哪几个调用变了、怎么替换、哪些没变。'
+      ).toBe(true);
+    }
   });
 });

@@ -207,48 +207,21 @@ export const MCP_TOOLS = [
     }
   },
   {
-    name: 'browse_list_tabs',
-    title: 'List tabs',
-    description: 'List open tabs (id, url, title, active).',
-    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-    inputSchema: { type: 'object', properties: {} }
-  },
-  {
-    name: 'browse_new_tab',
-    title: 'New tab',
-    description: 'Open a new tab, optionally at a URL.',
+    name: 'browse_tabs',
+    title: 'Tabs',
+    description: 'Tabs: op=list / new / close / switch. switch makes a tab the default target for later calls, so you rarely pass tab explicitly.',
+    // 合并前是 4 个工具（list / new / close / set_active），每个只承载一个动词。
+    // 合并后 destructiveHint 只能是 false —— 否则 op=list 也会被标成破坏性操作；
+    // close 的破坏性写在 description 里。这是合并的唯一语义代价，接受。
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     inputSchema: {
       type: 'object',
       properties: {
-        url: { type: 'string', description: 'Optional URL.' }
-      }
-    }
-  },
-  {
-    name: 'browse_close_tab',
-    title: 'Close tab',
-    description: 'Close a tab by id.',
-    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
-    inputSchema: {
-      type: 'object',
-      properties: {
-        tab: { type: 'integer', description: 'Tab id.' }
+        op: { type: 'string', enum: ['list', 'new', 'close', 'switch'], description: 'list = id/url/title/active for every tab. switch = make `tab` the default target.' },
+        tab: { type: 'integer', description: 'close / switch: the target tab id.' },
+        url: { type: 'string', description: 'new: open at this URL (default about:blank).' }
       },
-      required: ['tab']
-    }
-  },
-  {
-    name: 'browse_set_active_tab',
-    title: 'Switch active tab',
-    description: 'Switch the active tab.',
-    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
-    inputSchema: {
-      type: 'object',
-      properties: {
-        tab: { type: 'integer', description: 'Tab id.' }
-      },
-      required: ['tab']
+      required: ['op']
     }
   },
   {

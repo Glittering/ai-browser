@@ -38,7 +38,13 @@ describe('MCP tool list (token-cost guard)', () => {
     //     那个框里）。事故的核心不是"缺日志"，而是"事后无法证明发生过什么"。
     //     现在异常同步落盘到 ~/.ai-browser/logs/error.jsonl，这个工具是让 agent
     //     自己就能问到"刚才报过什么错"的入口 —— 从"靠人复述"变成"可自查"。
-    expect(MCP_TOOLS).toHaveLength(20);
+    // 20 → 17（2026-10-19，有意变更）：
+    //   browse_list_tabs / new_tab / close_tab / set_active_tab 合并为 browse_tabs{op}
+    //   它们操作同一个实体、每个只承载一个动词，是工具膨胀里最没有道理的一种。
+    //   参数只剩 op / tab / url 三个。
+    //   没有顺手删 browse_repaint：它 400B，但删掉并不修掉渲染 bug，只会拿掉
+    //   agent 唯一的恢复手段 —— 用稳定性换 token 是笔不划算的买卖。
+    expect(MCP_TOOLS).toHaveLength(17);
   });
 
   it('新增的两个工具都保持精简描述（护栏：描述长度是每轮都要付的成本）', () => {
@@ -121,14 +127,21 @@ describe('MCP tool list (token-cost guard)', () => {
   it('keeps runtime-exclusive network tools + lifecycle + tab mgmt', () => {
     for (const kept of [
       'browse_quit',
-      'browse_list_tabs',
-      'browse_new_tab',
-      'browse_close_tab',
-      'browse_set_active_tab',
+      'browse_tabs',
       'browse_scroll'
     ]) {
       expect(names).toContain(kept);
     }
+    // 合并后不再有这四个单动词工具
+    for (const gone of ['browse_list_tabs', 'browse_new_tab', 'browse_close_tab', 'browse_set_active_tab']) {
+      expect(names).not.toContain(gone);
+    }
+  });
+
+  it('browse_tabs 的 op 覆盖四种标签页操作', () => {
+    const t = MCP_TOOLS.find((x) => x.name === 'browse_tabs');
+    expect(t.inputSchema.properties.op.enum).toEqual(['list', 'new', 'close', 'switch']);
+    expect(t.inputSchema.required).toEqual(['op']);
   });
 
   it('every tool has a non-empty minimal description and an object inputSchema', () => {
@@ -159,16 +172,20 @@ describe('MCP tool list (token-cost guard)', () => {
     expect(readOnly).toContain('browse_get_tree');
     expect(readOnly).toContain('browse_diff');
     expect(readOnly).toContain('browse_capabilities');
-    expect(readOnly).toContain('browse_list_tabs');
     expect(readOnly).toContain('browse_downloads');
     expect(readOnly).not.toContain('browse_navigate');
     expect(readOnly).not.toContain('browse_act');
     expect(readOnly).not.toContain('browse_evaluate');
+    // browse_tabs 合并了 list（只读）与 new/close（写），整体不能标只读 ——
+    // 否则客户端会把"关闭标签页"渲染成安全操作。
+    expect(readOnly).not.toContain('browse_tabs');
   });
 
-  it('只有 close_tab / quit 标 destructive', () => {
+  it('只有 quit 标 destructive（close 合并进 browse_tabs 后不再单独标）', () => {
     const destructive = MCP_TOOLS.filter((t) => t.annotations.destructiveHint).map((t) => t.name);
-    expect(destructive.sort()).toEqual(['browse_close_tab', 'browse_quit']);
+    // 合并的语义代价：browse_tabs 里 close 是破坏性的，但同一个工具也做 list，
+    // 只能整体标 false，把破坏性写在 description 里。代价记在这里，别忘。
+    expect(destructive.sort()).toEqual(['browse_quit']);
   });
 
   it('触达远程页面的工具标 openWorld，纯本地生命周期/标签管理不标', () => {
@@ -177,7 +194,6 @@ describe('MCP tool list (token-cost guard)', () => {
     expect(open.has('browse_act')).toBe(true);
     expect(open.has('browse_evaluate')).toBe(true);
     expect(open.has('browse_quit')).toBe(false);
-    expect(open.has('browse_close_tab')).toBe(false);
-    expect(open.has('browse_list_tabs')).toBe(false);
+    expect(open.has('browse_tabs')).toBe(false);
   });
 });

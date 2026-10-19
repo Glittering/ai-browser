@@ -118,8 +118,8 @@ focuses the existing window (single instance lock).
 - `browse_repaint` — force compositor redraw when the window shows a stale page.
 - `browse_downloads` — list downloads with on-disk paths (poll after clicking
   export/download; downloads are asynchronous).
-- `browse_list_tabs`, `browse_new_tab`, `browse_close_tab`,
-  `browse_set_active_tab` — tab management.
+- `browse_tabs` — tab management: `{op: "list" | "new" | "close" | "switch"}`.
+  `switch` sets the default target for later calls, so you rarely pass `tab`.
 - `browse_quit` — shut the whole browser down and release the process.
 
 There is no `browse_subscribe` and no `browse_network_body`: real-time events are

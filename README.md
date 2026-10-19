@@ -205,10 +205,7 @@ small surface, since every tool schema is injected into your agent's context on 
 | `browse_evaluate` | Run a JS *expression* in page context (5000-char cap, Node identifiers rejected). |
 | `browse_scroll` | Scroll the page, or scroll an element into view. |
 | `browse_wait` | Poll until `button_enabled` / `modal_appeared` / `text_contains` / `url_contains`. |
-| `browse_list_tabs` | List open tabs (id, url, title, active). |
-| `browse_new_tab` | Open a new tab, optionally at a URL. |
-| `browse_close_tab` | Close a tab by id. |
-| `browse_set_active_tab` | Switch which tab subsequent calls act on. |
+| `browse_tabs` | Tabs: `list` / `new` / `close` / `switch`. `switch` sets the default target for later calls. |
 | `browse_network` | Chrome-DevTools-style network inspection: `list` (filter by method / URL / status / type), `get` (request + response headers and bodies), `clear`, `configure`. |
 | `browse_quit` | Shut the whole browser down and release the process. |
 
@@ -407,7 +404,7 @@ MCP is a thin stdio adapter. Anything MCP can do is reachable directly over JSON
 | `ui.evaluate` | Run JS in page context, same guard as MCP | `browse_evaluate` |
 | `ui.scroll` | Scroll page or element (`direction`, `amount`, `target`). **Document scrolling only** — for canvas apps use `ui.act{action:'wheel'}`. | `browse_scroll` |
 | `ui.wait` | Poll until a condition or timeout | `browse_wait` |
-| `ui.new_tab` / `ui.close_tab` / `ui.list_tabs` / `ui.set_active_tab` | Tab management | `browse_*_tab` |
+| `ui.new_tab` / `ui.close_tab` / `ui.list_tabs` / `ui.set_active_tab` | Tab management (the four are merged into `browse_tabs{op}` on the MCP side) | `browse_tabs` |
 | `ui.subscribe` / `ui.unsubscribe` | Event subscription; `params.events`, `"*"` for all | — (WS only — see below) |
 | `ui.downloads` | This tab's downloads with on-disk paths (`state`, `received_bytes`, `dir`) | `browse_downloads` |
 | `ui.get_focused` | The focused element subtree | — |

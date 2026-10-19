@@ -120,7 +120,7 @@ macOS/Linux 已测，Windows 还没测。欢迎拍砖，也特别想听听你们
 |---|---|---|---|
 | r/ModelContextProtocol | D+1 22:00 | | showcase flair + 披露作者身份 |
 | r/ClaudeAI | D+2 22:00 | | 注意账号 karma 门槛 |
-| V2EX 分享创造 | D+1 12:30 | | 老账号 No.20622 |
+| V2EX 分享创造 | D+1 12:30 | | 老账号 No.20622；❌ **2026-10-19 08:30 发布失败**：本机到 www.v2ex.com 连接超时（浏览器自报 ERR_CONNECTION_TIMED_OUT / -118，curl -4/-6 及三个 DNS 返回的 IP 全部 connect timeout，github.com 同样不可达，baidu/zhihu 正常 → 出口国际链路被拦，无可用代理），卡在网络连通这一步，未进入登录态校验与填表。稿件已就绪于 `ops-audit/v2ex_publish.mjs`，网络恢复后重跑原命令即可 |
 | 知乎文章 | D+1～D+2 | https://zhuanlan.zhihu.com/p/2094594014632793355 | ✅ 2026-10-17 00:20 已发布；踩坑：CMD+V 合成键不触发 Chromium 原生粘贴（CDP 直达渲染器、不过浏览器进程加速键），最终用合成 ClipboardEvent+DataTransfer(text/html) 派发 paste，Draft.js DraftPasteProcessor 全格式转换（6 h2/6 代码块/48 加粗 span/7 列表项） |
 | 掘金长文 | D+2 | https://juejin.cn/post/7697024318929633320 | ✅ 2026-10-16 21:00 已发布（分类"人工智能"+标签"人工智能"）；草稿箱已无该文；踩坑：发布弹窗"添加标签"为必填（红*），缺标签时前端静默失败、仅弹行内错误"至少添加一个标签"，曾误判"发布成功" |
 | B 站视频 | D+2 | | 46s 竖屏已就绪 |
