@@ -785,7 +785,7 @@ class PageManager {
    * 数里，任何一侧读漏都会被另一侧的平均值盖住 —— 泛雅那次就是这样，
    * 主文档读得很好（外壳 100%），正文一个字没有，而没有任何数字表达这件事。
    */
-  _annotateCoverage(res, frames) {
+  _annotateCoverage(res, frames, opts) {
     if (!res || !res.tree || !res.context) return;
     // 读失败时不算覆盖率：这一版树是 bridge 的兜底占位（只有一个装着异常文本的
     // 节点），拿它当分子只会得出一个看似正常的小数字，把"没读成"包装成
@@ -803,6 +803,8 @@ class PageManager {
         shadowChars: Number(stats.shadow_chars) || 0,
         frameChars,
         canvases: Number(stats.canvases) || 0,
+        // AX 树算的是**可访问名**，天生比 innerText 多（aria-label / alt / title）。
+        ax: !!(opts && opts.ax),
       });
     } catch (_) { /* 度量失败绝不影响读树 */ }
   }
@@ -1018,7 +1020,7 @@ class PageManager {
       if (out) {
         const framesForCoverage = out.__frames || [];
         delete out.__frames;
-        this._annotateCoverage(out, framesForCoverage);
+        this._annotateCoverage(out, framesForCoverage, { ax: true });
       }
       return out;
     } catch (e) {

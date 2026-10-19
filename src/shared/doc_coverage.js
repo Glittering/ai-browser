@@ -40,6 +40,17 @@
 const META_ROLES = new Set(['image', 'img', 'iframe', 'iframe_body', 'canvas', 'separator']);
 
 /**
+ * 这些 label **不是页面上渲染出来的文字**，而是可访问名：aria-label / alt /
+ * title / placeholder / input 的 value。抽取器给它们标了 label_kind。
+ *
+ * 为什么必须排除：分母是 innerText，里面根本没有这些字。实测 /basic.html ——
+ * `<input placeholder="随便填">` 让分子 46 大于分母 43，页面明明只有 43 字却报 100%。
+ * 真实站点上每个图标按钮都挂 aria-label，虚高是系统性的，不是零点几个百分点。
+ * （节点本身照旧带 label —— agent 需要它来认识"这个按钮是干什么的"，只是不算进覆盖率。）
+ */
+const isNonRenderedLabel = (n) => !!(n.label_kind && n.label_kind !== 'text');
+
+/**
  * 只数**非空白字符**。
  *
  * 为什么：分母来自 `innerText`，它会把结构分隔符也吐出来 —— 一个 32 格表格的
@@ -81,7 +92,7 @@ export function sumLabelChars(tree) {
     // innerText 里没有它们，算进分子会让覆盖率虚高（一个带 placeholder 的
     // 搜索框就能把 0% 抬到 20%）。
     const role = typeof n.role === 'string' ? n.role.toLowerCase() : '';
-    const own = (n.editor_type || META_ROLES.has(role)) ? 0 : countChars(n.label);
+    const own = (n.editor_type || isNonRenderedLabel(n) || META_ROLES.has(role)) ? 0 : countChars(n.label);
     if (kidsChars > 0) return kidsChars;   // 后代有字：以它们为准，容器不再加一遍
     if (own) labels += 1;                  // 这个节点是这段文字的唯一来源
     return own;
@@ -108,10 +119,13 @@ export const OVER_MEASURED = 1.2;
  * 页面级文字覆盖率。
  *
  * @param {{treeChars:number, mainChars:number, sameOriginChars?:number,
- *          frameChars:number, canvases?:number}} input
+ *          frameChars:number, canvases?:number, ax?:boolean}} input
+ *        ax:true 表示这是 AX 树（label 是可访问名，不是渲染文字），
+ *        超过 100% 不算异常，见下面 over 分支。
  * @returns {{tree_chars:number, page_chars:number, main_chars:number, frame_chars:number,
  *            same_origin_chars:number, ratio:number|null, percent:number|null,
- *            hint:string|null, unmeasurable?:string, over_measured?:boolean}}
+ *            hint:string|null, unmeasurable?:string, over_measured?:boolean,
+ *            names_exceed_text?:boolean}}
  */
 export function pageCoverage(input) {
   const o = input && typeof input === 'object' ? input : {};
@@ -157,6 +171,16 @@ export function pageCoverage(input) {
   base.ratio = Math.round(ratio * 1000) / 1000;
   base.percent = Math.round(ratio * 100);
   if (over) {
+    // AX 树的 label 是**可访问名**，天生包含 aria-label / alt / title 这些
+    // 不属于 innerText 的字。所以 AX 读数超过 100% 是设计使然，不是"分母漏了表面"。
+    // 实测 知乎首页：DOM 346/443、AX 542/443 —— 那 99 个字是 18 个图标按钮的
+    // aria-label，一个字都没漏。这种情况不能报 over_measured（那是给 DOM 树用的
+    // 报警器，报了就是每张真实页面都报警，警报就废了），但也不许装作没发生：
+    // 记一个 names_exceed_text 让调用方知道"这个 100% 是钳出来的"。
+    if (o.ax) {
+      base.names_exceed_text = true;
+      return base;
+    }
     base.over_measured = true;
     base.hint = `the tree carries ${tree} chars but this page only has ${page} measurable visible chars `
       + `(${main} main + ${sameOrigin} same-origin iframe + ${frame} cross-process frame) — `

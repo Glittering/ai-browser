@@ -191,6 +191,9 @@ const EXPECT = [
 let PASS = 0, FAIL = 0, KNOWN = 0;
 const fails = [];
 const knowns = [];
+// 验收表：每张 fixture 的实测数字。跑完一起打出来 —— 验收要能给"这一项符合
+// 预期"拿出数字，而不是只有一句 PASS。
+const rows = [];
 function check(name, cond, detail) {
   if (cond) { PASS++; console.log(`  PASS | ${name}`); }
   else { FAIL++; fails.push(name + (detail ? " — " + detail : "")); console.log(`  FAIL | ${name}${detail ? " — " + detail : ""}`); }
@@ -297,6 +300,12 @@ async function main() {
     // ---- 全局不变量 1：分子不许大于分母（大于就是分母漏了一个表面）
     check(`${exp.path} 不出现 over_measured`, !pc.over_measured,
       pc.over_measured ? `tree=${pc.tree_chars} page=${pc.page_chars}` : "");
+    // over_measured 的 1.2 倍阈值挡的是"漏了一整块表面"；这里挡的是**小口子**：
+    // 分子比分母多出几个字，说明有个节点的字根本不在 innerText 里。
+    // 实测 /basic.html 46/43：`<input placeholder="随便填">` 的占位符被算成正文。
+    // 留 2 字容差给换行/连字符这类归一化差异。
+    check(`${exp.path} 分子不超过分母（+2 字容差）`, pc.tree_chars <= (pc.page_chars || 0) + 2,
+      `tree=${pc.tree_chars} page=${pc.page_chars} 多出 ${pc.tree_chars - pc.page_chars}`);
 
     // ---- 全局不变量 2：读不全就必须给一句**照着能做**的话
     //
@@ -374,6 +383,11 @@ async function main() {
     // ---- 长文额外验一次 AX 读法
     if (exp.axBand || exp.axMustContain) {
       const a = await readAx();
+      // AX 的 label 是可访问名，天然比 innerText 多 —— 超 100% 不算缺陷。
+      // 但报成 over_measured 就是缺陷（实测 知乎首页 AX 542/443 曾被报成
+      // "分母漏了一个承载文字的表面"）。这条钉住那个假警报。
+      check(`${exp.path} AX 不误报 over_measured`, !!a && !a.over_measured,
+        `ax over_measured=${a && a.over_measured} chars=${a && a.tree_chars}/${a && a.page_chars}`);
       if (exp.axBand) {
         check(`${exp.path} AX 树 ratio 落在 [${exp.axBand[0]}, ${exp.axBand[1]}]`,
           !!a && a.ratio !== null && a.ratio >= exp.axBand[0] && a.ratio <= exp.axBand[1],
@@ -386,10 +400,34 @@ async function main() {
       }
     }
 
+    // 记一行验收数据。放在这一轮**所有**断言之后：AX 那一侧可能在上面的
+    // 不变量检查里才被读（axRead 成立），早记一行就会把 AX 列记成空。
+    rows.push({
+      path: exp.path,
+      name: exp.name,
+      dom: `${pc.tree_chars}/${pc.page_chars}`,
+      pct: pc.percent === null ? (pc.unmeasurable ? "n/a" : "null") : pc.percent + "%",
+      hint: pc.hint ? "有" : "—",
+      ax: axRead && axPc && axPc.ratio !== null ? Math.round(axPc.ratio * 100) + "%" : "—",
+      band: exp.band ? `[${exp.band[0]}, ${exp.band[1]}]` : "—",
+    });
+
     await b.call("ui.close_tab", { tab });
   }
 
   console.log(`\n==== PASS=${PASS} FAIL=${FAIL} ====`);
+
+  // 验收表：地形 / DOM 树读到的字数 / 比例 / 有没有指路 / AX 读法 / 期望区间
+  const pad = (s, n) => {
+    const w = [...String(s)].reduce((a, ch) => a + (ch.charCodeAt(0) > 127 ? 2 : 1), 0);
+    return String(s) + " ".repeat(Math.max(0, n - w));
+  };
+  console.log(`\n验收表（DOM = 进树的字/页面可见字）：`);
+  console.log("  " + pad("fixture", 24) + pad("DOM", 12) + pad("比例", 8) + pad("hint", 6) + pad("AX", 7) + "期望");
+  for (const r of rows) {
+    console.log("  " + pad(r.path, 24) + pad(r.dom, 12) + pad(r.pct, 8) + pad(r.hint, 6) + pad(r.ax, 7) + r.band);
+  }
+  console.log("  AX 列 — = 这条不靠 AX 出路，没读它（帧类页面靠 frame_ref，见 needFrameReadable）");
   if (KNOWN) {
     console.log(`\n已知残留（${KNOWN} 项，不计失败，但必须可见）：`);
     for (const k of knowns) console.log("  - " + k);

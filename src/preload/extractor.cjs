@@ -541,9 +541,22 @@ function extractTree() {
     return null;
   }
 
-  function extractLabel(el) {
+  // label 的来源。**只有 kind === "text" 的字才在页面的 innerText 里**，
+  // 其余（aria-label / alt / title / placeholder）都是可访问名，不是渲染出来的文字。
+  //
+  // 为什么必须区分：coverage 的分母是 innerText，分子是树里 label 的字数。
+  // 把可访问名算进分子，等于拿两把尺子量 —— 实测 /basic.html：
+  // `<input placeholder="随便填">` 让分子 46 大于分母 43，明明只读到 43 字却报 100%。
+  // 这类节点在真实站点上极其常见（每个图标按钮都挂 aria-label），
+  // 所以这不是零点几个百分比的噪声，而是系统性虚高。
+  // 节点上只在"不是渲染文字"时才写 label_kind，正常节点不加字段（省 token）。
+  function extractLabel(el, meta) {
+    var setKind = function (kind, value) {
+      if (meta) meta.kind = kind;
+      return value;
+    };
     var ariaLabel = el.getAttribute("aria-label");
-    if (ariaLabel) return ariaLabel;
+    if (ariaLabel) return setKind("aria", ariaLabel);
     // 图片的可访问名是 alt（HTML-AAM 规定），此前完全没读。
     //
     // 实测（B站动态正文）：插入的表情是 `<img alt="[doge_金箍]">`，正文里看得见、
@@ -551,7 +564,7 @@ function extractTree() {
     // 同理，带 alt 的图标按钮（img 包在 <button> 里）也变成了无名节点。
     // 空 alt（alt="" 表示装饰性图片）继续往下走，不制造假名字。
     var alt = el.getAttribute("alt");
-    if (alt && String(alt).trim()) return String(alt).trim();
+    if (alt && String(alt).trim()) return setKind("alt", String(alt).trim());
     // input[type=submit|button|reset] 的可访问名是 value（同理，标准规定）。
     // 没有这条，提交按钮在树里是"无名可点节点"，只能靠坐标点。
     var tagName = String(el.tagName || "").toUpperCase();
@@ -559,21 +572,21 @@ function extractTree() {
       var itype = String(el.getAttribute("type") || "").toLowerCase();
       if (itype === "submit" || itype === "button" || itype === "reset") {
         var iv = el.getAttribute("value");
-        if (iv && String(iv).trim()) return String(iv).trim();
+        if (iv && String(iv).trim()) return setKind("value", String(iv).trim());
       }
     }
     var title = el.getAttribute("title");
-    if (title) return title;
+    if (title) return setKind("title", title);
     var text = renderedText(el).trim();
     // 截断必须**留痕**。原来这里是裸 `text.slice(0, 60)`：一段 500 字的正文在树里
     // 变成 60 字，而且看不出被砍过 —— agent 会把它当成"这一段就这么点字"。
     // 实测 /long.html：60 段全在树里，覆盖率只有 70%，原因就是每段被裁到 60；
     // 而回执上没有任何一处说"我裁过"。抄 frame_read_source 的 clip() 口径，补一个省略号。
     if (text.length > 60) text = text.slice(0, 59) + "\u2026";
-    if (text) return text;
+    if (text) return setKind("text", text);
     var placeholder = el.getAttribute("placeholder");
-    if (placeholder) return placeholder;
-    return "";
+    if (placeholder) return setKind("placeholder", placeholder);
+    return setKind("none", "");
   }
 
   // 元素上**看得见**的文字。
@@ -729,7 +742,8 @@ function extractTree() {
       return null;
     }
 
-    var label = extractLabel(el);
+    var labelMeta = {};
+    var label = extractLabel(el, labelMeta);
     var role = inferRole(el);
     var actions = extractActions(el, role);
     var bounds = extractBounds(el);
@@ -803,6 +817,10 @@ function extractTree() {
       actions: actions,
       bounds: bounds
     };
+    // 只有当 label **不是**页面上渲染出来的文字时才写这一位。coverage 分子靠它
+    // 把 aria-label / alt / title / placeholder 排除掉（它们不在 innerText 里）。
+    // 正常节点不写，省 token。
+    if (labelMeta.kind && labelMeta.kind !== "text") node.label_kind = labelMeta.kind;
     // Attach current value for input/textarea/contenteditable.
     // 截断走共享契约（src/shared/value_contract.cjs）：按 Unicode code point
     // 计数，截断时带 value_truncated / value_full_length / value_fetch_ref，

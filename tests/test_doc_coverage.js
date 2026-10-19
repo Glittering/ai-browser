@@ -33,6 +33,22 @@ describe('sumLabelChars()', () => {
     expect(sumLabelChars(t).chars).toBe('搜索框占位符文字很长'.length);
   });
 
+  it('DC-2b: 可访问名（aria-label / placeholder / title / alt）不算正文', () => {
+    // 实测 /basic.html：`<input placeholder="随便填">` 让分子 46 > 分母 43，
+    // 页面只有 43 字却报 100%。抽取器会给这类节点标 label_kind，
+    // 只有 label_kind === 'text' 的字在 innerText 里。
+    const t = tree(
+      node('看得见的一句'),
+      { id: 'a', role: 'button', label: '搜索', label_kind: 'aria', actions: [] },
+      { id: 'b', role: 'textbox', label: '随便填', label_kind: 'placeholder', actions: [] },
+      { id: 'c', role: 'link', label: '提示', label_kind: 'title', actions: [] },
+      { id: 'd', role: 'image', label: 'Logo', label_kind: 'alt', actions: [] }
+    );
+    expect(sumLabelChars(t).chars).toBe(nw('看得见的一句'));
+    // label_kind === 'text' 或没有这一位的，照常算
+    expect(sumLabelChars(tree({ id: 'e', role: 'generic', label: '正文', label_kind: 'text', actions: [] })).chars).toBe(2);
+  });
+
   it('DC-3: 空树 / null 不炸', () => {
     expect(sumLabelChars(null)).toEqual({ chars: 0, labels: 0, nodes: 0 });
     expect(sumLabelChars(tree()).chars).toBe(0);
@@ -200,6 +216,18 @@ describe('pageCoverage()', () => {
     expect(c.percent).toBe(90);
     expect(c.unmeasurable).toBeUndefined();
     expect(c.hint).toBe(null);
+  });
+
+  it('DC-19: AX 树的可访问名超 100% 不算 over_measured（知乎 542/443 那种）', () => {
+    // AX 的 label 是可访问名，天生含 aria-label / alt / title，比 innerText 多。
+    // 实测 https://www.zhihu.com/：DOM 346/443、AX 542/443，那 99 字是图标按钮的
+    // aria-label。对 DOM 树那是"分母漏了一块"，对 AX 树那是设计使然。
+    const ax = pageCoverage({ treeChars: 542, mainChars: 443, ax: true });
+    expect(ax.ratio).toBe(1);
+    expect(ax.over_measured).toBeUndefined();
+    expect(ax.names_exceed_text).toBe(true);
+    // 同一组数字走 DOM 必须报警 —— 报警器只对 DOM 树有意义
+    expect(pageCoverage({ treeChars: 542, mainChars: 443 }).over_measured).toBe(true);
   });
 
   it('DC-11: 阈值边界两侧行为相反（LOW_COVERAGE 现为 0.9，跟着不变量走）', () => {
