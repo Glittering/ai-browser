@@ -84,6 +84,21 @@ Cline, etc.):
 From-source alternative: `"command": "node"` with the absolute path to
 `src/main/mcp_server.js`.
 
+> **Match the version, or nothing lines up.** The skill shipped in this package documents the
+> tool surface of the *same* version. Before pasting `npx` above, compare
+> `npm view @glittering0717/ai-browser version` with this repo's `package.json`. If they differ
+> (they have: npm 1.3.1 vs repo 2.0.0), use the from-source form with the source path — a 1.x
+> server behind a 2.x skill means every tool name and parameter in the skill is wrong, and a
+> small model cannot tell that apart from "the MCP server is down". A concrete field report:
+> a 35B local model spent a long session concluding "the skill is installed but the MCP server
+> is not mounted", correctly diagnosing a missing config entry while the real trap was that
+> nothing had been registered at all — see the `ai-browser` entry in the client's `mcp.json`.
+>
+> **No MCP at all?** The CLI speaks the same JSON-RPC and needs no registration:
+> `ai-browser status`, `ai-browser call ui.navigate '{"url":"..."}'`. Installing the package
+> globally (`npm i -g @glittering0717/ai-browser`) puts that binary on PATH; from a source
+> checkout, `npm link` does the same.
+
 Do **not** launch the browser yourself first: on the first `browse_*` call the MCP server probes
 port 9223, spawns Electron detached if nothing is listening, and waits up to 30 s (the very first
 call can take longer if the engine download hasn't happened yet — the progress goes to stderr).
