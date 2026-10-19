@@ -135,11 +135,53 @@ describe('pageCoverage()', () => {
     expect(pageCoverage({ treeChars: 600, mainChars: 1000, frameChars: 0 }).hint).toBe(null);
   });
 
-  it('DC-10: 分子大于分母（父子节点文字重复）时钳到 1，不报 1.4', () => {
+  it('DC-10: 分子大于分母时不许装作 100% 没事 —— 那是分母漏了一块', () => {
+    // 这条测试原来断言的是"钳到 1、不给提示"，也就是我自己第一版的行为：
+    // 泛雅页分子 547 分母 185，钳成 100%，看起来最健康，问题藏得最深。
+    // 现在反过来：比例照钳（1 是比例的上界），但必须带 over_measured 和一句
+    // "分母漏了一个承载文字的表面"。
     const c = pageCoverage({ treeChars: 1400, mainChars: 1000, frameChars: 0 });
     expect(c.ratio).toBe(1);
     expect(c.percent).toBe(100);
-    expect(c.tree_chars).toBe(1400); // 原始数字保留，方便发现"重复"这件事
+    expect(c.tree_chars).toBe(1400); // 原始数字保留
+    expect(c.over_measured).toBe(true);
+    expect(c.hint).toContain('larger than the denominator');
+  });
+
+  it('DC-10b: 只是轻微超过（1.0~1.2）不算事故，不制造噪声', () => {
+    // 同源子帧的文字如果刚好多出来一点点，不该每次都喊。阈值 1.2。
+    const c = pageCoverage({ treeChars: 1100, mainChars: 1000, frameChars: 0 });
+    expect(c.ratio).toBe(1);
+    expect(c.over_measured).toBeUndefined();
+  });
+
+  it('DC-16: 同源子帧的文字必须进分母（实测 83/20 被报成 100% 的那个 bug）', () => {
+    // 主文档 21 字，同源子帧 330 字，树里 83 字。
+    // 修前：分母 21 → 比例 3.95 → 钳到 100%（谎报）。
+    // 修后：分母 351 → 24%，且提示"主要缺口在正文里"。
+    const c = pageCoverage({ treeChars: 83, mainChars: 21, sameOriginChars: 330, frameChars: 0 });
+    expect(c.page_chars).toBe(351);
+    expect(c.same_origin_chars).toBe(330);
+    expect(c.percent).toBe(24);
+    expect(c.over_measured).toBeUndefined();
+    expect(c.hint).not.toBe(null);
+  });
+
+  it('DC-17: canvas 页的量不了，不许报 100%', () => {
+    // 实测：一个把 12 行字画在画布上的页面，innerText 只有 4 字的 HUD 文案。
+    // 分母 4、分子 60 → 1500% → 钳到 100%。画布上的字一个字都没被读，却报满分。
+    const c = pageCoverage({ treeChars: 60, mainChars: 4, frameChars: 0, canvases: 1 });
+    expect(c.ratio).toBe(null);
+    expect(c.percent).toBe(null);
+    expect(c.unmeasurable).toBe('canvas');
+    expect(c.hint).toContain('canvas');
+  });
+
+  it('DC-18: 有 canvas 但页面正文很多时，正常按文字算（canvas 只是页面的一部分）', () => {
+    const c = pageCoverage({ treeChars: 900, mainChars: 1000, frameChars: 0, canvases: 2 });
+    expect(c.percent).toBe(90);
+    expect(c.unmeasurable).toBeUndefined();
+    expect(c.hint).toBe(null);
   });
 
   it('DC-11: 阈值是 0.5，边界两侧行为相反', () => {

@@ -80,36 +80,81 @@ export function sumLabelChars(tree) {
 const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
 
 /**
+ * 分子超过分母这么多，就不是"读得好"，是**分母漏了一块**。
+ *
+ * 为什么要留这个判据：这个指标的第一版就在这里撒过谎。泛雅页分子 547、分母 185，
+ * 我当时的处理是钳到 1、当没事发生。可"分子大于分母"本身就是一个**测量结论**：
+ * 树里数出来的字比页面上能看见的还多，只可能是分母少统计了一个承载文字的
+ * 表面（同源子帧 / shadow DOM / canvas），或者是分子在重复计数。
+ * 钳掉之后，100% 这个数字看起来最健康，恰好把问题藏得最深。
+ */
+export const OVER_MEASURED = 1.2;
+
+/**
  * 页面级文字覆盖率。
  *
- * @param {{treeChars:number, mainChars:number, frameChars:number}} input
+ * @param {{treeChars:number, mainChars:number, sameOriginChars?:number,
+ *          frameChars:number, canvases?:number}} input
  * @returns {{tree_chars:number, page_chars:number, main_chars:number, frame_chars:number,
- *            ratio:number|null, percent:number|null, hint:string|null}}
+ *            same_origin_chars:number, ratio:number|null, percent:number|null,
+ *            hint:string|null, unmeasurable?:string, over_measured?:boolean}}
  */
 export function pageCoverage(input) {
   const o = input && typeof input === 'object' ? input : {};
   const tree = Math.max(0, Number(o.treeChars) || 0);
   const main = Math.max(0, Number(o.mainChars) || 0);
+  const sameOrigin = Math.max(0, Number(o.sameOriginChars) || 0);
   const frame = Math.max(0, Number(o.frameChars) || 0);
-  const page = main + frame;
+  const canvases = Math.max(0, Number(o.canvases) || 0);
+  // 分母 = 分子会走到的每一个表面：主文档 + 同源子帧 + 跨进程帧。
+  // 少算任何一块，比例就虚高 —— 而同源子帧是最容易漏的那块，因为
+  // `body.innerText` 不下钻 iframe，抽取器却会。
+  const page = main + sameOrigin + frame;
   const base = {
     tree_chars: tree,
     page_chars: page,
     main_chars: main,
     frame_chars: frame,
+    same_origin_chars: sameOrigin,
     ratio: null,
     percent: null,
     hint: null,
   };
-  // 页面一个字都没有（空标签页、纯 canvas、还没渲染）→ 不报覆盖率。
+  // 页面一个字都没有（空标签页、还没渲染）→ 不报覆盖率。
   // 报 0 会被读成"我们没读到"，而事实是"没有可读的文字"。两种情况必须分开。
-  if (page <= 0) return base;
-  const ratio = clamp01(tree / page);
+  if (page <= 0) {
+    if (canvases > 0) {
+      return { ...base, unmeasurable: 'canvas', hint: CANVAS_HINT };
+    }
+    return base;
+  }
+  // canvas 画的字永远不在 innerText 里，所以这类页面的"文字覆盖率"没有分母。
+  // 与其拿页面上那 4 个字的 HUD 文案算出一个 100%，不如直接说量不了。
+  if (canvases > 0 && page < 200) {
+    return { ...base, unmeasurable: 'canvas', hint: CANVAS_HINT };
+  }
+
+  const raw = tree / page;
+  const over = raw > OVER_MEASURED;
+  const ratio = clamp01(raw);
   base.ratio = Math.round(ratio * 1000) / 1000;
   base.percent = Math.round(ratio * 100);
+  if (over) {
+    base.over_measured = true;
+    base.hint = `the tree carries ${tree} chars but this page only has ${page} measurable visible chars `
+      + `(${main} main + ${sameOrigin} same-origin iframe + ${frame} cross-process frame) — `
+      + 'the numerator is larger than the denominator, so the denominator is missing a surface '
+      + '(text inside shadow DOM, or a frame we could not measure). Treat this page\'s coverage as unknown, '
+      + 'not as 100%: read with get_tree {ax:true} and judge by the content';
+    return base;
+  }
   base.hint = coverageHint(base);
   return base;
 }
+
+const CANVAS_HINT = 'this page draws on a <canvas>, so its text is invisible to innerText and text coverage '
+  + 'cannot be measured — a percentage here would be meaningless. Use ui.screenshot to see it, '
+  + 'ui.canvas_read to get the pixels, or context.route in ui.capabilities to pick a read layer';
 
 /**
  * 低于这个比例才给提示。0.5 不是"合格线"，是"再低就不像读过了"：
@@ -149,4 +194,4 @@ function coverageHint(c) {
   return `the tree carries ${c.percent}% of this page's visible text (${c.tree_chars}/${c.page_chars} chars) — the gap is split between the main document and cross-process frames; check context.frame_hints first`;
 }
 
-export default { sumLabelChars, pageCoverage, LOW_COVERAGE, MIN_MISSING_CHARS };
+export default { sumLabelChars, pageCoverage, LOW_COVERAGE, MIN_MISSING_CHARS, OVER_MEASURED };

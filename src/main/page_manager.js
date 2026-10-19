@@ -799,7 +799,9 @@ class PageManager {
       res.context.page_coverage = docCoverage.pageCoverage({
         treeChars: summed.chars,
         mainChars: Number(stats.text_chars) || 0,
+        sameOriginChars: Number(stats.same_origin_chars) || 0,
         frameChars,
+        canvases: Number(stats.canvases) || 0,
       });
     } catch (_) { /* 度量失败绝不影响读树 */ }
   }

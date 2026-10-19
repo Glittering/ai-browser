@@ -1462,6 +1462,34 @@ function extractPageContext() {
           var t = document.body && document.body.innerText;
           return t ? String(t).replace(/[\s\u00a0]+/g, " ").trim().length : 0;
         } catch(e) { return 0; }
+      })(),
+      // 同源子帧里的可见文字。**必须单独算、并进分母**：抽取器会走进同源
+      // iframe（见 winOf 的注释），所以树里有它们的文字，但
+      // `document.body.innerText` 不会下钻到 iframe（iframe 是替换元素）。
+      // 2026-10-19 实测：主文档 21 字 + 同源子帧 330 字，分子 83、分母 20，
+      // 比例 4.15 被钳到 100% —— 一个 24% 的页面被报成"全读到了"。
+      // 比例大于 1 从来不是"读得特别好"，是**分母漏了一块**。
+      same_origin_chars: (function() {
+        var total = 0;
+        try {
+          var frames = document.querySelectorAll("iframe");
+          for (var i = 0; i < frames.length; i++) {
+            var doc = null;
+            try { doc = frames[i].contentDocument; } catch(e) { doc = null; }
+            if (!doc || !doc.body) continue;   // 跨进程帧拿不到 contentDocument
+            try {
+              var t = doc.body.innerText;
+              if (t) total += String(t).replace(/[\s\u00a0]+/g, " ").trim().length;
+            } catch(e) {}
+          }
+        } catch(e) {}
+        return total;
+      })(),
+      // canvas 数量。innerText 永远看不见画在画布上的字，所以这类页面的
+      // 文字覆盖率**不可度量** —— 报 100% 是彻头彻尾的谎报（实测：一个只画
+      // 了 12 行字的 canvas 页，分母 4 字、报 100%）。有它才能说"量不了"。
+      canvases: (function() {
+        try { return document.querySelectorAll("canvas").length; } catch(e) { return 0; }
       })()
     }
   };
