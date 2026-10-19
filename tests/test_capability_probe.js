@@ -122,3 +122,96 @@ describe('PROBE_JS —— 表驱动测试赖以成立的 hint 格式（执行真
     expect(out.globals).toEqual([]);
   });
 });
+
+// ---- 泛雅事故：树薄不等于 canvas ----
+import { describeThinTree, recommend } from '../src/main/capability_probe.js';
+
+describe('describeThinTree() — 三种"树看不到内容"的归因必须分开', () => {
+  const base = { elements: 27, actionable: 13, canvasTop: 0, canvasInFrames: 0, opaqueFrames: [] };
+
+  it('CP-016: 有跨进程 iframe、没有 canvas → 不许说 canvas-rendered（原始 bug）', () => {
+    // 实测原话：'only 27 elements (13 actionable) — the UI is largely canvas-rendered'
+    // 而同一份回执里 canvas_top=0、cross-process iframe=1。归因错了，agent 会被
+    // 推去做 L3 指针手势（在"canvas"上瞎点），而正确动作是去读那个 frame。
+    const why = describeThinTree({
+      ...base,
+      opaqueFrames: [{ src: 'https://mooc2-ans.xidian.edu.cn/mooc2-ans/mycourse/studentcourse?x=1', box: [180, 52, 1100, 646] }],
+    });
+    expect(why).not.toContain('canvas-rendered');
+    expect(why).toContain('cross-process iframe');
+    expect(why).toContain('studentcourse'); // 给出可用的地址
+  });
+
+  it('CP-017: 真有 canvas 时才说 canvas（并给出 顶层/帧内 的拆分）', () => {
+    const why = describeThinTree({ ...base, canvasTop: 0, canvasInFrames: 7 });
+    expect(why).toContain('canvas-rendered');
+    expect(why).toContain('7 canvas');
+    expect(why).toContain('0 top-level');
+  });
+
+  it('CP-018: 既没 canvas 也没帧 → 说"页面本身稀疏/可能还在加载"，不许编原因', () => {
+    const why = describeThinTree(base);
+    expect(why).not.toContain('canvas-rendered');
+    expect(why).not.toContain('iframe');
+    expect(why).toContain('sparse');
+  });
+
+  it('CP-019: 只有 canvas 时才提 canvas —— 两者并存时 canvas 优先（它更硬）', () => {
+    const why = describeThinTree({ ...base, canvasTop: 2, opaqueFrames: [{ src: 'https://a.test/' }] });
+    expect(why).toContain('canvas-rendered');
+  });
+});
+
+describe('recommend() — 内容藏在 iframe 里时不能给出空建议', () => {
+  const thin = (n, actionable) => Array.from({ length: n }, (_, i) => ({
+    role: i < actionable ? 'link' : 'generic',
+    actions: i < actionable ? ['click'] : [],
+  }));
+
+  it('CP-020: 泛雅形状 → recommended 非空，且归因指向 iframe 而非 canvas', () => {
+    const r = recommend({
+      flat: thin(27, 13),
+      dom: {
+        topCanvas: 0,
+        iframes: [{ index: 0, src: 'https://x.test/f', sameOrigin: false, box: [180, 52, 1100, 646] }],
+        globals: [],
+      },
+      endpoints: [],
+    });
+    expect(r.recommended.length).toBeGreaterThan(0);
+    expect(r.recommended).toContain('L2_semantic_tree');
+    const l2 = r.routes.find((x) => x.route === 'L2_semantic_tree');
+    expect(l2.why).not.toContain('canvas-rendered');
+    expect(l2.evidence.cross_process_frames).toBe(1);
+    expect(l2.evidence.canvas_rendered).toBe(false);
+    const note = r.routes.find((x) => x.route === 'NOTE_cross_process_iframe');
+    expect(note).toBeTruthy();
+    expect(note.evidence.frames[0].src).toBe('https://x.test/f');
+  });
+
+  it('CP-021: 零尺寸帧（广告/埋点）不算内容帧', () => {
+    const r = recommend({
+      flat: thin(10, 2),
+      dom: { topCanvas: 0, iframes: [{ index: 0, src: 'https://ad.test/', sameOrigin: false, box: [0, 0, 0, 0] }], globals: [] },
+      endpoints: [],
+    });
+    expect(r.recommended).toEqual([]);
+    expect(r.routes.some((x) => x.route === 'NOTE_cross_process_iframe')).toBe(false);
+  });
+
+  it('CP-022: 元素足够多时走 rich 分支，不误报 canvas/iframe', () => {
+    const flat = [
+      ...thin(70, 20),
+      ...Array.from({ length: 10 }, () => ({ role: 'heading', actions: [] })),
+      ...Array.from({ length: 5 }, () => ({ role: 'text', actions: [] })),
+    ];
+    const r = recommend({
+      flat,
+      dom: { topCanvas: 1, iframes: [{ index: 0, src: 'https://x.test/f', sameOrigin: false, box: [0, 0, 800, 600] }], globals: [] },
+      endpoints: [],
+    });
+    const l2 = r.routes.find((x) => x.route === 'L2_semantic_tree');
+    expect(l2.preferred).toBe(true);
+    expect(l2.why).toContain('distinct roles');
+  });
+});

@@ -115,7 +115,12 @@ export const PROBE_JS = `(function(){
 
     scan(window, 'top');
     Array.prototype.forEach.call(document.querySelectorAll('iframe'), function(f, i) {
-      var rec = { index: i, src: (f.getAttribute('src') || '').slice(0, 80),
+      // src_attr 是原始属性（可能是相对地址，也可能根本没有），src 是解析后的
+      // 绝对地址 —— 后者才能直接喂给 ui.new_tab / ui.navigate。此前只报相对
+      // 地址，等于告诉调用方"内容在那"，却给了一个不能用的地址。
+      var rec = { index: i,
+                  src: String(f.src || ''),
+                  src_attr: (f.getAttribute('src') || '').slice(0, 120),
                   sameOrigin: false, innerElements: 0, innerCanvas: 0, innerButtons: 0 };
       try {
         var d = f.contentDocument;
@@ -151,9 +156,13 @@ export async function probeCapabilities(pageManager, opts = {}) {
   // 1. Semantic tree — the single most informative signal. A page whose whole UI
   //    is canvas shows up as a tiny tree; that is the tell.
   let tree = null;
+  let treeCtx = null;
   try {
     const res = await pageManager.getTree(false, tid);
     tree = res && res.tree;
+    // 保留 context：frame_hints 里写着"跨进程帧并进去多少、还剩多少没进树"，
+    // 那是"树薄"最直接的解释，不该只留在 get_tree 的回执里让探针重新猜一遍。
+    treeCtx = (res && res.context) || null;
   } catch (e) { /* getTree timeout on a busy page must not kill the probe */ }
 
   const flat = [];
@@ -205,6 +214,9 @@ export async function probeCapabilities(pageManager, opts = {}) {
       visible: (dom && dom.canvases) || [],
     },
     iframes: (dom && dom.iframes) || [],
+    // 树对跨进程帧的覆盖率（来自 get_tree 的回执，不是探针自己算的）。
+    // null = 这个页面没有跨进程帧，或者读树失败。
+    frame_hints: (treeCtx && treeCtx.frame_hints) || null,
     app_globals: (dom && dom.globals) || [],
     endpoints,
     route,
@@ -302,10 +314,47 @@ export function rankAppGlobals(globals) {
 }
 
 /**
+ * "树为什么这么薄" —— 三种归因必须分开说。
+ *
+ * 事故（2026-10-19，超星泛雅学习页）：树只有 27 个节点、13 个可操作，探针**自己
+ * 测到了** 1 个跨进程 iframe（`iframe: 跨进程 1 个`、`canvas 顶层级 0`），却在
+ * 结论里写 "the UI is largely canvas-rendered, so the tree cannot see the content"。
+ * 归因错了：内容看不见是因为它在 iframe 里，不是因为它画在 canvas 上。这个错误
+ * 直接把 agent 推向 L3 指针手势 —— 也就是"在 canvas 上瞎点"，而正确动作是去读
+ * 那个 frame。
+ *
+ * 原来的写法是模板串里无条件带上 "largely canvas-rendered"，只有前半句
+ * `${totalCanvas ? ...}` 受条件控制。**"树薄 = canvas" 曾经是唯一已知原因，
+ * 后来 iframe 成了更常见的原因，这句文案却没跟着改。**
+ *
+ * @param {{elements:number, actionable:number, canvasTop:number, canvasInFrames:number, opaqueFrames:Array}} input
+ */
+export function describeThinTree(input) {
+  const o = input && typeof input === 'object' ? input : {};
+  const elements = Number(o.elements) || 0;
+  const actionable = Number(o.actionable) || 0;
+  const canvasTop = Number(o.canvasTop) || 0;
+  const canvasInFrames = Number(o.canvasInFrames) || 0;
+  const canvas = canvasTop + canvasInFrames;
+  const frames = (Array.isArray(o.opaqueFrames) ? o.opaqueFrames : []).filter(Boolean);
+  const head = `only ${elements} elements (${actionable} actionable)`;
+
+  if (canvas > 0) {
+    return `${head} and ${canvas} canvas element(s) (${canvasTop} top-level, ${canvasInFrames} in frames) — the UI is largely canvas-rendered, so the tree cannot see the content`;
+  }
+  if (frames.length) {
+    const first = frames.find((f) => f && f.src) || frames[0];
+    const where = first && first.src ? ` (first: ${String(first.src).slice(0, 100)})` : '';
+    return `${head} and ${frames.length} cross-process iframe(s) the top document cannot read${where} — the content is inside those frames, NOT on a canvas; the tree merges their nodes, and the frame src is directly navigable`;
+  }
+  return `${head}, no canvas and no cross-process frame — the page is either genuinely sparse (a form, a stub) or still loading; verify with ui.screenshot or retry once it settles before concluding the tree cannot see the content`;
+}
+
+/**
  * The actual deliverable: which route to take, and WHY (with the evidence).
  * Every claim cites the number that produced it, so a caller can disagree.
  */
-function recommend({ flat, dom, endpoints }) {
+export function recommend({ flat, dom, endpoints }) {
   const routes = [];
   const iframes = (dom && dom.iframes) || [];
   const globals = (dom && dom.globals) || [];
@@ -313,6 +362,14 @@ function recommend({ flat, dom, endpoints }) {
   const frameCanvas = iframes.reduce((s, f) => s + (f.innerCanvas || 0), 0);
   const totalCanvas = topCanvas + frameCanvas;
   const sameOriginFrame = iframes.find((f) => f.sameOrigin);
+  // 跨进程、且**有尺寸**的帧：内容在另一个渲染进程里，顶层文档读不到。广告/埋点
+  // 帧通常是 0×0，不算。这是"树薄"最常见的真实原因（泛雅、B站图文、掘金都属这类）。
+  const opaqueFrames = iframes.filter((f) => {
+    if (!f || f.sameOrigin) return false;
+    const box = f.box;
+    if (!Array.isArray(box)) return true; // 拿不到尺寸时按"可能是内容帧"处理
+    return (Number(box[2]) || 0) > 0 && (Number(box[3]) || 0) > 0;
+  });
   const ranked = rankAppGlobals(globals);
   const graphObj = ranked.length ? ranked[0].g : null;
   // Say so explicitly when the top candidate is a library rather than a model:
@@ -363,10 +420,19 @@ const actionable = flat.filter((n) => (n.actions || []).some((a) => a === 'click
 const rich = flat.length >= 60 && roleSet.size >= 4 && actionable >= 10;
   routes.push({
     route: 'L2_semantic_tree',
-    preferred: !graphObj && rich,
+    // 内容藏在跨进程帧里时，树仍然是**唯一**的结构化通路（默认读法会自动把帧里
+    // 的节点并进来），所以它该被推荐 —— 此前这种页面上 recommended 是**空数组**，
+    // 调用方问"走哪条路"得到一个空答案。
+    preferred: !graphObj && (rich || (opaqueFrames.length > 0 && totalCanvas === 0)),
     why: rich
       ? `${flat.length} elements, ${roleSet.size} distinct roles, ${actionable} with a click/type action — targets can be found by role/label and driven by data-ai-id, no coordinates`
-      : `only ${flat.length} elements (${actionable} actionable)${totalCanvas ? ` and ${totalCanvas} canvas element(s)` : ''} — the UI is largely canvas-rendered, so the tree cannot see the content`,
+      : describeThinTree({
+        elements: flat.length,
+        actionable,
+        canvasTop: topCanvas,
+        canvasInFrames: frameCanvas,
+        opaqueFrames,
+      }),
     evidence: {
       elements: flat.length,
       actionable,
@@ -376,9 +442,24 @@ const rich = flat.length >= 60 && roleSet.size >= 4 && actionable >= 10;
       // to conclude "no canvas, must be DOM" — the opposite of the truth.
       canvas_top: topCanvas,
       canvas_in_frames: frameCanvas,
+      // 同样的道理适用于 iframe：说"有几个帧"不够，要说"哪几个帧，地址是什么"。
+      cross_process_frames: opaqueFrames.length,
+      canvas_rendered: totalCanvas > 0,
     },
     how: 'ui.get_tree to read; ui.act with the returned data-ai-id to click/type/setContent',
   });
+
+  if (opaqueFrames.length && !rich) {
+    routes.push({
+      route: 'NOTE_cross_process_iframe',
+      preferred: false,
+      why: `${opaqueFrames.length} cross-process iframe(s) hold content the top document cannot read — the semantic tree splices their nodes in (context.frame_hints tells you how much actually made it), and .frames[].src is absolute`,
+      evidence: {
+        frames: opaqueFrames.slice(0, 4).map((f) => ({ src: f.src || null, box: f.box || null })),
+      },
+      how: 'ui.get_tree merges frame nodes automatically; if context.frame_hints.text_coverage is low, ui.new_tab / ui.navigate to frames[].src and read the frame as a top-level document',
+    });
+  }
 
   routes.push({
     route: 'L3_pointer_gestures',
