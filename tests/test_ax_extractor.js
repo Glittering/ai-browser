@@ -134,6 +134,35 @@ describe('mergeFrameTrees() — OOPIF down-drill (P0)', () => {
     expect(merged.children.length).toBeGreaterThanOrEqual(2);
     expect(byId(merged, 'ax-s-10030').role).toBe('button');
   });
+
+  it('AX-015: 只读内容节点（heading/listitem/cell）必须被保留 —— 否则正文整片消失', () => {
+    // 事故：lift() 只留 `actions.length > 0` 的节点，于是跨进程帧里的标题/列表/
+    // 表格单元被丢掉第二次（第一次是采集端选择器）。泛雅章节列表就是这样消失的。
+    const textTree = {
+      id: 'frame-1', role: 'generic', label: 'frame', states: [], actions: [],
+      bounds: { x: 0, y: 0, width: 0, height: 0 },
+      children: [
+        { id: 'axf-1-0', role: 'link', label: '1.1 章节', states: ['focusable'], actions: ['click', 'focus'], bounds: {} },
+        { id: 'axf-1-1', role: 'heading', label: '课程介绍', states: ['readonly'], actions: [], bounds: {} },
+        { id: 'axf-1-2', role: 'text', label: '本课程共计 4 个任务点。', states: ['readonly'], actions: [], bounds: {} },
+      ],
+    };
+    const merged = mergeFrameTrees(mainTree, [{ key: 'frame-1', label: 'frame', tree: textTree }]);
+    const gate = merged.children.find((c) => c.id === 'frame-1');
+    const ids = gate.children.map((c) => c.id);
+    expect(ids).toContain('axf-1-0');
+    expect(ids).toContain('axf-1-1');   // heading 没有 actions，也必须留
+    expect(ids).toContain('axf-1-2');   // 纯文本同理
+  });
+
+  it('AX-016: 门节点带上绝对 src（树里出现的东西要能直接打开）', () => {
+    const subTree = { id: 'frame-2', role: 'generic', label: 'f', children: [] };
+    const merged = mergeFrameTrees(mainTree, [{
+      key: 'frame-2', label: 'f', src: 'https://mooc2-ans.xidian.edu.cn/mooc2-ans/mycourse/studentcourse?x=1', tree: subTree,
+    }]);
+    const gate = merged.children.find((c) => c.id === 'frame-2');
+    expect(gate.src).toBe('https://mooc2-ans.xidian.edu.cn/mooc2-ans/mycourse/studentcourse?x=1');
+  });
 });
 
 describe('filterInteractive() — prune layout-only branches (fix #4)', () => {

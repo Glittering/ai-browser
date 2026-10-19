@@ -29,6 +29,9 @@ import screenshotOpts from '../shared/screenshot_opts.cjs';
 // 跨进程子帧（OOPIF）判定与自动路由回执（纯函数）：默认读法检测到不可读
 // 子帧时自己补一次 AX 读取，调用方无需知道 ax:true 的存在。
 import frameProbe from '../shared/frame_probe.cjs';
+// 子帧内容读取器（在帧内执行）。选择器/上限/覆盖率口径全在那个文件里，
+// 这里只负责把它喂进去 —— 采集规则不该散落在 page_manager 的字符串里。
+import { buildFrameReadSource } from '../shared/frame_read_source.js';
 // ui.act target 形状体检（纯函数）：传了可见文字而不是 data-ai-id 时，
 // 入口就给可操作的错误，而不是等到选择器查空才说 "Target not found"。
 import refGuard from '../shared/ref_guard.cjs';
@@ -748,6 +751,8 @@ class PageManager {
       res.context.frame_hints = frameProbe.describeAutoAx({
         merged: !!(frames && frames.length),
         framesRead: (frames || []).length,
+        // 测量值：光说 merged 等于只说"我试过了"。见 frame_probe.summarizeFrameRead。
+        summary: frameProbe.summarizeFrameRead(frames),
       });
     } catch (e) {
       // 自动合并失败绝不拖垮主读法：默认树照常返回，只在 hints 里说明原因。
@@ -988,6 +993,13 @@ class PageManager {
       if (main.context) {
         const mergedCtx = frameProbe.mergeFrameContext(main.context, frames);
         if (mergedCtx) Object.assign(main.context, mergedCtx);
+        // 与默认读法同一份回执：走 AX 这条路的调用方也要能看到"并进去几个节点、
+        // 帧里还有多少字没进树"。两条读法给不同口径的提示，等于让调用方猜。
+        main.context.frame_hints = frameProbe.describeAutoAx({
+          merged: true,
+          framesRead: frames.length,
+          summary: frameProbe.summarizeFrameRead(frames),
+        });
       }
     }
     // #4: incremental diff — return only newly appeared / hidden interactive
@@ -1052,12 +1064,20 @@ class PageManager {
     })()`;
   }
 
-  // Read editable/interactive fields out of each out-of-process sub-frame via
+  // Read the **content** of each out-of-process sub-frame via
   // Frame.executeJavaScript (runs in that frame's own context). Returns
-  // [{ key, label, tree }] — pure mergeFrameTrees input. Stamps idempotent
-  // data-ai-id = `axf-{frameSeq}-{idx}` inside each frame so the act layer can
-  // (a) find the owning frame by testing which frame has `[data-ai-id=...]`, and
-  // (b) run its JS in that frame's own context (top querySelector can't reach OOPIF).
+  // [{ key, label, src, tree, context, stats }] — pure mergeFrameTrees input.
+  // Stamps idempotent data-ai-id = `axf-{frameSeq}-{idx}` inside each frame so
+  // the act layer can (a) find the owning frame by testing which frame has
+  // `[data-ai-id=...]`, and (b) run its JS in that frame's own context (top
+  // querySelector can't reach OOPIF).
+  //
+  // 采集规则在 shared/frame_read_source.js —— 这里原本内联了一份只认表单控件
+  // 的选择器，于是「没有可点元素」的 frame（正文、目录、成绩表）读出来是空的，
+  // 而回执还说 merged。事故与口径见那个文件顶部。
+  //
+  // frameSeq 在 try 之前自增：某个帧读不到时序号不能回填，否则树里的
+  // `frame-N` 会指向另一个帧（agents 会照着 ref 去操作，指错比没有更坏）。
   async _readOopifFrames(view, tabId) {
     try {
       const root = view.webContents.mainFrame;
@@ -1070,45 +1090,15 @@ class PageManager {
         const key = 'frame-' + frameSeq;
         const prefix = 'axf-' + frameSeq + '-';
         try {
-          const dto = await frame.executeJavaScript(`(function(prefix){
-            if(!document||!document.body) return null;
-            var sel='[contenteditable],[role="textbox"],[role="combobox"],textarea,input[type="text"],input[type="title"],input[type="search"],button,[role="button"],a[href]';
-            var els=Array.prototype.slice.call(document.querySelectorAll(sel));
-            var out=[]; var idx=0;
-            for(var k=0;k<els.length;k++){
-              var e=els[k];
-              if(e.isContentEditable){ // skip editable boxes nested inside a contenteditable root
-                var inside=false;for(var p=e.parentElement;p;p=p.parentElement){if(p.isContentEditable&&p!==e){inside=true;break;}}
-              }
-              var r=e.getBoundingClientRect();
-              if(r.width<4||r.height<4)continue; // hidden
-              if(e.tagName==='BUTTON'||(e.getAttribute&&e.getAttribute('role')==='button')){} // buttons not relevant for read-editor; keep anyway
-              var ai=prefix+idx;
-              e.setAttribute('data-ai-id',ai);
-              var isEditable=e.isContentEditable||e.tagName==='TEXTAREA'||((e.tagName==='INPUT'));
-              var role;
-              if(e.isContentEditable)role='textbox';
-              else if(e.tagName==='TEXTAREA')role='textbox';
-              else if(e.tagName==='INPUT')role='textbox';
-              else if(e.tagName==='BUTTON'||e.getAttribute&&e.getAttribute('role')==='button')role='button';
-              else if(e.tagName==='SELECT'||e.getAttribute&&e.getAttribute('role')==='combobox')role='select';
-              else if(e.tagName==='A')role='link';
-              else role='textbox';
-              var label=e.getAttribute('aria-label')||e.getAttribute('placeholder')||e.getAttribute('title')||'';
-              if(!label&&e.getAttribute&&e.getAttribute('data-placeholder'))label=e.getAttribute('data-placeholder');
-              if(!label&&(e.tagName==='BUTTON'||(e.getAttribute&&e.getAttribute('role')==='button'))){label=(e.innerText||e.textContent||'').trim();}
-              if(!label&&e.tagName==='A'){label=(e.innerText||e.textContent||'').trim();}
-              var url=(e.tagName==='A'&&e.href)||(e.closest&&e.closest('a[href]')?e.closest('a[href]').href:'');
-              var editor_type=null;
-              if(e.isContentEditable)editor_type='richtext';
-              else if(e.tagName==='TEXTAREA')editor_type='textarea';
-              else if(e.tagName==='INPUT')editor_type='textbox';
-              out.push({id:ai,role:role,label:label,editor_type:editor_type,url:url,bounds:{x:Math.round(r.x),y:Math.round(r.y),width:Math.round(r.width),height:Math.round(r.height)}});
-              idx++;
-            }
-            return out.length?out:null;
-          })(${JSON.stringify(prefix)})`);
-          if (!dto || !dto.length) continue;
+          const dto = await frame.executeJavaScript(buildFrameReadSource(prefix));
+          if (!dto) continue;
+          const nodes = Array.isArray(dto.nodes) ? dto.nodes : [];
+          const chars = (dto.stats && Number(dto.stats.text_chars)) || 0;
+          // 一个节点都没有、也没有可见文字 = 这个帧确实是空的，跳过。
+          // 有文字却一个节点都没读出来 = 内容在更深一层 iframe 里，或者结构完全
+          // 超出采集规则 —— 必须留下门节点 + 绝对 src，让调用方知道"这里有一块
+          // 内容没读到"；让它从树里彻底消失，就回到了这轮修的起点。
+          if (!nodes.length && chars < 20) continue;
           // 子帧里的"该填什么 / 错在哪"。顶层 extractPageContext 只能看顶层文档，
           // 而 B站图文的标题框、掘金编辑器都住在 OOPIF 里 —— 上下文扫描不跟着
           // 走一遍子帧，required_hints / validation_errors 就会在**真正需要它们
@@ -1125,19 +1115,39 @@ class PageManager {
             label: frame.name || ('frame-' + frameSeq),
             states: [],
             actions: [],
+            // 门节点带上**绝对** src：树里出现的东西，调用方就应该能直接用。
+            // 相对地址（/mooc2-ans/...）没法喂给 ui.new_tab / ui.navigate，
+            // 等于把"我知道内容在哪"变成一句废话。
+            ...(dto.url ? { src: dto.url } : {}),
             bounds: { x: 0, y: 0, width: 0, height: 0 },
-            children: dto.map((n) => ({
+            children: nodes.map((n) => ({
               id: n.id,
               role: n.role,
               label: n.label || '',
               ...(n.url ? { url: n.url } : {}),
-              states: n.editor_type ? ['editable=' + n.editor_type, 'focusable'] : ['focusable'],
+              states: n.states || (n.editor_type ? ['editable=' + n.editor_type, 'focusable'] : ['focusable']),
               ...(n.editor_type ? { editor_type: n.editor_type } : {}), // first-class, mirrors main AX path
-              actions: n.role === 'button' ? ['click', 'focus'] : ['click', 'focus', 'type', 'setContent', 'clear'],
+              // 只读内容块没有动作。此前一律给 ['click','focus','type','setContent','clear']，
+              // 于是每个段落都被报成"可以往里打字" —— agent 照着做，然后拿到一串
+              // 莫名其妙的失败。
+              actions: (n.states || []).indexOf('readonly') >= 0
+                ? []
+                : (n.role === 'button'
+                  ? ['click', 'focus']
+                  : ['click', 'focus', 'type', 'setContent', 'clear']),
               bounds: n.bounds,
             })),
           };
-          out.push({ key, label: frame.name || ('frame-' + frameSeq), tree, context: frameCtx });
+          out.push({
+            key,
+            label: frame.name || ('frame-' + frameSeq),
+            // frame.url 是 WebFrameMain 的绝对地址；dto.url 是页内 location.href。
+            // 两个都试，拿到的第一个能用的就写进 hints（走新标签打开时要用绝对地址）。
+            src: dto.url || frame.url || null,
+            tree,
+            context: frameCtx,
+            stats: dto.stats || null,
+          });
         } catch (e) { /* skip unreachable frame */ }
       }
       return out;
@@ -1826,7 +1836,8 @@ class PageManager {
   // 所以这里先看顶层，找不到再逐个帧找。返回 null 表示就在主帧里。
   async _owningFrameFor(view, aiId, tabId) {
     if (!aiId) return null;
-    if (/^axf-/.test(aiId)) return await this._owningFrame(view, aiId);
+    // `frame-N` 是合并门节点，页面里没有对应元素，别浪费一次顶层查询。
+    if (/^axf-/.test(aiId) || /^frame-\d+$/.test(aiId)) return await this._owningFrame(view, aiId);
     try {
       const inTop = await this.evaluate(
         `!!${findRefExpr(JSON.stringify(aiId))}`,
@@ -1843,6 +1854,13 @@ class PageManager {
   async _owningFrame(view, aiId) {
     const root = view.webContents.mainFrame;
     const frames = root && root.framesInSubtree ? root.framesInSubtree : [];
+    // 树里暴露的 `frame-N` 是合并出来的门节点（axExtractor.mergeFrameTrees 的
+    // gate），它在页面里**没有对应元素**。此前这里只会按 [data-ai-id] 找，于是
+    // `{frame_ref:"frame-1"}` 必然报 frame_not_found —— 树里写着 frame-1，用起来
+    // 说不存在。序号口径与 _readOopifFrames 一致（见 shared/frame_probe.pickSubframe）。
+    const subs = frames.filter((f) => f !== root);
+    const gateFrame = frameProbe.pickSubframe(subs, aiId);
+    if (gateFrame || frameProbe.gateFrameIndex(aiId) != null) return gateFrame;
     for (const frame of frames) {
       if (frame === root) continue;
       try {

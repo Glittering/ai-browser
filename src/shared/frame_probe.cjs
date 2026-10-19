@@ -41,14 +41,74 @@ function shouldAutoAx(summary) {
 }
 
 /**
+ * 把"读了几个帧、并进去多少东西、帧里还有多少字没进树"算成可核对的数字。
+ *
+ * 存在的理由（泛雅事故）：describeAutoAx 的 `merged` 判据是
+ * `frames.length > 0` —— 也就是"我确实拼进去了一些节点"。实测那个页面上拼进
+ * 去的只有一个搜索框，正文（章节列表）一个字都没有，回执却是
+ * `{auto_ax:'merged', frames_read:1}`。调用方看到 merged 会认为"内容读到了"，
+ * 于是一路往下操作，拿到的全是 target_not_found。
+ *
+ * "我试过了"和"成功了"必须能分开。这里产出三个测量值：
+ *   nodes_added   —— 真的并进树里的节点数（可以说 1）
+ *   text_coverage —— 帧里看得见的文字有多少进了树（0.01 一眼就知道不对）
+ *   frames[].src  —— 帧的绝对地址，树里读不到时唯一的可靠退路
+ *
+ * @param {Array<{key:string,label?:string,src?:string,tree?:object,stats?:object}>} frames
+ */
+function summarizeFrameRead(frames) {
+  const list = (Array.isArray(frames) ? frames : []).filter((f) => f && f.key);
+  if (!list.length) {
+    return { frames_read: 0, nodes_added: 0, text_coverage: null, frames: [] };
+  }
+  let nodesAdded = 0;
+  let chars = 0;
+  let keptChars = 0;
+  const per = [];
+  for (const f of list) {
+    const st = f.stats && typeof f.stats === 'object' ? f.stats : {};
+    const nodes = f.tree && Array.isArray(f.tree.children) ? f.tree.children.length : 0;
+    nodesAdded += nodes;
+    const c = Number(st.text_chars) || 0;
+    const k = Number(st.kept_chars) || 0;
+    chars += c;
+    keptChars += k;
+    per.push({
+      ref: f.key,
+      src: f.src || null,
+      nodes,
+      // 帧里可见文本的字符数：0 表示这一帧本身是空的/纯 widgets，不是我们漏了。
+      chars: c,
+    });
+  }
+  // 帧里一个字都没有时不报覆盖率 —— 报 0 会被读成"我们没读到"，而事实是
+  // "这帧没有可读的文字"。两种情况必须分开。
+  const coverage = chars > 0 ? Math.round(Math.min(1, keptChars / chars) * 100) / 100 : null;
+  return { frames_read: list.length, nodes_added: nodesAdded, text_coverage: coverage, frames: per };
+}
+
+/**
  * 自动 AX 读取的结果如何写进 context.frame_hints。
  * 三种结局分开说：合并成功 / 合并没有新内容 / AX 本身失败。调用方需要能
  * 区分"已经尽力了"和"还有一条没走过的路"。
+ *
+ * 另外附带 summarizeFrameRead 的测量值（能算多少算多少）：`merged` 只说
+ * "拼进去了"，`nodes_added` 与 `text_coverage` 才说"拼进去的是什么"。
  */
 function describeAutoAx(outcome) {
   const o = outcome && typeof outcome === 'object' ? outcome : {};
   if (o.merged) {
-    return { auto_ax: 'merged', frames_read: Number(o.framesRead) || 0 };
+    const h = { auto_ax: 'merged', frames_read: Number(o.framesRead) || 0 };
+    const s = o.summary && typeof o.summary === 'object' ? o.summary : null;
+    if (s) {
+      if (typeof s.nodes_added === 'number') h.nodes_added = s.nodes_added;
+      if (s.text_coverage != null) h.text_coverage = s.text_coverage;
+      if (Array.isArray(s.frames) && s.frames.length) {
+        // 只留 ref/src —— 调用方要的是"去哪读剩下那部分"，不是统计表。
+        h.frames = s.frames.map((f) => ({ ref: f.ref, src: f.src }));
+      }
+    }
+    return h;
   }
   if (o.error) {
     return { auto_ax: 'failed', reason: String(o.error) };
@@ -104,9 +164,39 @@ function mergeFrameContext(ctx, frames) {
   return out;
 }
 
+/**
+ * `frame-N` → 子帧序号 N。不是门节点 ref 时返回 null。
+ *
+ * 为什么需要：axExtractor.mergeFrameTrees 把每个跨进程帧挂成一个 gate 节点，
+ * id 就是 `frame-N`。它在页面里**没有对应元素**，所以"按 data-ai-id 找元素"
+ * 这条路对它永远失败 —— 实测 `ui.evaluate {frame_ref:"frame-1"}` 报
+ * frame_not_found，而语义树里明明写着 frame-1。树里出现的 ref 必须能用。
+ */
+function gateFrameIndex(aiId) {
+  const m = /^frame-(\d+)$/.exec(String(aiId == null ? '' : aiId));
+  if (!m) return null;
+  const n = Number(m[1]);
+  return Number.isInteger(n) && n >= 1 ? n : null;
+}
+
+/**
+ * 按 `frame-N` 从**子帧列表**（已排除主帧、保持 framesInSubtree 顺序）里取帧。
+ * 序号口径必须与 _readOopifFrames 完全一致：第 N 个非主帧，且读不到的帧也占号
+ * —— 两边不同步的话，`frame-2` 会指向另一个帧，比"找不到"更危险。
+ */
+function pickSubframe(subs, aiId) {
+  const idx = gateFrameIndex(aiId);
+  if (idx == null) return null;
+  const list = Array.isArray(subs) ? subs : [];
+  return list[idx - 1] || null;
+}
+
 module.exports = {
   summarizeOpaqueFrames,
   shouldAutoAx,
   describeAutoAx,
+  summarizeFrameRead,
   mergeFrameContext,
+  gateFrameIndex,
+  pickSubframe,
 };

@@ -234,16 +234,23 @@ export function mergeFrameTrees(mainTree, frames = []) {
   const usable = (frames || []).filter((f) => f && f.tree);
   if (!usable.length) return mainTree;
 
-  // Lift interactive/editable subtrees out of each frame tree (frame roots are
-  // usually generic wrappers; keep their actionable leaves, drop pure layout).
+  // Lift interactive/editable subtrees AND text blocks out of each frame tree
+  // (frame roots are usually generic wrappers; keep their leaves, drop pure layout).
+  //
+  // 为什么内容块也要留：这个函数原来只留 `actions.length > 0` 的节点，也就是
+  // 只有"能点的东西"算数。于是跨进程 frame 里的标题/列表/表格单元——也就是
+  // agent 真正要**读懂**的东西——即使被读出来也会在这里被丢第二次（第一次是
+  // 采集端的选择器）。超星泛雅的章节列表就是这么整片消失的。
+  const CONTENT_ROLES = new Set(['text', 'heading', 'listitem', 'cell', 'paragraph', 'term', 'note']);
   const lift = (tv) => {
     const out = [];
     (function w(t, depth) {
       if (!t) return;
-      // Lift any actionable/editable node (skip generic layout wrappers),
-      // regardless of depth — so a single-leaf interactive root is kept.
-      const actionable = t.role !== 'generic' && (t.actions || []).length > 0;
-      if (actionable) { out.push(t); return; }
+      // Keep any actionable/editable node or text block (skip generic layout
+      // wrappers), regardless of depth — so a single-leaf root is kept.
+      const keep = t.role !== 'generic'
+        && ((t.actions || []).length > 0 || CONTENT_ROLES.has(t.role));
+      if (keep) { out.push(t); return; }
       for (const c of t.children || []) w(c, depth + 1);
     })(tv, 0);
     return out;
@@ -254,6 +261,9 @@ export function mergeFrameTrees(mainTree, frames = []) {
     label: f.label || '子框架',
     states: ['visible'],
     actions: [],
+    // 绝对地址：树里出现的 iframe 应该能直接喂给 ui.new_tab / ui.navigate。
+    // 相对 src 做不到这一点，等于让调用方自己去拼 base。
+    ...(f.src ? { src: f.src } : {}),
     bounds: { x: 0, y: 0, width: 0, height: 0 },
     children: lift(f.tree),
   }));

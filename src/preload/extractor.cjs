@@ -647,7 +647,9 @@ function extractTree() {
         var ifrRect = el.getBoundingClientRect ? el.getBoundingClientRect() : { width: 0, height: 0 };
         opaqueFrames.push({
           id: el.id || null,
-          src: el.getAttribute("src") || null,
+          // 绝对地址（el.src 会被解析成绝对 URL）。相对地址对调用方没用：
+          // 树里写着 /mooc2-ans/xxx，agent 拿它去 navigate 只会失败。
+          src: (el.src || '').trim() || el.getAttribute("src") || null,
           width: Math.round(ifrRect.width || 0),
           height: Math.round(ifrRect.height || 0)
         });
@@ -660,7 +662,8 @@ function extractTree() {
         // opaque: 内容在另一个渲染进程。同源读取（getBoundingClientRect 之外
         // 的任何 DOM 访问）都到不了；读取要走 CDP Accessibility（ax:true）。
         opaque: true,
-        src: el.getAttribute("src") || null
+        // 绝对地址：树里出现的 iframe 必须能被直接打开（ui.new_tab）。
+        src: (el.src || '').trim() || el.getAttribute("src") || null
       };
     }
     if (!isSemantic(el)) {
@@ -885,13 +888,13 @@ function extractTree() {
           var oRect = ifr.getBoundingClientRect ? ifr.getBoundingClientRect() : { width: 0, height: 0 };
           opaqueFrames.push({
             id: ifr.id || null,
-            src: ifr.getAttribute("src") || null,
+            src: (ifr.src || '').trim() || ifr.getAttribute("src") || null,
             width: Math.round(oRect.width || 0),
             height: Math.round(oRect.height || 0)
           });
         } catch (e3) { /* 尺寸拿不到也留下存在性线索 */ }
       }
-      extraIframes.push({ id: "iframe-empty-" + counter++, role: "iframe", label: ifr.title || ifr.name || "iframe", opaque: true, src: ifr.getAttribute("src") || null });
+      extraIframes.push({ id: "iframe-empty-" + counter++, role: "iframe", label: ifr.title || ifr.name || "iframe", opaque: true, src: (ifr.src || '').trim() || ifr.getAttribute("src") || null });
     }
   }
   if (extraIframes.length && root) {
