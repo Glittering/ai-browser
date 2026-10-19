@@ -20,15 +20,19 @@ const HELP = `ai-browser ${pkg.version}
 
 Usage:
   ai-browser [start]          Launch the visible AI Browser window
-  ai-browser mcp              Run the MCP stdio server (20 browse_* tools)
+  ai-browser mcp              Run the MCP stdio server (17 browse_* tools)
   ai-browser skill [list|install|print]
                               Install the bundled agent skills into your client
+  ai-browser call <method> [json|-]
+                              Call one JSON-RPC method and print the result
+  ai-browser status           Is the browser running? pid / port / tabs
   ai-browser --version        Print version
   ai-browser --help           Show this help
 
-The browser exposes:
-  • MCP server over stdio (this command's "mcp" subcommand)
-  • Raw WebSocket JSON-RPC on ws://localhost:9223 (ui.* methods)
+The browser exposes one implementation through three thin doors:
+  • MCP server over stdio  → ai-browser mcp        (for agent clients)
+  • WebSocket JSON-RPC     → ws://127.0.0.1:9223   (ui.* methods)
+  • This CLI              → ai-browser call ui.list_tabs
 
 Agent skills ship in this package. Install them once with "ai-browser skill install"
 and every new session picks them up automatically — no manual instruction pasting.
@@ -65,6 +69,18 @@ async function main() {
       // 技能装进客户端的技能目录 —— 装一次，之后每次新会话自动发现。
       const { run } = require('../scripts/skill.cjs');
       process.exit(run(argv.slice(1)));
+      break;
+    }
+    case 'call': {
+      // 命令行直接调一条 JSON-RPC。存在的理由：以前想从 shell 问一句"有哪些标签页"
+      // 都得先 npm i ws 再写脚本。见 scripts/cli_call.cjs 顶部注释。
+      const { runCall } = require('../scripts/cli_call.cjs');
+      process.exit(await runCall(argv.slice(1)));
+      break;
+    }
+    case 'status': {
+      const { runStatus } = require('../scripts/cli_call.cjs');
+      process.exit(await runStatus(argv.slice(1)));
       break;
     }
     case '--version':

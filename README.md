@@ -421,6 +421,22 @@ MCP is a thin stdio adapter. Anything MCP can do is reachable directly over JSON
 `ws://localhost:9223` from any language. Source of truth: the method switch in
 [`src/main/ws_server.js`](src/main/ws_server.js).
 
+You do not have to write a client to do this. The CLI speaks the same protocol:
+
+```bash
+ai-browser status                                   # running? pid / port / tabs
+ai-browser call ui.list_tabs
+ai-browser call ui.get_tree '{"subset":"interactive"}'
+ai-browser call ui.navigate '{"url":"https://example.com"}'
+echo '{"url":"https://example.com"}' | ai-browser call ui.navigate -
+```
+
+`call` prints the raw `result` as one line of JSON (pipe it into `jq`), exits `0` on success,
+`1` when the call failed, `2` on a bad command line. `--port`, `--timeout`, `--pretty` are available.
+
+So there are three doors to one implementation — MCP stdio (`ai-browser mcp`), JSON-RPC over
+WebSocket, and this CLI. None of them is a separate code path.
+
 | Method | Purpose | Maps to |
 |---|---|---|
 | `ui.get_tree` | Semantic tree (+ context). Params: `focusedOnly`, `ax`, `subset`, `mode`, `tab` | `browse_get_tree` |

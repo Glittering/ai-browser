@@ -127,6 +127,11 @@ focuses the existing window (single instance lock).
   `switch` sets the default target for later calls, so you rarely pass `tab`.
 - `browse_quit` — shut the whole browser down and release the process.
 
+Prefer MCP when an agent client drives the browser. For shell / CI / debugging there is a CLI
+that speaks the same JSON-RPC: `ai-browser status`, `ai-browser call ui.list_tabs`,
+`ai-browser call ui.navigate '{"url":"..."}'`. One implementation, three doors — no separate
+script needed to call a method.
+
 There is no `browse_subscribe` and no `browse_network_body`: real-time events are
 raw-WebSocket only (`ui.subscribe`), because MCP stdio drops server→client
 notifications. Use `browse_network` for pull-based inspection.
