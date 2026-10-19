@@ -564,12 +564,36 @@ function extractTree() {
     }
     var title = el.getAttribute("title");
     if (title) return title;
-    var text = (el.textContent || "").trim();
+    var text = renderedText(el).trim();
     if (text.length > 60) text = text.slice(0, 60);
     if (text) return text;
     var placeholder = el.getAttribute("placeholder");
     if (placeholder) return placeholder;
     return "";
+  }
+
+  // 元素上**看得见**的文字。
+  //
+  // 为什么不用裸 textContent：它把**不渲染的东西**也算进去，而 label 是
+  // 直接给 agent 当"这个元素写着什么"读的。2026-10-19 用受控页面实测了两类泄漏：
+  //   1. `<div style="display:none">…说明文字…</div>` 整段进了父节点的 label，
+  //      agent 会把一段用户根本看不见的说明当成页面正文；
+  //   2. `<canvas>` 页面的容器 label 里装的是 `<script>` 的 JS 源码
+  //      （"绘图工具 const c = document.getElementById('cv')…"）。
+  // 更根本的是**口径**问题：文字覆盖率的分母（stats.text_chars）用的是
+  // innerText，分子来自 label；label 用 textContent 就等于"分子分母两把尺子"，
+  // 那这个比例算出来没有意义。
+  //
+  // innerText 是浏览器算出来的"渲染后可见文字"：display:none / visibility:hidden /
+  // <script> / <style> 天然排除，换行也按渲染结果归一。
+  //
+  // 但要留 textContent 兜底：`<option>`、`<title>` 这类元素 innerText 可能为空，
+  // 而它们的文字是有效的可访问名。宁可多读，不可让按钮变无声。
+  function renderedText(el) {
+    var t = "";
+    try { t = el.innerText; } catch (e) { t = ""; }
+    if (t && t.trim()) return t;
+    try { return el.textContent || ""; } catch (e) { return ""; }
   }
 
   function extractBounds(el) {
