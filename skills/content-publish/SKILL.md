@@ -33,8 +33,9 @@ description: >-
 
 5. 可选：若需先预览或勾选多平台发布，按 `browse_get_tree` 找到对应控件并 `browse_act`。
 
-6. **订阅消息**，以捕获发布后的成功/报错 toast：
-   `browse_subscribe({ events: ["message_appeared", "js_error"] })`。
+6. **先记下时间点**（用于事后区分"这次点击引发的请求/报错"）：
+   需要看接口时用 `browse_network({ operation: "clear" })` 清一次记录；需要看 JS 报错时记住当前状态，
+   发布后再 `browse_errors` 对照。没有「订阅事件」这类工具：抓请求用 browse_network，看报错用 browse_errors。
 
 7. 点击发布按钮：用 `browse_get_tree` 找到 label 为"发布/发布博客/提交"的按钮，再
    `browse_act({ action: "click", target: "<发布按钮 data-ai-id>" })`。

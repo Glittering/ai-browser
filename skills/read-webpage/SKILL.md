@@ -8,7 +8,7 @@ description: >-
 # 网页正文提取（read-webpage）
 
 ## 目标
-把当前页面"正文文章"（标题 + 段落）从 HTML 日报纹路中提取出来，交付给用户阅读/总结。取代已下线的 MCP 工具 `browse_read_article`，完全用 `browse_evaluate` 实现。
+把当前页面"正文文章"（标题 + 段落）从 HTML 日报纹路中提取出来，交付给用户阅读/总结。完全用 `browse_evaluate` 实现（历史上曾有一个专门的读正文工具，已下线，别再找它）。
 
 ## 前置
 - 已打开目标文章页，页面已加载完成（必要时先 `browse_wait({condition:'url_contains', ...})`）。
@@ -43,7 +43,7 @@ description: >-
 
 ## 验证
 - 命中 `<article>` / `.article-content` 等容器时为二段式（title + paras）。
-- 输出与旧 `browse_read_article` 等价（同一脚本主体）。
+- 输出为标题 + 段落数组（同一套提取脚本主体），可直接交给用户阅读或总结。
 - 空结果时明确提示，不强行拼接垃圾文本。
 
 ## 边界与替代

@@ -1,52 +1,50 @@
 ---
 name: ai-browser
 description: >-
-  Drive a real, visible browser: open pages, read the page as a semantic tree (not screenshots),
-  click/type/fill, read canvas text, inspect network requests. Use when a task must actually DO
-  something on a website (log in, fill a form, publish, scrape, verify a flow) or read a page whose
-  content is rendered by JS. 触发词：打开网页、点击、填表、登录、抓取、网页操作、browse。
+  Control a real, visible browser to do things on websites: open a page, click, type, fill a form, log in, read page content, download/upload, inspect network requests. Use whenever the user asks to operate a website (打开网页/点一下/填表/登录/发布/提交/抓取/截图/看接口) or to read a page that needs JS to render.
+  触发词：打开、点击、填表、输入、登录、扫码、发布、提交、下载、上传、抓取、爬取、截图、看接口、网页操作、browse。
 ---
 
 # ai-browser
 
-窗口是真的、可见的，人能随时抢鼠标键盘接管。页面以语义树返回，**不是截图**。
+## 三步（照抄即可）
 
-## 最小循环
+```
+browse_navigate  {"url":"https://example.com"}
+browse_get_tree  {"subset":"interactive"}
+browse_act       {"action":"click","target":"e:a-3"}
+```
 
-1. `browse_navigate { url }`
-2. `browse_get_tree { subset: "interactive" }` → 从节点里取 `id`
-3. `browse_act { action: "click" | "type", target: "<id>", text? }`
+`browse_get_tree` 返回的每个节点都有 `id`（形如 `e:a-3`）；`browse_act` 的 `target` **只接受这个 id**，
+不接受页面上看到的文字（传文字会报 `target_not_found`）。
 
-`success: true` 只代表动作发出去了，不代表页面变了。**每个动作回执都带 `effect_state`，先看它**：
+## 每次操作后先看 `effect_state`
 
-| `effect_state` | 意思 | 下一步 |
+| 值 | 意思 | 该做什么 |
 |---|---|---|
-| `committed` | 输入已派发且页面 ack | 别重试 |
-| `none` | 有证据表明页面**没被动过** | 修掉原因后可重试 |
-| `unknown` | 无法证明没动过（超时、事件派发后无回音、按了一半的键） | **先读页面状态**，盲目重试会提交两次 |
+| `committed` | 已生效 | 别重试，继续下一步 |
+| `none` | 页面没被动过 | 修掉原因（换 target / 重读树）再试 |
+| `unknown` | 说不准（超时等） | **先 `browse_get_tree` 看现状**，盲目重试会提交两次 |
 
-`target` 找不到时会带 `stale_ref`：`true` = 页面变过（`ref_epoch` < `tree_epoch`），重读树拿新 ref；`ref_diagnosis: "never_seen"` = ref 本身错了，重读也没用，改传参。
-
-## 卡住时的第一反应
+## 卡住时
 
 | 现象 | 先做什么 |
 |---|---|
-| 树里没有目标 | `browse_wait` 等渲染，再重读树（SPA 常见） |
-| 有节点但操作失败 | 动作层问题，写选择器解决不了 → `references/hard-pages.md` |
-| 点了没反应 | 视觉问题 `browse_screenshot`；请求没发 `browse_network {operation:"list"}` |
-| 怀疑被踢登录 | `browse_auth_state` |
+| 树里没有要点的东西 | `browse_wait {"condition":"text_contains","text":"关键词"}` 再重读树 |
+| `target_not_found` 且 `stale_ref:true` | 页面变过 → 重读树拿新 id |
+| `target_not_found` 且 `ref_diagnosis:"never_seen"` | id 本身错了 → 别重读，改传参 |
+| 点了没反应 | `browse_screenshot` 看画面；`browse_network {"operation":"list"}` 看请求 |
+| 怀疑掉登录 | `browse_auth_state` |
 | 以上都不对 | `browse_errors` |
 
-## 要人帮忙时
+## 需要人帮忙
 
-登录、扫码、滑块、支付：**在对话里直接请用户在窗口里操作**，收到"好了"再 `browse_get_tree` 确认。
-不要编造凭据，不要反复重试注定失败的点击。
+登录、扫码、滑块、支付：**在对话里请用户在自己的窗口里操作**，他说"好了"再 `browse_get_tree` 确认。
+不要编造账号密码，不要反复重试注定失败的点击。
 
-浏览器侧没有"交接"接口——人机协作发生在你们的对话里，不在 API 里。
+## 按需深挖（不要一上来就读）
 
-## 按需深挖
-
-- `references/troubleshooting.md` — 失败排查顺序 + 四条别做
-- `references/hard-pages.md` — canvas / 富文本编辑器 / 跨进程 iframe / 上传
-- `references/network.md` — 抓请求、从页面取结构化数据
-- `references/tasks.md` — 发布文章 / 读正文 / 盯网络 的配方
+- `references/troubleshooting.md` — 失败排查顺序
+- `references/hard-pages.md` — canvas / 富文本 / iframe / 上传
+- `references/network.md` — 抓请求、取结构化数据
+- `references/tasks.md` — 发布文章 / 读正文 的配方
