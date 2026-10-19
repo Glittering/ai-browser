@@ -46,8 +46,8 @@ ai-browser call ui.get_tree '{"tab":1,"subset":"interactive"}'    # 交互树
 ai-browser call ui.get_tree '{"tab":1,"ax":true}'                # 阅读树（长正文用它）
 ai-browser call ui.act '{"action":"click","target":"e:a-3"}'
 ai-browser call ui.act '{"action":"type","target":"e:input-1","text":"关键词"}'
-ai-browser call ui.evaluate '{"expr":"document.title"}'
-ai-browser call ui.evaluate '{"frame_ref":"frame-1","expr":"document.body.innerText"}'
+ai-browser call ui.evaluate '{"js":"document.title"}'
+ai-browser call ui.evaluate '{"frame_ref":"frame-1","js":"document.body.innerText"}'
 ai-browser call ui.wait '{"condition":"text_contains","text":"加载完成"}'
 ai-browser call ui.network_list '{"tab":1}'
 ai-browser call ui.screenshot '{"tab":1}'

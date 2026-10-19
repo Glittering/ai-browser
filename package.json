@@ -1,6 +1,6 @@
 {
   "name": "@glittering0717/ai-browser",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "AI-native browser — renders pixels for humans, structured semantic-tree API for agents. No screenshots, no OCR, no coordinate guessing.",
   "main": "src/main/index.js",
   "bin": {
@@ -15,7 +15,9 @@
     "examples/AGENT_INSTRUCTIONS.md",
     "examples/mcp-config.json",
     "llms-install.md",
-    "LICENSE"
+    "LICENSE",
+    "build/icon.png",
+    "build/icon.icns"
   ],
   "type": "module",
   "license": "MIT",
@@ -72,6 +74,7 @@
     "audit": "node e2e/audit_ws.cjs",
     "e2e:all": "node e2e/run_all.cjs",
     "readcov": "node e2e/readcov_ws.cjs",
+    "winopen": "node e2e/window_open_ws.cjs",
     "coverage": "node tools/coverage_probe.cjs"
   },
   "dependencies": {

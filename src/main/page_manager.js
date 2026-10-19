@@ -81,6 +81,11 @@ const CANVAS_BRIDGE_KEY = '__aiCanvasBridge';
 // 请求头都拿不到）。关闭开关：AI_BROWSER_NETWORK_CAPTURE=0。
 const NETWORK_CAPTURE_DEFAULT = !(process.env.AI_BROWSER_NETWORK_CAPTURE === '0' || process.env.AI_BROWSER_NETWORK_CAPTURE === 'false');
 
+// window.open("") 派生 tab 的"等垫片再导航"上限。超过就照常导航（退化成
+// 该 tab 没有垫片），页面绝不能因为垫片安装慢而永久空白。
+// 实测正常路径约 120–300ms（about:blank 的 did-finish-load + 两次 CDP 命令）。
+const WINDOW_OPEN_NAV_WAIT_MS = 2000;
+
 // 具名按键 → CDP Input.dispatchKeyEvent 参数。agent 用自然名字（'Delete'、
 // 'Escape'、'ArrowRight'、'a'）而不是让人去查 Windows 虚拟键码。
 // vk 用 Windows 虚拟键码（Chromium 在 macOS 上也按它解释）。
@@ -174,6 +179,12 @@ class PageManager {
     this._openedTabs = new Map();   // sourceTabId -> { id, url } (new tab opened by window.open)
     this._windowOpenTokens = new Map(); // token -> { tabId, sourceTabId } (window.open shim, preload bridge.cjs)
     this._windowOpenShimTabs = new Set(); // 已注入 window.open 垫片的 tabId
+    // tabId -> Promise<void>：该 tab 的垫片**注册完成**的信号（不是"注入成功"，
+    // 失败也 resolve —— 调用方要的是"可以往下走了"，不是"一切顺利"）。
+    // 存在的唯一理由：window.open("") 派生的 tab 里，ai:window_open_nav 必须等
+    // 垫片登记完再导航，否则真实文档先到、垫片只对"下一次文档"生效，那个 tab
+    // 就成了没有垫片的窗中窗（见 newTab 末尾长注释）。
+    this._windowOpenShimReady = new Map();
     this._axDiffCache = new Map();  // tabId -> lite interactive snapshot (get_tree {mode:'diff'})
     this._repaintTimers = new Map();// tabId -> 正在排队/已调度的重绘（合并同一批导航事件）
     this._snapshots = new Map();    // snapshotId -> { tabId, js, value, at }（ui.snapshot 存基线）
@@ -328,16 +339,41 @@ class PageManager {
       const entry = this._windowOpenTokens.get(p.token);
       const url = typeof p.url === 'string' ? p.url : '';
       if (!entry || !url) return;
-      const view = this._getView(entry.tabId);
-      if (view) {
-        // 占位 tab（about:blank）→ 真实学习页。loadURL 的 rejection 由
-        // 页面自身处理（站点可能会立刻再导航一次），这里只防 unhandled。
+      const nav = () => {
+        const view = this._getView(entry.tabId);
+        if (!view) {
+          // tab 已被用户/Agent 关掉：赋值静默丢弃（真实浏览器里关掉的
+          // 窗口被赋 location 也是无人接收）。
+          console.warn('[window_open] nav target tab gone:', entry.tabId, url);
+          return;
+        }
+        // loadURL 的 rejection 由页面自身处理（站点可能会立刻再导航一次），
+        // 这里只防 unhandled。
         view.webContents.loadURL(url).catch(() => {});
-      } else {
-        // tab 已被用户/Agent 关掉：赋值静默丢弃（真实浏览器里关掉的
-        // 窗口被赋 location 也是无人接收）。
-        console.warn('[window_open] nav target tab gone:', entry.tabId, url);
-      }
+      };
+      // ⚠️ **必须等垫片登记完再导航**（2026-10-20 修，超星"进入学习"第二层）。
+      //
+      // 原来这里直接 loadURL。看上去时序够用（站点 ajax 往返几十毫秒，
+      // 而 about:blank 的 did-finish-load 通常更早），但那是**赌**：
+      // 只要 nav 抢在 did-finish-load 之前到达，真实文档就先把 renderer 占住，
+      // 随后 addScriptToEvaluateOnNewDocument 只对"下一次文档"生效 ——
+      // 新 tab 里 window.open 是原生实现，站点再走一次
+      // `window.open("") + w.location = url` 就得到 null，静默不跳转。
+      // 实测（2026-10-20）：列表页的"进入学习"能开，新 tab 的 shim 是 false。
+      const ready = this._windowOpenShimReady.get(entry.tabId);
+      if (!ready) { nav(); return; }   // 老路径/测试桩：没有信号就直接走
+      let timer = null;
+      const cap = new Promise((resolve) => {
+        timer = setTimeout(resolve, WINDOW_OPEN_NAV_WAIT_MS);
+        if (timer.unref) timer.unref();
+      });
+      Promise.race([ready, cap]).then(() => {
+        if (timer) clearTimeout(timer);
+        nav();
+      }, () => {
+        if (timer) clearTimeout(timer);
+        nav();
+      });
     });
 
     ipcMain.on('ai:window_open_close', (_event, payload) => {
@@ -3093,11 +3129,18 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     const wc0 = view.webContents;
     const targetUrl = url || null;
     if (wc0 && !wc0.isDestroyed()) {
+      // 垫片就绪信号：先挂上去，再去加载 about:blank。顺序不能反 ——
+      // ai:window_open_nav 可能在这一行之后立刻到达（IPC 保序，但它不等我们）。
+      let signalReady = () => {};
+      const ready = new Promise((resolve) => { signalReady = resolve; });
+      this._windowOpenShimReady.set(tabId, ready);
       let proceeded = false;
       const proceed = () => {
         if (proceeded) return;
         proceeded = true;
         Promise.resolve(this._ensureWindowOpenShim(tabId, view)).finally(() => {
+          // 失败也放行：宁可这个 tab 没有垫片，也不能把它卡在 about:blank。
+          signalReady();
           if (targetUrl && wc0 && !wc0.isDestroyed()) {
             wc0.loadURL(targetUrl).catch(() => {});
           }
@@ -3338,6 +3381,7 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
       if (entry.tabId === tabId) this._windowOpenTokens.delete(token);
     }
     this._windowOpenShimTabs.delete(tabId);
+    this._windowOpenShimReady.delete(tabId);
     // Release per-tab network resources so a closed tab can never leak its
     // debugger attachment or cached request entries / stale monitors.
     this._cleanupTabResources(tabId);
@@ -3815,6 +3859,10 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
         );
         return true;
       } catch (e) {
+        // 失败时撤掉记账：留着就等于给这个 tab 判了"永久无垫片"。
+        // 撤掉后下一次 window.open 还有机会补上（CDP 偶发挂住是环境问题，
+        // 不是这个 tab 的固有属性）。
+        this._windowOpenShimTabs.delete(tabId);
         console.error('[window_open] shim inject failed:', tabId, e && e.message);
         return false;
       }

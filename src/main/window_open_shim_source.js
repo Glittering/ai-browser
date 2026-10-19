@@ -49,7 +49,10 @@ export const WINDOW_OPEN_SHIM_SOURCE = `(function () {
   window.open = function (url, name, _features) {
     var target = (url === undefined || url === null) ? '' : String(url);
     var token = 'wo' + (++seq) + '_' + Date.now();
-    var ok = send('open', token, target, name || '');
+    // ⚠️ 相对地址必须在这里就解析成绝对。主进程拿到的 '/foo.html' 没有 base，
+    // loadURL 会直接报 ERR_INVALID_URL（表现为一个 file:// 错误页）。
+    // 实测 2026-10-20：window.open('/l2.html','_blank') 开出的是错误页。
+    var ok = send('open', token, target ? abs(target) : '', name || '');
     if (!ok) {
       // 没有桥：退回原生语义（deny → null），至少不像成功那样骗站点。
       return null;

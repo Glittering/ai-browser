@@ -38,6 +38,8 @@ function makePageManager() {
     setActive: () => true,
     getFocused: async () => null,
     getNetworkBody: async () => null,
+    // ui.evaluate 的桩：把收到的表达式原样回显，用来验证"参数名有没有被正确解读"
+    evaluate: async (js) => String(js),
   };
 }
 
@@ -136,6 +138,30 @@ describe('ai-browser call', () => {
     // 关键区别：不是"你没启动"，而是"我试着启动了，失败原因是 X"。
     expect(r.stderr).not.toMatch(/没在 127\.0\.0\.1:9 上跑/);
     expect(r.stderr).toMatch(/could not start the browser|ENOENT|no such file/i);
+  });
+});
+
+describe('ui.evaluate 的参数名（曾经的静默陷阱）', () => {
+  // 2026-10-20：技能文档里写成 {"expr":"…"}，而 WS 层只认 js。传错的后果不是报错，
+  // 而是拿到 {"value":undefined} —— 看起来像"页面没这东西"，实际表达式根本没跑。
+  // 后来 WS 层接受 expr 作为别名，并且空表达式直接报错，这里钉住三条。
+  it('EV-1: {"js":"…"} 正常执行', async () => {
+    const r = await run(['call', 'ui.evaluate', '{"js":"document.title"}', '--port', port]);
+    expect(r.code).toBe(0);
+    expect(JSON.parse(r.stdout).value).toBe('document.title');
+  });
+
+  it('EV-2: {"expr":"…"} 作为别名也能执行（MCP 层的叫法，不许静默失效）', async () => {
+    const r = await run(['call', 'ui.evaluate', '{"expr":"1+1"}', '--port', port]);
+    expect(r.code).toBe(0);
+    expect(JSON.parse(r.stdout).value).toBe('1+1');
+  });
+
+  it('EV-3: 空表达式 → 退出码 1 + 说明，而不是静默返回 undefined', async () => {
+    const r = await run(['call', 'ui.evaluate', '{}', '--port', port]);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(/empty expression/);
+    expect(r.stdout).toBe('');
   });
 });
 

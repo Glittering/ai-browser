@@ -2,6 +2,7 @@
 // One process, one WS server, multiple tabs with real tab bar.
 import { app, BrowserWindow, BrowserView, ipcMain, net, session, dialog } from 'electron';
 import path from 'node:path';
+import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { startWSServer } from './ws_server.js';
 import { PageManager } from './page_manager.js';
@@ -326,10 +327,40 @@ if (gotLock) {
   app.quit();
 }
 
+// === 应用图标（2026-10-20）===
+//
+// macOS 上从源码启动时 Dock 图标是 Electron 的默认火箭 —— 因为进程本体就是
+// node_modules/electron/dist/Electron.app，**Dock 跟的是可执行文件，不是我们的
+// 代码**。打包版没有这个问题（Info.plist 里已经是自定义 icns），但 `npm start`
+// / `npx` 启动占日常使用的大头；图标错了，用户的判断就是"这不是 AI Browser"。
+// （2026-10-20 原话："我看现在系统里运行的 ai-browser 都是默认图标了"。）
+//
+// app.dock.setIcon 是 Electron 提供的运行时入口，不影响签名与打包。
+// Windows/Linux 走 BrowserWindow 的 icon 选项（见 createWindow）。
+function appIconPath() {
+  const p = path.join(__dirname, '..', '..', 'build', 'icon.png');
+  try { return fs.existsSync(p) ? p : null; } catch (_) { return null; }
+}
+
+function applyAppIcon() {
+  if (process.platform !== 'darwin') return false;   // 其他平台由窗口 icon 选项负责
+  const icon = appIconPath();
+  if (!icon) return false;   // 装的是精简包（没带 build/）→ 静默跳过，不值得启动失败
+  try {
+    if (app.dock && typeof app.dock.setIcon === 'function') { app.dock.setIcon(icon); return true; }
+  } catch (e) {
+    console.error('[icon] dock.setIcon failed:', e && e.message);
+  }
+  return false;
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
+    // Windows/Linux 的任务栏图标来自这里（macOS 走 app.dock.setIcon，
+    // 见 applyAppIcon：Dock 跟的是进程可执行文件，不是窗口选项）。
+    icon: appIconPath() || undefined,
     // 先不显示：如何显示由 showInitialWindow() 按焦点策略决定 —— 窗口必须真实可见
     // （产品承诺人可随时介入），但被 agent 拉起时不该把用户正在做的事打断。
     show: false,
@@ -764,6 +795,7 @@ function normalizeUrlInput(input) {
 }
 
 app.whenReady().then(() => {
+  applyAppIcon();
   createWindow();
 
   // === 自检钩子：AI_BROWSER_SELFTEST=crash ===

@@ -206,7 +206,19 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
             break;
           }
           case 'ui.evaluate': {
-            const js = String(params.js ?? '');
+            // 参数名是 js；expr 是 MCP 层的叫法，作为别名保留 —— 文档里写错一次
+            // （2026-10-20 技能里写成 expr）就会得到 `{value: undefined}`，
+            // 看上去像"页面没东西"，实际是表达式根本没执行。别名 + 空表达式报错，
+            // 把"静默返回 undefined"这条路彻底堵掉。
+            const rawJs = params.js !== undefined ? params.js : params.expr;
+            const js = String(rawJs === undefined || rawJs === null ? '' : rawJs);
+            if (!js.trim()) {
+              send({
+                jsonrpc: '2.0', id,
+                error: { code: -32602, message: 'empty expression: pass {"js":"<expression>"} (alias: "expr")' },
+              });
+              break;
+            }
             // Guard rails (shared single source) — enforce length + reject
             // obvious Node-exfil patterns. The MCP layer applies the same guard;
             // a direct ws client bypasses MCP, so enforce the same contract here.

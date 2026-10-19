@@ -29,6 +29,9 @@ const SUITES = [
   'modeldiff', 'audit', 'nav', 'focus', 'interact', 'upload', 'view',
   // 读能力不变量：受控页面 fixture，钉住「读不全就必须给出可执行 hint」
   'readcov',
+  // window.open("") + location 赋值：钉住「派生出来的 tab 自己也得带垫片」，
+  // 否则超星系站点在第二层再走同一条路就静默不跳转（2026-10-20 第三次复发）。
+  'window_open',
 ];
 
 /**
