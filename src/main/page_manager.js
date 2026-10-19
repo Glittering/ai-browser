@@ -32,6 +32,9 @@ import frameProbe from '../shared/frame_probe.cjs';
 // 子帧内容读取器（在帧内执行）。选择器/上限/覆盖率口径全在那个文件里，
 // 这里只负责把它喂进去 —— 采集规则不该散落在 page_manager 的字符串里。
 import { buildFrameReadSource } from '../shared/frame_read_source.js';
+// 文字覆盖率（纯函数）：树里的正文字数 / 页面上看得见的字数。"读到了"必须
+// 是能算出来的结论，见 shared/doc_coverage.js 顶部的事故说明。
+import docCoverage from '../shared/doc_coverage.js';
 // ui.act target 形状体检（纯函数）：传了可见文字而不是 data-ai-id 时，
 // 入口就给可操作的错误，而不是等到选择器查空才说 "Target not found"。
 import refGuard from '../shared/ref_guard.cjs';
@@ -705,7 +708,11 @@ class PageManager {
     // 此前这条通路只在 ax:true 下存在，而**没有任何地方告诉调用方 ax:true
     // 的存在** —— B站图文编辑器（正文在 OOPIF 里）因此隐形了两小时，agent
     // 得出"编辑器没加载"的错误结论。现在默认读法自己补上这一步。
-    if (!focusedOnly) await this._autoMergeOpaqueFrames(res, tid);
+    const frames = focusedOnly ? [] : await this._autoMergeOpaqueFrames(res, tid);
+    // 「这棵树读到了多少页面文字」—— 与 frame_hints 的 text_coverage（只看帧）
+    // 互补：那个回答"帧读够了吗"，这个回答"整页读够了吗"。
+    // 事故里 27 个节点、正文 0 字的页面，两个数字都会报警，而此前一个都没有。
+    this._annotateCoverage(res, frames);
     // 记下"这一版树里有哪些 ref"。之后 act 报 target_not_found 时，靠它区分
     // 「ref 过期了」（页面变过，重读树即可）和「ref 从来没对过」（改传参）。
     // 见 shared/ref_epoch.js 顶部注释。
@@ -733,12 +740,12 @@ class PageManager {
   // "还有一条没走过的路"。
   async _autoMergeOpaqueFrames(res, tid) {
     try {
-      if (!res || !res.tree || !res.context) return;
-      if (res.tree.__oopif_merged) return; // 幂等：合并过的树不重复做
+      if (!res || !res.tree || !res.context) return [];
+      if (res.tree.__oopif_merged) return []; // 幂等：合并过的树不重复做
       const summary = res.context.cross_process_frames;
-      if (!frameProbe.shouldAutoAx(summary)) return;
+      if (!frameProbe.shouldAutoAx(summary)) return [];
       const view = this._getView(tid);
-      if (!view) return;
+      if (!view) return [];
       const frames = await withDeadline(this._readOopifFrames(view, tid), 15000, 'get_tree(auto-oopif)');
       if (frames && frames.length) {
         res.tree = axExtractor.mergeFrameTrees(res.tree, frames);
@@ -754,6 +761,8 @@ class PageManager {
         // 测量值：光说 merged 等于只说"我试过了"。见 frame_probe.summarizeFrameRead。
         summary: frameProbe.summarizeFrameRead(frames),
       });
+      // 返回帧记录：文字覆盖率要用它们的 text_chars 当分母的一部分。
+      return frames || [];
     } catch (e) {
       // 自动合并失败绝不拖垮主读法：默认树照常返回，只在 hints 里说明原因。
       // 调用方看到 failed 可以手动切 ax:true 重试。
@@ -762,7 +771,37 @@ class PageManager {
           error: (e && e.__deadline ? e.message + ' — the page main thread is likely blocked' : e && e.message) || String(e),
         });
       }
+      return [];
     }
+  }
+
+  /**
+   * 「这棵树读到了多少页面文字」写进 context.page_coverage。
+   *
+   * 分子 = 树里所有正文 label 的字符数；分母 = 主文档 innerText 长度 +
+   * 每个跨进程帧里可见文字的字符数（帧那边在 frame_read_source 里已经算过）。
+   *
+   * 为什么必须分成"主文档 + 帧"两半：innerText 不跨 iframe，把两者混在一个
+   * 数里，任何一侧读漏都会被另一侧的平均值盖住 —— 泛雅那次就是这样，
+   * 主文档读得很好（外壳 100%），正文一个字没有，而没有任何数字表达这件事。
+   */
+  _annotateCoverage(res, frames) {
+    if (!res || !res.tree || !res.context) return;
+    // 读失败时不算覆盖率：这一版树是 bridge 的兜底占位（只有一个装着异常文本的
+    // 节点），拿它当分子只会得出一个看似正常的小数字，把"没读成"包装成
+    // "页面内容少"。宁可让 page_coverage 缺席，让 read_ok/read_error 说话。
+    if (res.context.read_ok === false) return;
+    try {
+      const stats = res.context.stats || {};
+      const frameChars = (frames || []).reduce(
+        (s, f) => s + Number((f && f.stats && f.stats.text_chars) || 0), 0);
+      const summed = docCoverage.sumLabelChars(res.tree);
+      res.context.page_coverage = docCoverage.pageCoverage({
+        treeChars: summed.chars,
+        mainChars: Number(stats.text_chars) || 0,
+        frameChars,
+      });
+    } catch (_) { /* 度量失败绝不影响读树 */ }
   }
 
   // 登录态 / 登录墙自查。长任务里每个关键步骤前都可以问一次，成本只是走一次
@@ -969,8 +1008,14 @@ class PageManager {
             if (out.context[k] == null && ctx[k] != null) out.context[k] = ctx[k];
           }
           if (!out.context.session || !Object.keys(out.context.session).length) out.context.session = ctx.session || {};
-          if (out.context.stats && ctx.stats) Object.assign(out.context.stats, { inputs: ctx.stats.inputs, buttons: ctx.stats.buttons, links: ctx.stats.links, iframes: ctx.stats.iframes });
+          if (out.context.stats && ctx.stats) Object.assign(out.context.stats, { inputs: ctx.stats.inputs, buttons: ctx.stats.buttons, links: ctx.stats.links, links_without_href: ctx.stats.links_without_href, iframes: ctx.stats.iframes, text_chars: ctx.stats.text_chars });
         } catch (e) { /* context 补全失败不影响树 */ }
+      }
+      // 分母（text_chars）补完了，这时候才算覆盖率。frames 由 _finishAxTree 带过来。
+      if (out) {
+        const framesForCoverage = out.__frames || [];
+        delete out.__frames;
+        this._annotateCoverage(out, framesForCoverage);
       }
       return out;
     } catch (e) {
@@ -1002,6 +1047,11 @@ class PageManager {
         });
       }
     }
+    // 覆盖率在两条读法上是同一个口径（同一个函数），否则"ax:true 覆盖率 60%、
+    // 默认读法 40%"只会让调用方怀疑读数本身。
+    // 这里只把 frames 挂给调用方，**不能在这里算**：AX 的 context.stats 还要等
+    // getTreeViaAx 补完 DOM 侧字段（含 text_chars）才有分母。
+    if (main) main.__frames = frames || [];
     // #4: incremental diff — return only newly appeared / hidden interactive
     // nodes since the last ax read on this tab (feeds: small payload per scroll).
     if (opts.mode === 'diff') {

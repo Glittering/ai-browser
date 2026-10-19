@@ -194,7 +194,7 @@ export async function probeCapabilities(pageManager, opts = {}) {
     } catch (e) { /* capture disabled — not an error worth failing on */ }
   }
 
-  const route = recommend({ flat, dom, endpoints });
+  const route = recommend({ flat, dom, endpoints, coverage: (treeCtx && treeCtx.page_coverage) || null });
   return {
     ok: true,
     tab: tid,
@@ -217,6 +217,9 @@ export async function probeCapabilities(pageManager, opts = {}) {
     // 树对跨进程帧的覆盖率（来自 get_tree 的回执，不是探针自己算的）。
     // null = 这个页面没有跨进程帧，或者读树失败。
     frame_hints: (treeCtx && treeCtx.frame_hints) || null,
+    // 整页文字覆盖率（树里的正文字数 / 主文档 + 帧里看得见的字数）。
+    // "树薄"到底薄到什么程度，由这个数字回答，而不是由探针猜原因。
+    page_coverage: (treeCtx && treeCtx.page_coverage) || null,
     app_globals: (dom && dom.globals) || [],
     endpoints,
     route,
@@ -354,7 +357,7 @@ export function describeThinTree(input) {
  * The actual deliverable: which route to take, and WHY (with the evidence).
  * Every claim cites the number that produced it, so a caller can disagree.
  */
-export function recommend({ flat, dom, endpoints }) {
+export function recommend({ flat, dom, endpoints, coverage }) {
   const routes = [];
   const iframes = (dom && dom.iframes) || [];
   const globals = (dom && dom.globals) || [];
@@ -426,13 +429,17 @@ const rich = flat.length >= 60 && roleSet.size >= 4 && actionable >= 10;
     preferred: !graphObj && (rich || (opaqueFrames.length > 0 && totalCanvas === 0)),
     why: rich
       ? `${flat.length} elements, ${roleSet.size} distinct roles, ${actionable} with a click/type action — targets can be found by role/label and driven by data-ai-id, no coordinates`
+      // 树薄时，把**实测的覆盖率**接在归因后面：归因说明"为什么薄"，数字说明
+      // "薄到什么程度"。没有数字的归因，就是这次事故里的那句 canvas。
       : describeThinTree({
         elements: flat.length,
         actionable,
         canvasTop: topCanvas,
         canvasInFrames: frameCanvas,
         opaqueFrames,
-      }),
+      }) + (coverage && coverage.percent != null
+        ? ` [tree carries ${coverage.percent}% of the page's visible text: ${coverage.tree_chars}/${coverage.page_chars} chars]`
+        : ''),
     evidence: {
       elements: flat.length,
       actionable,
