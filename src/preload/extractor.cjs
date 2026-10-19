@@ -565,7 +565,11 @@ function extractTree() {
     var title = el.getAttribute("title");
     if (title) return title;
     var text = renderedText(el).trim();
-    if (text.length > 60) text = text.slice(0, 60);
+    // 截断必须**留痕**。原来这里是裸 `text.slice(0, 60)`：一段 500 字的正文在树里
+    // 变成 60 字，而且看不出被砍过 —— agent 会把它当成"这一段就这么点字"。
+    // 实测 /long.html：60 段全在树里，覆盖率只有 70%，原因就是每段被裁到 60；
+    // 而回执上没有任何一处说"我裁过"。抄 frame_read_source 的 clip() 口径，补一个省略号。
+    if (text.length > 60) text = text.slice(0, 59) + "\u2026";
     if (text) return text;
     var placeholder = el.getAttribute("placeholder");
     if (placeholder) return placeholder;
@@ -1479,12 +1483,15 @@ function extractPageContext() {
       // 页面**看得见的文字**总量 —— 文字覆盖率的分母（见 shared/doc_coverage.js）。
       // 用 innerText 而不是 textContent：前者是浏览器算出来的"渲染后可见文字"，
       // display:none / 折叠 / visibility:hidden 都不算。
-      // 它和上面几个 querySelectorAll 在同一次页面内扫描里，没有额外 IPC 往返；
-      // innerText 会触发一次布局，但这次读数只在 get_tree 时发生。
+      // 只数**非空白字符**：innerText 会把结构分隔符也吐出来（表格里的 \t、
+      // 段落间的 \n），而分子（label）没有这些。实测一张 8×4 表格因此虚低到 68%，
+      // 实际每个单元格都在。两边同一把尺子，这个数字才有意义。
       text_chars: (function() {
         try {
           var t = document.body && document.body.innerText;
-          return t ? String(t).replace(/[\s\u00a0]+/g, " ").trim().length : 0;
+          if (!t) return 0;
+          var m = String(t).match(/[^\s\u00a0]/g);
+          return m ? m.length : 0;
         } catch(e) { return 0; }
       })(),
       // 同源子帧里的可见文字。**必须单独算、并进分母**：抽取器会走进同源
@@ -1503,7 +1510,8 @@ function extractPageContext() {
             if (!doc || !doc.body) continue;   // 跨进程帧拿不到 contentDocument
             try {
               var t = doc.body.innerText;
-              if (t) total += String(t).replace(/[\s\u00a0]+/g, " ").trim().length;
+              // 与 text_chars 同一把尺子：只数非空白字符
+              if (t) { var m = String(t).match(/[^\s\u00a0]/g); total += m ? m.length : 0; }
             } catch(e) {}
           }
         } catch(e) {}
@@ -1514,6 +1522,33 @@ function extractPageContext() {
       // 了 12 行字的 canvas 页，分母 4 字、报 100%）。有它才能说"量不了"。
       canvases: (function() {
         try { return document.querySelectorAll("canvas").length; } catch(e) { return 0; }
+      })(),
+      // open shadow root 里的文字。
+      //
+      // 为什么必须算：抽取器会下探 shadowRoot（见 childrenOf 的注释），所以
+      // **树里有 shadow 内容**；但 `body.innerText` 不穿过 shadow 边界 ——
+      // 分母里没有。实测一个 shadow 页：树里 35 字、分母只有 8 字 → 比例 4.4
+      // → over_measured，看起来像"分子在重复计数"，实际是分母漏了一个表面。
+      //
+      // 这里用 textContent 而不是 innerText，原因很实在：拿不到某个 shadow root
+      // 的"渲染后文本"（host.innerText 不含 shadow 内容，逐个元素算 innerText
+      // 要遍历整棵影子树并触发布局）。所以这是**已知偏保守**的一侧：shadow 里
+      // 被 display:none 藏掉的文字也会被算进分母，让覆盖率略微偏低。
+      // 偏低的方向是安全的 —— 它只会让"读不全"更容易被发现，不会掩盖。
+      shadow_chars: (function() {
+        var total = 0;
+        try {
+          var all = document.querySelectorAll("*");
+          for (var i = 0; i < all.length; i++) {
+            var sr = all[i].shadowRoot;
+            if (!sr) continue;
+            try {
+              var t = sr.textContent;
+              if (t) total += String(t).replace(/[\s\u00a0]+/g, "").length;
+            } catch(e) {}
+          }
+        } catch(e) {}
+        return total;
       })()
     }
   };

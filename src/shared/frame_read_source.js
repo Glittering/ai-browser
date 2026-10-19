@@ -59,6 +59,15 @@ function frameRead(prefix) {
   function clip(s) {
     return s.length > LABEL_CAP ? s.slice(0, LABEL_CAP - 1) + '\u2026' : s;
   }
+  // 字数只数**非空白字符**。分母（innerText）和分子（label 累计）必须用同一把
+  // 尺子，否则中文页面的覆盖率会因为空格/换行/缩进横向失真：
+  // 一个 40 行、每行 3 个字的表格，按字符数算分母会虚高 2~3 倍。
+  // 主文档侧的 doc_coverage.js 用的是同一条规则，改一处必须改另一处。
+  function countChars(s) {
+    if (!s) return 0;
+    var m = String(s).match(/[^\s\u00a0]/g);
+    return m ? m.length : 0;
+  }
 
   var els;
   try { els = Array.prototype.slice.call(document.querySelectorAll(SEL)); }
@@ -214,9 +223,10 @@ function frameRead(prefix) {
     // 可编辑节点的 label 是占位符（"请输入标题"），不是页面正文 —— 不计入
     // 覆盖率分子，否则一个带 placeholder 的搜索框就能把覆盖率虚抬上去。
     if (out[n].editor_type) continue;
-    keptChars += out[n].label.length;
+    keptChars += countChars(out[n].label);
     if ((out[n].states || [])[0] === 'readonly') texts += 1;
   }
+  var bodyChars = countChars(bodyText);
 
   return {
     url: (typeof location !== 'undefined' && location.href) || '',
@@ -226,12 +236,12 @@ function frameRead(prefix) {
       candidates: els.length,
       interactive: out.length - texts,
       text_blocks: texts,
-      text_chars: bodyText.length,
+      text_chars: bodyChars,
       kept_chars: keptChars,
       // 覆盖率：这一帧**看得见的文字**里，有多少进了树。1 = 全进；
       // 0.01 = 树里只有一个搜索框，正文一个字都没读到（泛雅事故现场）。
-      coverage: bodyText.length
-        ? Math.round(Math.min(1, keptChars / bodyText.length) * 100) / 100
+      coverage: bodyChars
+        ? Math.round(Math.min(1, keptChars / bodyChars) * 100) / 100
         : (out.length ? 1 : 0),
     }
   };

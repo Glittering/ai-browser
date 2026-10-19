@@ -13,15 +13,28 @@
 const spawned = new Set();
 let installed = false;
 
+// 为什么是 SIGKILL 而不是 SIGTERM（2026-10-20 实测）：
+//
+// 2026-10-20 跑 readcov 套件时，连续 4 次运行留下了 4 个 Electron 实例，
+// 每个都还开着一个窗口 —— 用户看到的是"好几个纯白窗口"。原因不是没发信号，
+// 是 **SIGTERM 的语义和 process.on('exit') 冲突**：SIGTERM 是"请求优雅退出"，
+// Chromium 收到后要排队走自己的关闭流程，而发送方（本进程）发完信号就
+// 立刻 exit 了。没人等，也没人补第二刀；只要 Chromium 那侧在关闭途中卡一下、
+// 或者被 window-all-closed 之类的钩子拦住，进程就永远留着。
+//
+// e2e 实例用的是临时 userData（/tmp/ai-browser-e2e-*），**没有任何需要优雅
+// 收尾的状态**（cookie 固化只对真实 profile 有意义）。所以这里直接 SIGKILL
+// 整个进程组：同步、不可忽略、包含 renderer / GPU 助手进程。
+// 代价是可以忽略的，收益是"跑完测试电脑上不会多出一堆白窗口"。
 function killAll() {
   for (const c of Array.from(spawned)) {
     if (!c || !c.pid) continue;
     // 优先按进程组收割（含 renderer / GPU 助手进程）
     try {
-      process.kill(-c.pid, 'SIGTERM');
+      process.kill(-c.pid, 'SIGKILL');
     } catch {
       try {
-        process.kill(c.pid, 'SIGTERM');
+        process.kill(c.pid, 'SIGKILL');
       } catch {}
     }
   }

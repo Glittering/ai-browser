@@ -14,6 +14,9 @@ import { sumLabelChars, pageCoverage, LOW_COVERAGE, MIN_MISSING_CHARS } from '..
 
 const node = (label, extra = {}) => ({ id: 'x', role: 'generic', label, actions: [], ...extra });
 const tree = (...nodes) => ({ id: 'root', role: 'generic', label: '', children: nodes });
+// 分子数的是**非空白字符**（分母 innerText 里的空白结构不算，两边必须同一把尺子）。
+// 测试里要断言的"字数"一律走这个函数，别用 String.length。
+const nw = (s) => String(s).replace(/[\s\u00a0]/g, '').length;
 
 describe('sumLabelChars()', () => {
   it('DC-1: 累加所有正文 label，深度不限', () => {
@@ -42,8 +45,8 @@ describe('sumLabelChars()', () => {
       { id: 'c1', role: 'link', label: '1.1 课程导学', actions: [], children: [node('1.1 课程导学')] },
       { id: 'c2', role: 'link', label: '1.2 学习目标', actions: [], children: [node('1.2 学习目标')] }
     );
-    // 只算两个内层 a 的文字，容器那两份不再加
-    expect(sumLabelChars(t).chars).toBe('1.1 课程导学'.length + '1.2 学习目标'.length);
+    // 只算两个内层 a 的文字，容器那两份不再加。（字数按**非空白**数，见 countChars）
+    expect(sumLabelChars(t).chars).toBe(nw('1.1 课程导学') + nw('1.2 学习目标'));
     expect(sumLabelChars(t).labels).toBe(2);
   });
 
@@ -63,7 +66,7 @@ describe('sumLabelChars()', () => {
       { id: 'f', role: 'iframe', label: 'frame_content-zj', actions: [] },
       { id: 'g', role: 'Iframe', label: 'frame_content-zj', actions: [], children: [node('已完成任务点: 0/4')] }
     );
-    expect(sumLabelChars(t).chars).toBe('已完成任务点: 0/4'.length);
+    expect(sumLabelChars(t).chars).toBe(nw('已完成任务点: 0/4'));
   });
 
   it('DC-15: img 的 alt 不算正文（innerText 里没有 alt）', () => {
@@ -126,13 +129,28 @@ describe('pageCoverage()', () => {
     expect(c.hint).toContain('cross-process frame');
   });
 
-  it('DC-9c: 两个闸门是"且"关系 —— 比例够低、且漏得够多，才提示', () => {
-    // 漏掉正好 MIN_MISSING_CHARS 字 → 报
-    expect(pageCoverage({ treeChars: 30 - MIN_MISSING_CHARS, mainChars: 30, frameChars: 0 }).hint).not.toBe(null);
-    // 只漏 MIN_MISSING_CHARS - 1 字 → 不报（数字太小，不值得下结论）
-    expect(pageCoverage({ treeChars: 30 - MIN_MISSING_CHARS + 1, mainChars: 30, frameChars: 0 }).hint).toBe(null);
-    // 大页面上漏得很多但比例还行（0.6）→ 不报：没有"一整块看不见"的迹象
-    expect(pageCoverage({ treeChars: 600, mainChars: 1000, frameChars: 0 }).hint).toBe(null);
+  it('DC-9c: 比例闸门是主判据；绝对缺口只挡"一两个字"的噪声', () => {
+    // 这条测试换过三版判据，每版都被实测推翻（见 doc_coverage.js 的 missingEnough）：
+    //   page_chars < 200 → 泛雅 185 字被静音；缺 ≥ 20 字 → /sr-only 的 73% 被静音。
+    // 现在：ratio < 0.9 就说话，只用一个 5 字的下限挡碎屑。
+    const pc = (treeChars, mainChars) => pageCoverage({ treeChars, mainChars });
+    // 大页面 88% → 报
+    expect(pc(880, 1000).hint).not.toBe(null);
+    // 大页面 95% → 不报
+    expect(pc(950, 1000).hint).toBe(null);
+    // 一句话的页面刚好 90% → 不报
+    expect(pc(18, 20).hint).toBe(null);
+    // 页面只有 6 字、漏 5 字（17%）→ 报：这不是"页面太小"，是几乎什么都没读到
+    expect(pc(1, 6).hint).not.toBe(null);
+    // 页面 8 字、漏 4 字 → 不报：一个词以下，说了也没用
+    expect(pc(4, 8).hint).toBe(null);
+  });
+
+  it('DC-9d: /sr-only.html 真身回归 —— 22 字的页面漏 16 字必须出声', () => {
+    // 实测（e2e/readcov_ws.cjs）：移出视口的 span 没有独立节点，树里只剩 6 字。
+    const c = pageCoverage({ treeChars: 6, mainChars: 22 });
+    expect(c.percent).toBe(27);
+    expect(c.hint).not.toBe(null);
   });
 
   it('DC-10: 分子大于分母时不许装作 100% 没事 —— 那是分母漏了一块', () => {
@@ -184,7 +202,7 @@ describe('pageCoverage()', () => {
     expect(c.hint).toBe(null);
   });
 
-  it('DC-11: 阈值是 0.5，边界两侧行为相反', () => {
+  it('DC-11: 阈值边界两侧行为相反（LOW_COVERAGE 现为 0.9，跟着不变量走）', () => {
     const below = pageCoverage({ treeChars: Math.floor(1000 * LOW_COVERAGE) - 1, mainChars: 1000, frameChars: 0 });
     const above = pageCoverage({ treeChars: Math.ceil(1000 * LOW_COVERAGE) + 1, mainChars: 1000, frameChars: 0 });
     expect(below.hint).not.toBe(null);

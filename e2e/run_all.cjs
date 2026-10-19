@@ -27,6 +27,8 @@ const BASE_PORT = Number(process.env.BASE_PORT) || 9410;
 const SUITES = [
   'smoke', 'capabilities', 'richtext', 'network', 'value', 'canvas',
   'modeldiff', 'audit', 'nav', 'focus', 'interact', 'upload', 'view',
+  // 读能力不变量：受控页面 fixture，钉住「读不全就必须给出可执行 hint」
+  'readcov',
 ];
 
 /**

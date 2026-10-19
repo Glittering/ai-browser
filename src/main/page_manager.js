@@ -800,6 +800,7 @@ class PageManager {
         treeChars: summed.chars,
         mainChars: Number(stats.text_chars) || 0,
         sameOriginChars: Number(stats.same_origin_chars) || 0,
+        shadowChars: Number(stats.shadow_chars) || 0,
         frameChars,
         canvases: Number(stats.canvases) || 0,
       });

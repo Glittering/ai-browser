@@ -39,6 +39,22 @@
  */
 const META_ROLES = new Set(['image', 'img', 'iframe', 'iframe_body', 'canvas', 'separator']);
 
+/**
+ * 只数**非空白字符**。
+ *
+ * 为什么：分母来自 `innerText`，它会把结构分隔符也吐出来 —— 一个 32 格表格的
+ * innerText 里夹着 30 多个 `\t` / `\n`，而分子（label）没有这些。
+ * 实测一张 8×4 的表格：page 80 字、tree 54 字 → 覆盖率 68%，看起来"少读了三分之一"，
+ * 实际每个单元格的文字都在，少的是**空格**。
+ * 中文页面几乎不吃这个亏，英文页面按词空格能虚低 15%，表格页面能虚低 40%。
+ * 同一把尺子量两边，这类结构性误差才会消失。
+ */
+const countChars = (s) => {
+  if (!s) return 0;
+  const m = String(s).match(/[^\s\u00a0]/g);
+  return m ? m.length : 0;
+};
+
 /** 树里所有**正文** label 的字符数。图标的空 label、可编辑框的占位符不算。 */
 export function sumLabelChars(tree) {
   let labels = 0;
@@ -65,9 +81,7 @@ export function sumLabelChars(tree) {
     // innerText 里没有它们，算进分子会让覆盖率虚高（一个带 placeholder 的
     // 搜索框就能把 0% 抬到 20%）。
     const role = typeof n.role === 'string' ? n.role.toLowerCase() : '';
-    const own = (n.editor_type || META_ROLES.has(role))
-      ? 0
-      : (typeof n.label === 'string' ? n.label.length : 0);
+    const own = (n.editor_type || META_ROLES.has(role)) ? 0 : countChars(n.label);
     if (kidsChars > 0) return kidsChars;   // 后代有字：以它们为准，容器不再加一遍
     if (own) labels += 1;                  // 这个节点是这段文字的唯一来源
     return own;
@@ -104,18 +118,21 @@ export function pageCoverage(input) {
   const tree = Math.max(0, Number(o.treeChars) || 0);
   const main = Math.max(0, Number(o.mainChars) || 0);
   const sameOrigin = Math.max(0, Number(o.sameOriginChars) || 0);
+  const shadow = Math.max(0, Number(o.shadowChars) || 0);
   const frame = Math.max(0, Number(o.frameChars) || 0);
   const canvases = Math.max(0, Number(o.canvases) || 0);
-  // 分母 = 分子会走到的每一个表面：主文档 + 同源子帧 + 跨进程帧。
-  // 少算任何一块，比例就虚高 —— 而同源子帧是最容易漏的那块，因为
-  // `body.innerText` 不下钻 iframe，抽取器却会。
-  const page = main + sameOrigin + frame;
+  // 分母 = 分子会走到的每一个表面：主文档 + 同源子帧 + open shadow root + 跨进程帧。
+  // 少算任何一块，比例就虚高 —— 而同源子帧和 shadow DOM 是最容易漏的两块：
+  // `body.innerText` 既不下钻 iframe，也不穿过 shadow 边界，抽取器却两头都会走。
+  // 实测 shadow 页：树里 35 字、分母只有 8 字 → over_measured。
+  const page = main + sameOrigin + shadow + frame;
   const base = {
     tree_chars: tree,
     page_chars: page,
     main_chars: main,
     frame_chars: frame,
     same_origin_chars: sameOrigin,
+    shadow_chars: shadow,
     ratio: null,
     percent: null,
     hint: null,
@@ -157,41 +174,67 @@ const CANVAS_HINT = 'this page draws on a <canvas>, so its text is invisible to 
   + 'ui.canvas_read to get the pixels, or context.route in ui.capabilities to pick a read layer';
 
 /**
- * 低于这个比例才给提示。0.5 不是"合格线"，是"再低就不像读过了"：
- * 正常页面上树会覆盖大部分可见文字（按钮/链接/段落都在），掉到一半以下
- * 基本意味着有一整块内容走的是我们看不见的通路。
+ * 低于这个比例才给提示。
+ *
+ * 0.5 是错的，实测被抓了三次（e2e/readcov_ws.cjs 第一次跑就三条一起红）：
+ *   · /long.html     70% —— 60 段正文全在树里，但每段 label 被裁到 60 字
+ *   · /xorigin-frame 59% —— 帧合并了，帧里的段落同样被裁
+ *   · /sr-only       27% —— 移出视口的 span 没有独立节点
+ * 这三张页面**都在静默地少读**（27% 是最刺眼的那种：页面 22 字，agent 只看到 6 字），
+ * 而闸门 0.5 让前两张一声不响。也就是说这个闸门对"读了一半"这种最常见、
+ * 也最容易误导人的状态恰好是聋的。
+ *
+ * 判据只能是**不变量本身**：读不到 90% 就该说一句。提示是一句话，多给一次的
+ * 成本远低于"agent 以为读完了"的成本。
  */
-export const LOW_COVERAGE = 0.5;
+export const LOW_COVERAGE = 0.9;
 
 /**
- * 至少漏掉这么多**字**才值得提示。
+ * 绝对缺口的下限（字）。只负责"别为一两个字打扰调用方"，不负责判断严重程度 ——
+ * 严重程度由比例闸门说。
  *
- * 为什么闸门设在"漏了多少"而不是"页面多大"：
- * 最初这里写的是 `page_chars < 200 → 不提示`，理由是"一句话的页面也能 100%"。
- * 但用泛雅页一验就发现这是错的 —— 那张页面 `innerText` 只有 185 字，
- * 而它最有价值的内容（6 个章节标题）正好是其中 160 字。修前的树只读到 25 字，
- * 覆盖率 13.5%，却因为 185 < 200 被这条闸门**静音**了。
- * 也就是说：这个指标是为了泛雅那类"看起来内容不多、但其实全都在一句里"的
- * 页面建的，而闸门恰好把这类页面全排除了。
- *
- * 改成看绝对值就对了：漏 160 字是事实，跟页面总共多少字无关。
- * 而"一句话的页面报 100%"这个担心由 missing≈0 自然消掉，不需要页面大小来兜。
+ * 这个数字的历史：最初是 `page_chars < 200 → 不提示`（把泛雅 185 字自己排除了），
+ * 后来是 20（把 /sr-only.html 的 73% 缺口静音了），现在 5。详见 missingEnough。
  */
-export const MIN_MISSING_CHARS = 20;
+export const MIN_MISSING_CHARS = 5;
+
+/**
+ * 这个页面"漏够了没有"。
+ *
+ * 这里换过三版判据，每一版都是被实测推翻的：
+ *   1. `page_chars < 200 → 静音`：把泛雅（185 字）自己排除了。
+ *   2. `缺 ≥ 20 字`：把 /sr-only.html（22 字页面漏 16 字，漏 73%）静音了。
+ *   3. 现在：比例闸门已经抬到 0.9，缺口天然是成比例的；绝对值只留一个
+ *      "别为一两个字打扰调用方"的下限。
+ *
+ * 0.9 这条闸门意味着"漏 10% 以上就要说话"，所以 20 这个绝对门槛是重复保险，
+ * 而它在小页面上反而成了静音器。留着 5：一个词以下的缺口，说什么都没用。
+ */
+function missingEnough(missing) {
+  return missing >= MIN_MISSING_CHARS;
+}
 
 function coverageHint(c) {
   if (c.ratio === null || c.ratio >= LOW_COVERAGE) return null;
   const missing = Math.max(0, c.page_chars - c.tree_chars);
-  if (missing < MIN_MISSING_CHARS) return null;
+  if (!missingEnough(missing)) return null;
   // 归因要挂在数字上，不能靠猜。帧里有多少字是**实测**的（frame_read_source），
   // 所以这里能分辨"文字在跨进程帧里"和"文字在主文档里但没进树"。
+  //
+  // 帧这一支**不许**推荐 ax:true：AX 树对子帧的内容同样走 frame_read_source
+  // 的合并通路（实测 /same-frame AX 也只能到 55%），指过去等于把人指进死胡同。
+  // 帧里文字的可靠读法是 frame_ref / 帧地址。
   if (c.frame_chars > 0 && c.frame_chars >= missing * 0.6) {
-    return `the tree carries ${c.percent}% of this page's visible text (${c.tree_chars}/${c.page_chars} chars); ${c.frame_chars} of the missing ${missing} chars are inside cross-process frame(s) — read context.frame_hints.frames[].src, or get_tree {ax:true}`;
+    return `the tree carries ${c.percent}% of this page's visible text (${c.tree_chars}/${c.page_chars} chars); `
+      + `${c.frame_chars} of the missing ${missing} chars are inside cross-process frame(s). `
+      + 'Frame bodies are merged as a preview (each block clipped), so read them directly: '
+      + 'ui.evaluate {frame_ref:"frame-1", expr:"document.body.innerText"} — the frame refs and absolute '
+      + 'src are in context.frame_hints.frames';
   }
   if (c.main_chars > 0 && c.main_chars >= missing * 0.6) {
-    return `the tree carries ${c.percent}% of this page's visible text (${c.tree_chars}/${c.page_chars} chars) and most of the gap is in the main document — a long body of plain text is the usual cause (the DOM tree keeps structure, the AX tree keeps text). Try get_tree {ax:true} before concluding the content is invisible; if AX is also low, the page may still be rendering, or the content sits in shadow DOM / a virtualized list`;
+    return `the tree carries ${c.percent}% of this page's visible text (${c.tree_chars}/${c.page_chars} chars) and most of the gap is in the main document — the DOM tree keeps structure and clips each block's text, the AX tree keeps the full text. Try get_tree {ax:true} before concluding the content is invisible; if AX is also low, the page may still be rendering, or the content sits in shadow DOM / a virtualized list`;
   }
-  return `the tree carries ${c.percent}% of this page's visible text (${c.tree_chars}/${c.page_chars} chars) — the gap is split between the main document and cross-process frames; check context.frame_hints first`;
+  return `the tree carries ${c.percent}% of this page's visible text (${c.tree_chars}/${c.page_chars} chars) — the gap is split between the main document and cross-process frames; check context.frame_hints first, and use frame_ref for the frames`;
 }
 
 export default { sumLabelChars, pageCoverage, LOW_COVERAGE, MIN_MISSING_CHARS, OVER_MEASURED };

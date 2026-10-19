@@ -71,6 +71,7 @@
     "nav": "node e2e/nav_ws.cjs",
     "audit": "node e2e/audit_ws.cjs",
     "e2e:all": "node e2e/run_all.cjs",
+    "readcov": "node e2e/readcov_ws.cjs",
     "coverage": "node tools/coverage_probe.cjs"
   },
   "dependencies": {
