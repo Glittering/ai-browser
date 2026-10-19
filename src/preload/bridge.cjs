@@ -20,7 +20,20 @@ function sendEvent(event, data) {
 
 contextBridge.exposeInMainWorld("__ai_browser__", {
   sendTree: function(tree) { ipcRenderer.send("ai:tree", tree); },
-  sendDiff: function(changes) { ipcRenderer.send("ai:diff", changes); }
+  sendDiff: function(changes) { ipcRenderer.send("ai:diff", changes); },
+  // window.open 垫片的桥（主 world 侧脚本见 main/window_open_shim_source.js）。
+  // contextIsolation 下 preload 改不了页面的 window.open（那是 isolated
+  // world 的 window），所以垫片本体由 CDP 注入进主 world，只把这三个
+  // fire-and-forget 的出口经 contextBridge 暴露给它。
+  windowOpen: function(token, url, name) {
+    ipcRenderer.send("ai:window_open", { token: token, url: url, name: name || "" });
+  },
+  windowOpenNav: function(token, url) {
+    ipcRenderer.send("ai:window_open_nav", { token: token, url: url });
+  },
+  windowOpenClose: function(token) {
+    ipcRenderer.send("ai:window_open_close", { token: token });
+  }
 });
 
 // Extract tree request — echo back the request id so the main process can

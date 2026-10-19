@@ -299,6 +299,12 @@ let navStateInterval = null;
 let navStateWc = null;
 let networkWatchdog = null;
 let isQuitting = false;
+// 退出时固化会话 cookie 的一次性开关：cleanupAndQuit 分流用（见其注释），
+// 固化期间的其他重入调用被忽略，固化完成后经 _finishCleanup 继续退出。
+let cookiePersistDone = false;
+// 退出流程总开关：第一条退出路径（ui.quit / 关窗 / before-quit）置位后，
+// 其余路径全部忽略；固化完成回来时走 _finishCleanup 而不是再进这里。
+let cleanupStarted = false;
 
 // === Single instance lock — second launch just focuses the existing window ===
 const gotLock = app.requestSingleInstanceLock();
@@ -799,9 +805,86 @@ app.whenReady().then(() => {
   }
 });
 
+// Chromium 默认在退出时**清除会话 cookie**（无过期时间的那些）。扫码/账密
+// 登录产生的 JWT、SESSION 基本都是会话 cookie —— 于是 ai-browser 每次
+// ui.quit / 关窗重启都掉登录态，agent 侧表现为"重启后站点又让我登录"。
+// 退出前把它们逐个 set 成带远期过期时间的持久 cookie（值不变，只获得
+// 落盘资格；服务端本来就认的是 value，本地过期时间不影响校验）。
+// before-quit / window-all-closed / ui.quit 三条退出路径都经 cleanupAndQuit，
+// 在那里先等这一步做完再真正 app.quit()。
+async function persistSessionCookies() {
+  try {
+    const ses = session.fromPartition(config.viewPartition);
+    const all = await ses.cookies.get({});
+    const nowSec = Math.floor(Date.now() / 1000);
+    const horizon = nowSec + 400 * 24 * 3600; // ~13 个月，长于任何服务端会话
+    const isDurable = (c) => !!(c.expirationDate && c.expirationDate > nowSec + 7 * 24 * 3600);
+    const todo = all.filter((c) => !isDurable(c));
+    let n = 0;
+    for (let i = 0; i < todo.length; i++) {
+      const c = todo[i];
+      const host = (c.domain || '').replace(/^\./, '');
+      if (!host) continue;
+      const details = {
+        url: (c.secure ? 'https://' : 'http://') + host + (c.path || '/'),
+        name: c.name,
+        value: c.value,
+        path: c.path || '/',
+        secure: !!c.secure,
+        httpOnly: !!c.httpOnly,
+        expirationDate: horizon,
+      };
+      // 域 cookie（.example.com）要显式带 domain；host-only 的绝不能带，
+      // 带了会从"仅本主机"放宽成"子域共享"，是安全隐患。
+      if (c.domain && c.domain.startsWith('.')) details.domain = c.domain;
+      if (c.sameSite && c.sameSite !== 'unspecified') details.sameSite = c.sameSite;
+      try {
+        await ses.cookies.set(details);
+        n++;
+      } catch (e) {
+        console.error('[index] persist cookie failed:', c.name, e && e.message);
+      }
+      // 分批让出：Chromium 的 cookie store 是 grouped commit（几十毫秒一批），
+      // 一口气把全部 set 发完，提交永远追不上 —— app.quit() 一到，没提交的
+      // 全丢（实测 86 个 set 全部"成功"但磁盘只剩 2 个，2026-10-19）。
+      // 每 10 个停 100ms，让每一批都有机会落盘。
+      if (i % 10 === 9) await new Promise((r) => setTimeout(r, 100));
+    }
+    // 最后一组的 grouped commit 也要时间，等 2 秒再让 cleanupAndQuit 继续。
+    if (n > 0) {
+      await new Promise((r) => setTimeout(r, 2000));
+      console.log(`[index] persisted ${n} session cookies before quit`);
+    }
+  } catch (e) {
+    console.error('[index] persistSessionCookies failed:', e && e.message);
+  }
+}
+
 function cleanupAndQuit() {
-  if (isQuitting) return;
+  // cleanupStarted 防的是"多条退出路径同时触发"（ui.quit + window close +
+  // before-quit 可能叠着来），它必须在第一次进入时就置位；isQuitting 只被
+  // watchdog 等查询用。
+  if (cleanupStarted) return;
+  cleanupStarted = true;
   isQuitting = true;
+  // 先固化会话 cookie，再走原有收尾。异步等完成（通常几百毫秒到几秒）——
+  // 直接 app.quit() 会把还没提交的 cookies.set 全部打断，等于没固化。
+  // 注意：finally 回来的这次调用不能被 cleanupStarted 挡掉（第一版就是
+  // 这么写成死锁的 —— app.quit() 永远执行不到，app 退不掉），所以分流：
+  // 固化中的重入走 _finishCleanup，其他重入直接忽略。
+  if (!cookiePersistDone) {
+    cookiePersistDone = true;
+    persistSessionCookies()
+      .catch(() => {})
+      .finally(() => { _finishCleanup(); });
+    return;
+  }
+  _finishCleanup();
+}
+
+// 真正的收尾 + app.quit()。与 cleanupAndQuit 分开，避免防重入标志把
+// "固化完成后回来继续退出"这条必经之路也挡掉。
+function _finishCleanup() {
   // 收尾行：日志里**没有** shutdown 行，就说明上一次是硬退（崩溃 / 被 kill）——
   // 这是事后判断"到底有没有崩过"最直接的依据。
   try { markShutdown('cleanup'); } catch {}
@@ -827,4 +910,12 @@ function cleanupAndQuit() {
 }
 
 app.on('window-all-closed', cleanupAndQuit);
-app.on('before-quit', cleanupAndQuit);
+// before-quit 里 preventDefault：固化会话 cookie 是异步的（要等 cookies.set
+// 分批提交完），不拦住默认退出流程的话窗口/视图先被拆，固化就写一半。
+// cleanupStarted 之后的第二次 before-quit（我们自己 app.quit() 触发的）
+// 不再拦截，直接放行。
+app.on('before-quit', (e) => {
+  if (cleanupStarted) return;
+  e.preventDefault();
+  cleanupAndQuit();
+});

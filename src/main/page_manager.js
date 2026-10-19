@@ -10,6 +10,8 @@ import axExtractor from './axExtractor.js';
 import { NetworkMonitor, MAX_POST_DATA_SIZE } from './network_monitor.js';
 import { CanvasMonitor, isCanvasHookEnabled } from './canvas_monitor.js';
 import { buildCanvasHookSource } from './canvas_hook_source.js';
+// window.open("") + location 赋值模式的兼容垫片（主 world 源码，见文件头注释）
+import { WINDOW_OPEN_SHIM_SOURCE } from './window_open_shim_source.js';
 import { diffValues, previewOf, safeByteLength, DEFAULT_SNAPSHOT_JS, DIFF_MAX_ENTRIES, evictOldest } from './snapshot_diff.js';
 import { withDeadline, actionDeadlineMs } from '../shared/deadline.js';
 import { DownloadMonitor } from './download_monitor.js';
@@ -160,6 +162,8 @@ class PageManager {
     this._requestId = 0;
     this._wsClients = new Map();
     this._openedTabs = new Map();   // sourceTabId -> { id, url } (new tab opened by window.open)
+    this._windowOpenTokens = new Map(); // token -> { tabId, sourceTabId } (window.open shim, preload bridge.cjs)
+    this._windowOpenShimTabs = new Set(); // 已注入 window.open 垫片的 tabId
     this._axDiffCache = new Map();  // tabId -> lite interactive snapshot (get_tree {mode:'diff'})
     this._repaintTimers = new Map();// tabId -> 正在排队/已调度的重绘（合并同一批导航事件）
     this._snapshots = new Map();    // snapshotId -> { tabId, js, value, at }（ui.snapshot 存基线）
@@ -286,6 +290,64 @@ class PageManager {
       // Tag events with active tab
       this._broadcast(payload.event, payload.data || {});
     });
+
+    // === window.open 垫片的主进程侧（见 preload/bridge.cjs 的注释）===
+    // 站点模式：window.open("", "_blank") 先开空窗口，再把 location 赋成
+    // 真实地址。setWindowOpenHandler 那条路给不了页面可用的 window 引用
+    // （deny 后 window.open 返回 null），所以页面侧改为走这两条 IPC：
+    // ai:window_open 建真实 tab（空 url → about:blank 占位），
+    // ai:window_open_nav 把 location 赋值翻译成对该 tab 的导航。
+    // 同 sender 的 IPC 保序，nav 到达时 tab 必已建好。
+    ipcMain.on('ai:window_open', (_event, payload) => {
+      const p = payload || {};
+      const token = p.token;
+      if (!token) return;
+      const sourceTabId = this._tabIdForContents(_event.sender);
+      const url = typeof p.url === 'string' ? p.url : '';
+      const childId = this.newTab(url && url !== 'about:blank' ? url : null);
+      this._windowOpenTokens.set(token, { tabId: childId, sourceTabId });
+      // 与 setWindowOpenHandler 路径共用 _openedTabs：executeAction 的
+      // auto-follow（点击后 Agent 视角跟到新 tab）对两种打开方式一致。
+      if (sourceTabId !== null) {
+        this._openedTabs.set(sourceTabId, { id: childId, url: url || 'about:blank' });
+      }
+    });
+
+    ipcMain.on('ai:window_open_nav', (_event, payload) => {
+      const p = payload || {};
+      const entry = this._windowOpenTokens.get(p.token);
+      const url = typeof p.url === 'string' ? p.url : '';
+      if (!entry || !url) return;
+      const view = this._getView(entry.tabId);
+      if (view) {
+        // 占位 tab（about:blank）→ 真实学习页。loadURL 的 rejection 由
+        // 页面自身处理（站点可能会立刻再导航一次），这里只防 unhandled。
+        view.webContents.loadURL(url).catch(() => {});
+      } else {
+        // tab 已被用户/Agent 关掉：赋值静默丢弃（真实浏览器里关掉的
+        // 窗口被赋 location 也是无人接收）。
+        console.warn('[window_open] nav target tab gone:', entry.tabId, url);
+      }
+    });
+
+    ipcMain.on('ai:window_open_close', (_event, payload) => {
+      const token = (payload || {}).token;
+      const entry = this._windowOpenTokens.get(token);
+      if (!entry) return;
+      this._windowOpenTokens.delete(token);
+      if (this._getView(entry.tabId)) this.closeTab(entry.tabId);
+    });
+  }
+
+  // webContents -> tabId 反查。window.open 垫片需要知道是哪个 tab 发起的
+  // （记 _openedTabs 供 auto-follow 用）；ipc-message 的 sender 就是发起
+  // tab 的 webContents。
+  _tabIdForContents(wc) {
+    if (!wc) return null;
+    for (const [tid, view] of this.tabs) {
+      if (view && view.webContents === wc) return tid;
+    }
+    return null;
   }
 
   _broadcast(eventType, data) {
@@ -2720,6 +2782,9 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     // 导航阶段发出的 POST 全部丢失 —— agent 永远拿不到它们的请求体。
     // 关闭开关：AI_BROWSER_NETWORK_CAPTURE=0 或 ui.network_configure{enabled:false}。
     this._ensureNetworkCapture(tabId, view);
+    // window.open 垫片：与抓包同理，必须在**首次导航之前**注入，否则首屏
+    // 页面脚本拿到的 window.open 是原生的（站点首屏就绑定点击行为的场景）。
+    this._ensureWindowOpenShim(tabId, view);
 
     // Mask automation fingerprint: remove Electron from UA
     view.webContents.setUserAgent(config.userAgent);
@@ -2976,6 +3041,12 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
       view.webContents.close();
     }
     this.tabs.delete(tabId);
+    // window.open 垫片记账：这个 tab 若是某次 window.open 的目标，token 已
+    // 失去意义（nav 到达也只会在上面打一行 warn），清掉防止 Map 无限增长。
+    for (const [token, entry] of this._windowOpenTokens) {
+      if (entry.tabId === tabId) this._windowOpenTokens.delete(token);
+    }
+    this._windowOpenShimTabs.delete(tabId);
     // Release per-tab network resources so a closed tab can never leak its
     // debugger attachment or cached request entries / stale monitors.
     this._cleanupTabResources(tabId);
@@ -3409,6 +3480,38 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
         entry.domains.add(domain);
       }
     } catch (e) { /* mid-navigation / already-attached elsewhere; skip this tab */ }
+  }
+
+  // window.open 垫片注入（见 window_open_shim_source.js 顶部注释）。
+  // contextIsolation 下 preload 改不了页面可见的 window.open，只能经
+  // Page.addScriptToEvaluateOnNewDocument 注入主 world。命令必须在 tab 的
+  // 首次 loadURL 之前发（newTab 里紧挨 _ensureNetworkCapture 调用），否则
+  // 首屏页面脚本绑定的就是原生 window.open。
+  // 幂等：每个 tab 只注册一次（_windowOpenShimTabs 记账）；跨导航自动保留
+  // 正是 addScriptToEvaluateOnNewDocument 的语义，不需要重复注册。
+  _ensureWindowOpenShim(tabId, view) {
+    if (this._windowOpenShimTabs.has(tabId)) return;
+    try {
+      const wc = view.webContents;
+      if (!wc || typeof wc.debugger?.attach !== 'function') return;
+      if (!this._cdpTabs.has(tabId)) {
+        wc.debugger.attach('1.3');
+        const entry = { wc, domains: new Set() };
+        this._cdpTabs.set(tabId, entry);
+        wc.debugger.on('message', (_event, method, params) => this._onCdpMessage(tabId, method, params));
+      }
+      // 异步命令，不等结果：注入失败的最坏后果是退化为原生 window.open
+      // （deny → null），与不装垫片之前一致，不阻塞 tab 创建。
+      Promise.resolve(wc.debugger.sendCommand('Page.addScriptToEvaluateOnNewDocument', {
+        source: WINDOW_OPEN_SHIM_SOURCE,
+        runForSubFrames: true,
+      })).catch((e) => {
+        console.error('[window_open] shim inject failed:', tabId, e && e.message);
+      });
+      this._windowOpenShimTabs.add(tabId);
+    } catch (e) {
+      console.error('[window_open] shim setup failed:', tabId, e && e.message);
+    }
   }
 
   // 抓包用的 Network 域：默认在 tab 创建后、首个导航前启用。
