@@ -100,6 +100,11 @@ focuses the existing window (single instance lock).
   `setContent` (replace all), `clear`, `focus`, `hover`, `scroll_to`, `upload`,
   `get_value` (read-only full value; tree truncates at 200 chars), `drag`,
   `press`, `wheel`.
+  Every result carries `effect_state: "committed" | "none" | "unknown"` plus a
+  `retry` verdict (`no` / `safe` / `verify_first`). Treat `unknown` as "read the
+  page before touching it again" — a blind retry can submit twice. A missing
+  target adds `stale_ref` + `ref_diagnosis` (`stale` → re-read the tree;
+  `never_seen` → the ref itself is wrong; `present_in_tree` → iframe/shadow DOM).
 - `browse_diff` — `snapshot` a baseline, then `diff`; returns an explicit
   `verdict: "changed" | "unchanged"` with before/after JSON paths. Wrap every
   write with this — a success return is not evidence the write worked.

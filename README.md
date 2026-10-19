@@ -209,6 +209,34 @@ small surface, since every tool schema is injected into your agent's context on 
 | `browse_network` | Chrome-DevTools-style network inspection: `list` (filter by method / URL / status / type), `get` (request + response headers and bodies), `clear`, `configure`. |
 | `browse_quit` | Shut the whole browser down and release the process. |
 
+### What every act result already tells you: `effect_state`
+
+`browse_act` no longer leaves you guessing whether your input reached the page. Every result
+carries an explicit verdict:
+
+| `effect_state` | Meaning | `retry` |
+|---|---|---|
+| `committed` | dispatched and acked by the page | `no` |
+| `none` | provably nothing happened (no such target, bad params, CDP down) | `safe` |
+| `unknown` | cannot prove nothing happened — timeout, paste dispatched but never consumed, half a key sequence | `verify_first` |
+
+The default is `unknown`, not `none`: when the browser cannot tell, it says so. Retrying an
+`unknown` blindly is how a form gets submitted twice — read the page first. `unknown` results
+also carry a one-sentence `effect_hint` saying exactly that.
+
+When a `target` cannot be found, the result adds `stale_ref` / `ref_epoch` / `tree_epoch` /
+`ref_diagnosis`, because "no such target" hides three very different situations:
+
+- `ref_diagnosis: "stale"` — the page was re-read after you took that ref (`ref_epoch` <
+  `tree_epoch`). Get a fresh one; retrying the same ref will keep failing.
+- `ref_diagnosis: "never_seen"` — the ref has never been in any tree read so far. Re-reading
+  will not help: wrong value (visible text instead of a `data-ai-id`), a typo, or another tab's ref.
+- `ref_diagnosis: "present_in_tree"` — in the current tree but not found in the DOM: iframe,
+  shadow root, or a detached node.
+
+All three report `effect_state: "none"` (nothing happened) with `retry: "verify_first"` — no side
+effects, but repeating the identical call is pointless.
+
 ### Prove it happened: `browse_diff`
 
 A tool reporting `success` is **not** evidence that anything changed — the browser will happily
