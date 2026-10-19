@@ -42,6 +42,8 @@ export function actParams(args = {}) {
     limit: pick(read.limit, args.limit),
     url: pick(click.url, args.url),
     keep_tab: pick(click.keep_tab, args.keep_tab),
+    // 点完等新标签记录出现的时间（默认 150ms，0 = 不等）。见 page_manager._awaitOpenedTab。
+    opened_tab_wait_ms: pick(click.opened_tab_wait_ms, args.opened_tab_wait_ms),
     key: pick(press.key, args.key),
     keys: pick(press.keys, args.keys),
   };

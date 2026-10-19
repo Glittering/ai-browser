@@ -48,18 +48,19 @@ export const MCP_TOOLS = [
       type: 'object',
       properties: {
         action: { type: 'string', enum: ['click', 'type', 'setContent', 'clear', 'focus', 'hover', 'scroll_to', 'upload', 'get_value', 'drag', 'press', 'wheel', 'paste'], description: 'Verb. Verb-specific params live in the group of the same name.' },
-        target: { type: 'string', description: 'data-ai-id from the tree (e.g. e:button-12, axf-3-1) — NOT the visible label. Optional for press; for drag you may give drag.from instead. upload also accepts a CSS selector.' },
+        target: { type: 'string', description: 'data-ai-id from the tree (e.g. e:button-12) — NOT the visible label. Optional for press; drag may use drag.from; upload also takes a CSS selector.' },
         text: { type: 'string', description: 'type: appended at the caret. setContent: replaces all. paste: plain fallback when html is absent.' },
         html: { type: 'string', description: 'paste: HTML, preferred — editors keep headings/lists/bold. Plain text loses formatting.' },
         value: { type: 'string', description: 'Option value for a <select>.' },
         file: { type: 'string', description: 'upload: absolute path. target may be the input, the trigger, or a CSS selector.' },
-        timeout_ms: { type: 'integer', description: 'Action deadline (default 15000; scales with work; 1s..300s). Timeout → success=false, timed_out=true, action may have partially applied.' },
+        timeout_ms: { type: 'integer', description: 'Deadline ms (default 15000, 1s..300s). On timeout: success=false, timed_out=true, may have partially applied.' },
         click: {
           type: 'object',
           description: 'click only.',
           properties: {
-            url: { type: 'string', description: 'Click the link whose href matches this URL instead of guessing which node in a composite card to hit.' },
-            keep_tab: { type: 'boolean', description: 'Keep the current tab active instead of auto-following a newly opened tab.' }
+            url: { type: 'string', description: 'Hit the link whose href matches this URL (for composite cards with several links).' },
+            keep_tab: { type: 'boolean', description: 'Stay on this tab instead of following a newly opened one.' },
+            opened_tab_wait_ms: { type: 'integer', description: 'Extra wait ms for a site-opened tab (default 250 on link targets; pass it to force, 0 off).' }
           }
         },
         read: {

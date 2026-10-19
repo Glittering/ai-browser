@@ -12,7 +12,7 @@ import { CanvasMonitor, isCanvasHookEnabled } from './canvas_monitor.js';
 import { buildCanvasHookSource } from './canvas_hook_source.js';
 // window.open("") + location 赋值模式的兼容垫片（主 world 源码，见文件头注释）
 import { WINDOW_OPEN_SHIM_SOURCE } from './window_open_shim_source.js';
-import { pickOpenedTab } from '../shared/opened_tab.js';
+import { pickOpenedTab, openedTabGraceMs } from '../shared/opened_tab.js';
 // 动作回执自带的"页面到底动没动"三态，以及 ref 过期诊断（两个纯函数模块）。
 import { withEffectState, isTargetMiss as isTargetMissError } from '../shared/effect_state.js';
 import { newTracker, noteTree, diagnoseMissingRef } from '../shared/ref_epoch.js';
@@ -1376,7 +1376,7 @@ class PageManager {
           const res = await this._resolveClickByUrl(view, target, params.url, tid);
           if (!res || !res.success) return { ...(res || {}), success: false, opened_tab: null };
           // #3: 若此点击触发了 window.open → 新 tab，记录并默认接管焦点。
-          res.opened_tab = this._consumeOpenedTab(tid, params.keep_tab === true, actionStartedAt);
+          res.opened_tab = await this._awaitOpenedTab(tid, params.keep_tab === true, actionStartedAt, params, target);
           return res;
         } catch (e) {
           return { success: false, error: String((e && e.message) || e).slice(0, 200), opened_tab: null };
@@ -1385,7 +1385,10 @@ class PageManager {
       try {
         await this._ensureAxHandles(view, tid);
         const via = await this._cdpPointerTarget(view, action, target, tid);
-        if (via) return { success: true, clicked_via: via, target, opened_tab: this._consumeOpenedTab(tid, params.keep_tab === true, actionStartedAt) };
+        if (via) {
+          const opened = await this._awaitOpenedTab(tid, params.keep_tab === true, actionStartedAt, params, target);
+          return { success: true, clicked_via: via, target, opened_tab: opened };
+        }
       } catch (e) { /* fall through to preload */ }
     } else if (action === 'type' || action === 'setContent' || action === 'clear') {
       try {
@@ -1463,7 +1466,7 @@ class PageManager {
     const preloadRes = await this._executeViaPreload(action, target, params, tid);
     // preload 合成点击也可能触发 window.open → 新 tab，同样回报 opened_tab。
     if (action === 'click' && preloadRes && preloadRes.success) {
-      preloadRes.opened_tab = this._consumeOpenedTab(tid, params.keep_tab === true, actionStartedAt);
+      preloadRes.opened_tab = await this._awaitOpenedTab(tid, params.keep_tab === true, actionStartedAt, params, target);
       // 路径可区分：CDP 受信点击报 clicked_via='cdp-click'，回退路径报
       // 'preload-click'。两种都只报 success 的话，agent（和人）无从判断这一下
       // 到底是真实输入还是合成事件 —— 双发 bug 正是靠这个字段才暴露出来的。
@@ -1538,7 +1541,87 @@ class PageManager {
     const mine = pickOpenedTab(entry, startedAt);
     if (!mine) return null;
     if (keep !== true) this.setActive(mine.id);
-    return { id: mine.id, url: mine.url };
+    // 记录里的 url 是**建标签那一刻**的值。window.open("") 这条路上它永远是
+    // 'about:blank' —— 真实地址由随后的 ai:window_open_nav 才载入。直接回
+    // 'about:blank' 会让 agent 以为"打开了个空白页"，这恰恰是当初那个 bug 的样子。
+    // 所以这里读一次实时 URL：已经导航了就用真地址，还没导航就明说 pending。
+    let url = mine.url;
+    let pending = false;
+    try {
+      const view = this._getView(mine.id);
+      const live = view && view.webContents.getURL();
+      if (live && live !== 'about:blank') url = live;
+      // 仍然没有真实地址（占位页还没被导航）→ 明说 pending，而不是回一个
+      // 看起来像"空白页"的 about:blank。
+      if (!url || url === 'about:blank') pending = true;
+    } catch (_) { /* 读不到就维持记录里的值 */ }
+    const out = { id: mine.id, url };
+    if (pending) out.url_pending = true;
+    return out;
+  }
+
+  /**
+   * 点完**等一下**再收新标签记录（只给 click 用）。
+   *
+   * 为什么需要：实测（见 shared/opened_tab.js 顶部）点击派发后 105~119ms 才出现
+   * 新标签，而 act 在 10~15ms 就返回了 —— 回执里的 `opened_tab: null` 是**错的**，
+   * agent 会据此认为"点了没反应"，然后重试。
+   *
+   * 代价：不开标签的点击会等满宽限窗口（默认 150ms，可关）。所以这里是
+   * 「先看一眼，有就立刻返回」，只有确实没有记录时才进入轮询。
+   */
+  async _awaitOpenedTab(tid, keep, startedAt, params, target) {
+    const graceMs = openedTabGraceMs(params);
+    // 快路径 1：已经有属于本次动作的记录，零等待。
+    if (pickOpenedTab(this._openedTabs.get(tid), startedAt) || graceMs <= 0) {
+      return this._consumeOpenedTab(tid, keep, startedAt);
+    }
+    const view = this._getView(tid);
+    // 快路径 2：本 tab 已经开始原地导航 —— 站内跳转不会同时开新标签，别等。
+    // 这一类（点链接跳走）是最高频的点击，跳过它等于让绝大多数点击零额外成本。
+    if (view && view.webContents.isLoading()) {
+      return this._consumeOpenedTab(tid, keep, startedAt);
+    }
+    // 快路径 3：目标不是链接 → 不等。
+    // 实测代价：等待是加在**每一个**点击上的，点段落这种不导航的点击从 7ms 变成
+    // 261ms。而"点开新标签"在实际站点上几乎都发生在 <a> 上（window.open 的按钮
+    // 弹层也存在，但少），所以用 tagName 做闸门：探一次开销约几毫秒，换来把
+    // 250ms 的税从绝大多数点击上摘掉。
+    // 非链接的弹层场景由调用方显式传 opened_tab_wait_ms 打开等待。
+    const explicitWait = params && params.opened_tab_wait_ms !== undefined && params.opened_tab_wait_ms !== null;
+    if (!explicitWait && !(await this._targetIsLink(view, target, tid))) {
+      return this._consumeOpenedTab(tid, keep, startedAt);
+    }
+    const deadline = Date.now() + graceMs;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 25));
+      if (pickOpenedTab(this._openedTabs.get(tid), startedAt)) break;
+      // 等待期间页面开始导航了，同样立刻收工。
+      if (view && view.webContents.isLoading()) break;
+    }
+    return this._consumeOpenedTab(tid, keep, startedAt);
+  }
+
+  /**
+   * 目标是不是 <a>。只用于决定"要不要为开新标签等一会儿"。
+   *
+   * 探不到（元素已被 SPA 重渲染掉、帧不可达）一律按"不是链接"处理：
+   * 宁可少等一次（回到原来的漏报），也不要为一个不确定的目标付 250ms。
+   */
+  async _targetIsLink(view, target, tid) {
+    if (!view || !target) return false;
+    try {
+      const owning = await this._owningFrameFor(view, target, tid);
+      const expr = `(function(){var el=${findRefExpr(JSON.stringify(String(target)))};` +
+        `return el?String(el.tagName||'').toUpperCase():null;})()`;
+      // 用 this.evaluate（与 _owningFrameFor 同一口径：直接给值），不要用
+      // _evaluateViaCdp —— 那里回的是 {result:{value}} 包裹，比一次就永远判成
+      // "不是链接"，闸门形同虚设（第一版就踩了这个）。
+      const tag = owning ? await owning.executeJavaScript(expr) : await this.evaluate(expr, tid);
+      return tag === 'A';
+    } catch (_) {
+      return false;
+    }
   }
 
   // #2: 按目标 URL 定位并点击链接 —— 通用替代"猜卡片里的 <a>"。顶层在
