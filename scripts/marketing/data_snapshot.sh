@@ -33,7 +33,7 @@ NPM_DL=$(curl -s --max-time 15 "https://api.npmjs.org/downloads/point/last-week/
 mcp_fetch() {
   for i in 1 2 3; do
     local out
-    out=$(curl -s --max-time 20 "https://registry.modelcontextprotocol.io/v0/servers?search=ai-browser" 2>/dev/null)
+    out=$(curl -s --max-time 20 "https://registry.modelcontextprotocol.io/v0/servers/io.github.Glittering%2Fai-browser/versions" 2>/dev/null)
     if [ -n "$out" ] && echo "$out" | python3 -c "import json,sys; json.load(sys.stdin)" 2>/dev/null; then
       echo "$out"
       return 0
