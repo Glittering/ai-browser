@@ -116,18 +116,21 @@ ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ npx -y @glittering0717/a
 我用的就是这篇自己的仓库：
 
 > 用 ai-browser 打开 https://github.com/Glittering/ai-browser，
-> 用 `role=button / label=Star` 定位到那个按钮点一下，再用 diff 确认状态真的变了。
+> 在语义树里找到 role 是 button、label 是 Star 的那条节点，拿到它的 `data-ai-id`（形如 `e:button-12`），
+> 用 `browse_act` 点它，再用 `browse_diff` 看 verdict 是不是 `changed`。
 > 注意：没登录 GitHub 的话这步会失败——这是设计的一部分，不是 bug。
 
 它一次回答三个问题，也正好是所有 GUI 自动化的三个死角：
 
 1. **浏览器真的接管了你的登录态**——没登录就点不动，会如实失败，不会假成功；
-2. **它不是在盲点坐标**——语义树能把 Star 这个 role + label 从一整页按钮里挑出来；
+2. **它不是在盲点坐标**——语义树能按 role + label 从一整页按钮里把目标挑出来；
 3. **它不是"我以为点了"**——diff 会显式给出 changed / unchanged。
+
+这里有个容易踩的点：**`target` 收的是 `data-ai-id`，不是按钮上的可见文字**。直接把 "Star" 填进 target 会点空，顺序必须是「先读树拿 id → 再用 id 行动」。
 
 换成你自己的目标，模板只有一句：
 
-> 打开 <你的页面>，找到 <某个点了之后状态会变的按钮>，点它，用 diff 确认状态变了。
+> 打开 <你的页面>，在语义树里找到 <某个点了之后状态会变的按钮>，拿到它的 data-ai-id，点它，用 diff 确认状态变了。
 
 不想给我点 star 也完全可以——把网址换成任何一个需要登录的页面、任何一个会改变状态的按钮，效果一模一样。这步的价值是那个"变化"，不是那颗星。
 
