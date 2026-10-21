@@ -163,4 +163,4 @@ macOS/Linux 已测，Windows 还没测。欢迎拍砖，也特别想听听你们
 | OSChina | **人工复审已过、公开可访问**，约 30 阅读 / 0 赞 / 无评论 | 复审中→已上线 | ✅ 页面无审核标记 |
 | GitHub | 4 stars / 14 天 48 views(28 uniques) / **referrers 0** / clones 873(272) | views 26→48 | referrers=0 经全平台链接审计判定为**计量假象**（CSDN/简书/头条外链转纯文本、掘金走跳转、均不带 referrer）；views delta 与内容阅读量比例正常（≈3–4%），漏斗未断，瓶颈在顶部触达。详见 DATA_LOG.md 审计结论 |
 | GitHub Discussions | 3 条 Q&A 种子帖（各带 1 条维护者跟帖） | 0→3 | ✅ 已发：discussions/1 引擎下载、/2 方案对比、/3 端口安全；README Contributing 已加入口 |
-| npm / Registry | latest 2.1.1 / 周下载 410（10-20 起持平） | 47→410 | 下载潮与 2.1.0 发布吻合，归因（脉冲 vs 采用）观察一周；⚠️ MCP Registry 仍 1.2.2，落后 5 版 |
+| npm / Registry | latest 2.1.1 / 周下载 410（10-20 起持平） | 47→410 | 下载潮与 2.1.0 发布吻合，归因（脉冲 vs 采用）观察一周；✅ MCP Registry 已同步 2.1.1（10-21 20:18 发布，isLatest=true，此前落后 5 版；操作手册 REGISTRY_SYNC_RUNBOOK.md） |

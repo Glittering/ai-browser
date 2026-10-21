@@ -28,7 +28,7 @@
 | 外部 referrers | Baidu 2 | **0（空）** | **没有任何平台内容带来点击** |
 | 热门路径 | — | 仓库首页 31/23、issues 6/4、**discussions 1/1**、releases 2/2 | 有人点进了 Discussions（CTA 起效了，但没人发帖） |
 | npm latest / 周下载 | 1.3.1 / 47 | **2.1.1 / 410** | 2.1.0 发布带来下载潮，10-20 起持平 |
-| MCP Registry | 1.2.2 active | **1.2.2 active** | ⚠️ 落后 npm 共 5 个版本，isLatest 指向旧版，**官方目录里 `npx` 装到的是旧版**——连续第三天警报，属工程硬伤（见第五节） |
+| MCP Registry | 1.2.2 active | **2.1.1 active（isLatest=true，10-21 20:18 已手工同步）** | ✅ 已解除：此前落后 npm 5 版、官方目录 `npx` 装到旧版；同步路径见 REGISTRY_SYNC_RUNBOOK.md |
 
 ### 国内各平台（后台真值优先）
 
@@ -110,11 +110,11 @@
 
 ## 五、需要用户本人处理的三件事
 
-1. **MCP Registry 同步 2.1.1（最优先的工程硬伤）**：官方 Registry 的 isLatest 还指向 1.2.2，通过官方目录安装的用户拿到的是落后 5 个版本的包。需要跑一次 registry 发布（`mcp-publisher`，GitHub OIDC 或 token 认证，仓库里没有自动化 workflow，只能手动）。**在修复前，所有"npx 安装"引流都会装到旧版。**
+1. ~~**MCP Registry 同步 2.1.1（最优先的工程硬伤）**~~ → ✅ **已于 10-21 20:18 完成**：registry latest 从 1.2.2 切到 **2.1.1 active（isLatest=true）**，官方目录 `npx` 装到旧版的问题解除。执行方式：本机 github.com 设备流被断（`unexpected EOF`），改用 `mcp-publisher login github -token "$(gh auth token)"`（gh 账号 Glittering）+ 仓库根目录 `mcp-publisher publish`；server.json 两处 version 同步升级到 2.1.1。完整操作手册（含每次 npm 发版后的同步步骤）：`docs/marketing/REGISTRY_SYNC_RUNBOOK.md`。
 2. **头条账号决策**：新开垂直号（推荐）还是洗标签，见上表。
 3. **B站 60s 横屏 demo 录屏**：前 5 秒必须是"AI 正在自己发稿"的画面 + 中文字幕。素材给我，我来剪、发、回填。
 
-另外两份草稿已备好待过目后使用：GitHub Discussions 自问自答 3 条seed（`docs/marketing/DISCUSSIONS_SEED.md`）。
+~~另外两份草稿已备好待过目后使用：GitHub Discussions 自问自答 3 条seed（`docs/marketing/DISCUSSIONS_SEED.md`）。~~ → ✅ 已于 10-21 20:05 发布（discussions/1、/2、/3，各带维护者跟帖），README Contributing 节已加入口。
 
 ---
 

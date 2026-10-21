@@ -83,5 +83,6 @@
 **当晚增量（10-21 19:52–20:15）**：
 - 微博已发布（提前于原定 20:30）：https://weibo.com/6267387281/RnIYmlKLE ，174 字 + #AI Agent# #MCP#，双点核验通过；
 - GitHub Discussions 3 条 Q&A 种子帖已发（引擎下载/方案对比/端口安全，各带维护者跟帖）：discussions/1、/2、/3；README Contributing 节已加 Discussions 入口（修复掘金文 CTA「贴日志到 Discussions」的落地断点）；
+- **MCP Registry 2.1.1 已同步（20:18，手工发布成功）**：registry latest 1.2.2 → **2.1.1 active（isLatest=true）**，npm 侧 2.1.1 早已就位——「官方目录 `npx` 装到旧版」的引流硬伤解除（此前落后 5 版）。路径：`mcp-publisher login github -token "$(gh auth token)"`（本机 github.com 设备流被断，改用 gh token 直登）+ 仓库根目录 `mcp-publisher publish`；完整操作手册见 `docs/marketing/REGISTRY_SYNC_RUNBOOK.md`。
 - 掘金草稿箱清理：删除 3 篇已发布文章 2 的同题调试残留（7698247718678872090 / 7698195509064810523 / 7698247718678855706），剩 3 篇 7 月旧稿留待人工审。
 | 2026-10-21 19:57 | 4 | 0 | 0 | 48 | 28 | 873/272 | 2.1.1 | 410 | 1.2.2 | active | 20:15 微博已发+Discussions 3 条种子帖已发后的快照 |
