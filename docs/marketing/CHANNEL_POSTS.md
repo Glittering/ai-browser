@@ -134,4 +134,29 @@ macOS/Linux 已测，Windows 还没测。欢迎拍砖，也特别想听听你们
 | B 站图文（专栏） | D+2 | https://www.bilibili.com/opus/1259878383752314888 | ✅ 2026-10-17 03:00 已发布（标题《给 AI 装了一个"浏览器"，它自己会写稿发稿了》，正文 2589 字）。**关键纠正**：此前判定"B站文章编辑器 SPA 挂空、不可用"是错的 —— 真正入口是 `/platform/upload/text/edit`（会 302 到 `/text/new-edit`），正文编辑器在**跨进程 iframe** `member.bilibili.com/york/read-editor` 里，`ui.get_tree` 必须带 `ax:true` 才会做 OOPIF 合并并暴露 `editor=richtext` 节点，同时要等足 ~25s。走 image=封面非必填；话题弹窗搜索无候选已跳过。发布后出现"点击查看"按钮，随后自动跳转 `upload-manager/opus` |
 | 简书文章 | 10-19 凌晨 | https://www.jianshu.com/p/33cb803a5555 | ✅ 2026-10-19 02:00 已发布（《我不再让 AI 看截图了》2276 字，ai-browser 填写+发布全流程自动）；经验：①简书编辑器是 `.kalamu-area` contenteditable + `input._24i7u` 标题框；②paste 需要语义树 target（`browse_act paste target=ax-xxx`）；③type 也需要 target；④正文可直接 type Markdown 源文本，简书原样保留 |
 | 51CTO 博客 | 10-19 凌晨 | https://blog.51cto.com/u_17804217/15012466 | ✅ 2026-10-19 03:32 已发布（《不用截图也能让 Agent 操作网页：语义树方案的一次落地实践》约 1400 字，分类「人工智能-机器学习」，标签 AI Agent/浏览器自动化/MCP，原创声明）。**当前状态：待审核**（51CTO 人工审核流程，文章页已返回 200）。踩坑：①发布弹窗分类是单选 radio 组——`.select_item` 列出的是全部一级分类，点二级项会抢走一级的 check class，真正的二级分类只在选中一级后渲染到 `.second-types-content`；②动画期间坐标会漂移，须重新取坐标+check class 校验+重试；③**顺带修了一个产品 bug**：`src/main/mcp_server.js` 的 `browse_act` case 声明了 `html` 参数却没转发给 params，导致 paste 永远报 "paste called with neither html nor text"（这也是此前 B 站图文只能发纯文本的根因），已修复并验证 `synthetic-clipboard-event` 路径 landed_chars 正常 |
+| 知乎回答（原理向） | 10-20 08:30 | https://www.zhihu.com/question/2094580952446015206/answer/2095796636308063190 | ✅ 2026-10-20 08:40 已发布并验证（回答页 200、正文 1234 字可读、代码块 4 个与小标题/加粗格式均保留、结尾 CTA 在位）。落点 = 首选问题《为什么 Coding Agent 已经这么强了，手机 Agent 却迟迟没有出现真正好用的产品？》。**如实记录：该问题热度低于 playbook 建议线**（关注者 6→7、浏览 407→429、已有 5 个回答；playbook 建议「关注 20–200、回答 < 15」），备选问题（问"AI 还是 AI Agent 的使用心得"）与本篇机制拆解主题不匹配，故仍投首选；现有回答多为观点短答（最长 971 字），本文为机制拆解，不构成重复。新踩坑：① 语义树中顶部搜索框与正文编辑器**都带 editable 状态**，必须按 `role=textbox` + `editable=richtext` 过滤，否则会粘进搜索框（首轮即误中 ax-17048，靠字数校验拦截、未提交）；② 字数校验只量 `.public-DraftEditor-content`，不要量全部 contenteditable；③ paste 成功标志是 `consumed=true` + `landed_chars`（本次 1234）；④ 发布判定以 URL 跳到 `/question/<qid>/answer/<aid>` + **刷新后**正文可读为准，不看 toast |
+| CSDN 长文（SEO·语义树方案） | 10-20 20:30 | https://blog.csdn.net/weixin_39287419/article/details/168559996 | ✅ 2026-10-20 20:52 已发布并验证（URL 跳 `mp.csdn.net/mp_blog/creation/success/168559996`；文章页 HTTP 200、标题正确、正文 2377 字可读、4 个代码块 + 2 张表格 + 8 个小标题均保留、结尾仓库链接在位）。分类专栏「人工智能」已建并选中；**创作声明如实选「部分内容由AI辅助生成」**；摘要 129 字已填；**封面未加**（3 次尝试均失败，见下）。标签最终落地 4 个：`ocr` `electron` `自动化` `人工智能`。新踩坑：① 走 `editor.csdn.net/md`（点「使用 MD 编辑器」会新开 tab），Markdown 正文用 **隐藏 file input `#import-markdown-file-input` + `browse_act upload`** 注入 `.md` 文件最稳（比 paste/setContent 可靠，原样保真 3045 字符）；② 该编辑器正文是 `pre.editor__inner`，标题 `input.article-bar__title--input` 默认 `display:none`（w/h=0），语义树里取不到，只能用 `ui.evaluate` 设值 + 派发 input/change；③ **本次发布弹窗的标签 el-autocomplete 报错「博客等级不满足三级，无法创建自定义标签」**——自定义标签一律加不上，`MCP`/`Agent` 试了 evaluate 设值、逐字符 press、setContent+Enter、setContent+ArrowDown+Enter 四种方式全部失败；`ArrowDown+Enter` 还会误选第一条无关建议（曾误加 `c++`/`Imagen`，已逐个点 `.el-tag__close` 删掉），只有存在于推荐池里的标签（如 `人工智能`）能靠 setContent+Enter 落地；④ 分类专栏没有下拉，只有「新建分类专栏」按钮，点了会插入 `span.tag__name[contenteditable]` 空 chip，填完按 Enter 才会写进 `input[name=categories]`；**注意 Enter 后会再多出一个空 chip，不要去点 `.tag__btn-tag-delete` 清理**（我第一次点错把「人工智能」删掉了，只能清空重建）；⑤ 封面走 `.cover-upload-box input.el-upload__input` 的 upload 回执 success 但 `input.files` 恒为 0，图片其实进了 `vue-image-crop-upload` 的「图片编辑/封面图预览/确认上传」弹窗，点 `.vicp-operate-btn`（确认上传）后 `.cover-upload-box` 仍无 img——3 次尝试（png/jpg 各一、含点确认）全部未落地，判定为该站点封面链路当前不可用，未重复发布 |
 | OSChina 博客 | 10-19 凌晨 | https://my.oschina.net/u/5041974/blog/19779200 | ✅ 2026-10-19 05:50 已发布并提交人工复审（《给 Agent 的浏览器为什么要"可见"：一个 Electron + MCP 的实现》约 1700 字，分类自建「技术实践」，原创+公开）。**当前状态：自动审核未通过 → 已提交人工复审**（系统检测"可能包含违规或敏感信息"——疑为滑块/验证码/支付等自动化相关词触发误判，内容本身无违规；复审工作日 2 小时内完成）。新 OSChina 写博客入口：my.oschina.net 仪表盘→右侧「智写平台」（`/blog/ai-write`），老 `/blog/write` 地址已废弃；编辑器是 Tiptap ProseMirror，paste 富文本全格式落地（9 个 h2 全部保留）；发布弹窗可新建分类 |
+
+## 数据回填 · 2026-10-21 全平台复盘（ai-browser 实测）
+
+> 复盘全文：`OPS_WEEKLY_2026-10-21.md`。以下为各渠道最新真实数据（后台真值优先）。
+
+| 渠道 | 最新数据（10-21 采集） | 较上期 | 状态 |
+|---|---|---|---|
+| 掘金文章1 | 8 展现 / 42 阅读 / 0 互动 | 展现持平、阅读 26→42 | 从未进推荐池；阅读全部来自搜索（Bing 已收录） |
+| 掘金文章2 | 1264 展现 / 31 阅读 / 1 赞 / 0 评 / 0 藏 | 展现 0→1264 | ✅ 话题挂载验证有效（分发开关）；CTR 2.5% 是下一瓶颈 |
+| 掘金账号 | 0 粉丝 / 35 掘力值 / 创作第 5 天 | 掘力值 10→35 | 新号成长期 |
+| 知乎文章 | 0 赞（按钮无数值） | — | 营销腔旧稿，零互动符合预期 |
+| 知乎回答（10-20） | **0 赞同 / 0 评论 / 0 感谢**（API 真值） | — | 落点问题仅 429 浏览/7 关注，低于筛选线；下次严格 ≥20 关注 |
+| CSDN 文章1 | 297 阅读 | 261→297 | 搜索长尾持续 |
+| CSDN 文章2 | 184 阅读 / 18 赞 / 21 收藏 | 新 | 发布 22 小时；**全平台互动之王**，收藏率 11% |
+| 头条（10-17 稿） | 369 展现 / 13 阅读 / 1 赞 | 237→369 | CTR 3.5%，低于健康线；同标题旧稿 950 展现/34 阅读仍在跑 |
+| 头条账号 | 6 粉丝 / 总阅读 5,532 / 收益 ¥0.07 | 总阅读 +7 | 标签混杂，投放暂停待账号决策 |
+| B站视频 | 15 播放 / 2 赞 / 0 评 | 13→15 | 标题/封面事故已修复生效 |
+| B站专栏 | 4 浏览 | 1→4 | 与视频同内容，暂停 |
+| 简书 | 7 阅读 / 0 赞 | 新 | 归档渠道，达成定位 |
+| 51CTO | **已过审上线**，阅读 8 | 待审核→已上线 | ✅ 审核风险解除 |
+| OSChina | **人工复审已过、公开可访问**，约 30 阅读 / 0 赞 / 无评论 | 复审中→已上线 | ✅ 页面无审核标记 |
+| GitHub | 4 stars / 14 天 48 views(28 uniques) / **referrers 0** / clones 873(272) | views 26→48 | ⚠️ 外部引荐仍为 0——内容未带来任何点击；discussions 页有 1 访客 |
+| npm / Registry | latest 2.1.1 / 周下载 410（10-20 起持平） | 47→410 | 下载潮与 2.1.0 发布吻合，归因（脉冲 vs 采用）观察一周；⚠️ MCP Registry 仍 1.2.2，落后 5 版 |
