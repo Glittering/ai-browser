@@ -1,8 +1,8 @@
 # DISCUSSIONS_SEED — GitHub Discussions 自问自答种子（3 条）
 
 > 用途：Discussions 已开但无人发帖（paths 数据显示 1 人点进 discussions 页又离开）。以下 3 条覆盖最高频的预期问题，**自问自答**搭建"有人在用"的氛围。
-> 状态：**待用户过目后发布**（以用户名义的公开内容）。发布后把链接回填本文档。
-> 分类建议：Q&A。语气：维护者直接回答，不营销。
+> 状态：**已发布（2026-10-21 20:10，Q&A 分类，主帖 + 维护者跟帖补充）**。Seed 1 正文中的路径已按源码核实修正（日志在 `~/.ai-browser/logs/error.jsonl`；Electron zip 缓存在 `~/Library/Caches/electron`（macOS）/ `~/.cache/electron`（Linux），可被 `electron_config_cache` 覆盖）。
+> 已发链接：① https://github.com/Glittering/ai-browser/discussions/1（引擎下载）② https://github.com/Glittering/ai-browser/discussions/2（方案对比）③ https://github.com/Glittering/ai-browser/discussions/3（端口安全）
 
 ---
 
@@ -11,15 +11,15 @@
 **标题：** 首次调用卡住 / Electron 引擎下载失败怎么办？
 
 **正文：**
-首次启动会拉取约 110MB 的 Electron 引擎，国内网络直接连下载源可能很慢或失败。两个办法：
+首次启动会拉取约 110MB 的 Electron 引擎，国内网络直连官方下载源可能很慢或失败。优先办法是设置镜像再启动：
 
-1. 设置镜像再启动：
 ```bash
 ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ npx -y @glittering0717/ai-browser mcp
 ```
-2. 如果之前卡在一半，清理后重试：删除 `~/.ai-browser` 下的缓存目录再启动（登录态在 profile 里，不会丢，但首次未完成时还没有登录态）。
 
-启动成功的标志：端口 9223 开始监听，第一次 `browse_*` 调用会自动拉起窗口。如果窗口起来了但调用无响应，看 `~/.ai-browser/error.jsonl` 有没有更新——那是指令日志，停了说明主进程卡死了。
+如果之前卡在一半：Electron 官方安装器把 zip 缓存在用户缓存目录（macOS 为 `~/Library/Caches/electron`，Linux 为 `~/.cache/electron`，可用 `electron_config_cache` 环境变量改位置），删掉缓存目录再启动即可重新下载。注意别删 `~/.ai-browser`——那是浏览器 profile，登录态在里面。
+
+启动成功的标志：端口 9223 开始监听，第一次 `browse_*` 调用会自动拉起窗口。如果窗口起来了但调用无响应，看 `~/.ai-browser/logs/error.jsonl` 有没有更新——那是指令/错误日志，停了说明主进程卡死了。
 
 **（自答）** 补充：Windows 目前未测试，引擎路径可能有差异，欢迎在本帖反馈。
 

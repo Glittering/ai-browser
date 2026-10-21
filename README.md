@@ -955,6 +955,10 @@ the single source for `evaluate` limits, enforced identically on both transports
 Issues and PRs are welcome, especially reproduction cases where the semantic tree gets a page wrong —
 those are the most useful bug reports this project can get.
 
+Questions, "the tree got this page wrong" reports, and agent run logs are best posted in
+[GitHub Discussions](https://github.com/Glittering/ai-browser/discussions) — that is where the most
+useful feedback for this project tends to land.
+
 What we try to hold the line on:
 
 - **Keep the core generic.** Site-specific knowledge belongs outside `src/main` and `src/preload`.

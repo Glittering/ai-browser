@@ -214,6 +214,7 @@
 ## 10. 微博 / dev.to / X / ProductHunt / MCP 目录站（T2，低成本拾取）
 
 - **微博**：把长内容的结论做成 ≤140 字 + 一张对比图/短视频，带 2 个话题标签。作用是"广播层"和承接搜索，不要让它是唯一输出。
+  **执行路径（2026-10-21 19:52 已验证，账号 u/6267387281）**：首页 `weibo.com` 的 composer = 页面唯一 textarea（placeholder「有什么新鲜事想分享给大家？」，语义树 editable=plaintext）；发送按钮 = `button.woo-button-primary`。**关键坑：composer 不吃合成 paste**（synthetic ClipboardEvent consumed=false），必须用 `browse_act type` 分块输入（60 字/块，cdp-input committed）；核验要双点——发送后 composer 清空 + 首页信息流（刷新后）出现正文， permalink 去个人主页 `weibo.com/u/6267387281` 抓（首页卡片不带链接）。现成脚本：`ops-audit/weibo_publish.mjs`。
 - **dev.to**：英文长尾 SEO 很好，把 Reddit 那篇扩写成 800–1500 词即可，canonical 指向官网，几乎零成本。
 - **X**：build-in-public 线程（一周一条 thread：本周改了什么 + 一张动图），这是海外开发者发现项目的主要方式之一。
 - **Product Hunt**：准备要足——提前 1 周建 Upcoming page，配图 1275×760 gallery + 首图，发布时间**美西 0:01**，发布当天要有 ≥ 10 条真实评论（提前约好种子用户），并自己全程在评论区回答问题。**不要临时起意投。**
