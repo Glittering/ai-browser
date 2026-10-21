@@ -8,7 +8,7 @@
 
 ## 标题
 
-`Playwright MCP 登录态每次重登？三种 Agent 浏览器方案对比与选型`
+`Playwright MCP 每次都要重新登录？三种 Agent 浏览器方案实测与选型`
 
 ## 摘要（129 字）
 
