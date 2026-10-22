@@ -67,6 +67,11 @@ const PARTIAL_PATTERNS = [
   /may have partially applied/i,
   /not consumed by the page/i,
   /consumed but nothing landed/i,
+  // 2026-10-19 之后 paste 的读回口径：读不到 ≠ 没落地（CodeMirror 把正文放在
+  // 焦点节点之外）。这条必须落在 partial 而不是 no-effect 里 —— 判成 none 会
+  // 告诉 agent"照原样重试是安全的"，而在活着的编辑器上重试就是内容翻倍。
+  // 旧文案保留在上面，历史回执与日志仍要能被正确分类。
+  /could not be read back/i,
   /interrupted|disconnected|target closed|debugger detached/i,
   /deadline exceeded|timed? ?out/i,
 ];

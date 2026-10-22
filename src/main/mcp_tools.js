@@ -26,7 +26,7 @@ export const MCP_TOOLS = [
   {
     name: 'browse_get_tree',
     title: 'Read semantic tree',
-    description: 'Return the page semantic UI tree (roles, labels, actions, bounds, urls).',
+    description: 'Return the page semantic tree (roles, labels, actions, bounds). Root adds editors (primary) when 2+ editable.',
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     inputSchema: {
       type: 'object',
@@ -42,7 +42,7 @@ export const MCP_TOOLS = [
   {
     name: 'browse_act',
     title: 'Act on element',
-    description: 'Act on a data-ai-id element. type appends at caret, setContent replaces all. Verb-specific params live in the group of the same name (click/read/press/wheel/drag).',
+    description: 'Act on a data-ai-id element. type appends at caret, setContent replaces all. page_changed:false = dispatched but page unchanged (wrapper).',
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     inputSchema: {
       type: 'object',
@@ -50,7 +50,7 @@ export const MCP_TOOLS = [
         action: { type: 'string', enum: ['click', 'type', 'setContent', 'clear', 'focus', 'hover', 'scroll_to', 'upload', 'get_value', 'drag', 'press', 'wheel', 'paste'], description: 'Verb. Verb-specific params live in the group of the same name.' },
         target: { type: 'string', description: 'data-ai-id from the tree (e.g. e:button-12) — NOT the visible label. Optional for press; drag may use drag.from; upload also takes a CSS selector.' },
         text: { type: 'string', description: 'type: appended at the caret. setContent: replaces all. paste: plain fallback when html is absent.' },
-        html: { type: 'string', description: 'paste: HTML, preferred — editors keep headings/lists/bold. Plain text loses formatting.' },
+        html: { type: 'string', description: 'paste: HTML, preferred (keeps headings/bold). landed_chars:null = unreadable.' },
         value: { type: 'string', description: 'Option value for a <select>.' },
         file: { type: 'string', description: 'upload: absolute path. target may be the input, the trigger, or a CSS selector.' },
         timeout_ms: { type: 'integer', description: 'Deadline ms (default 15000, 1s..300s). On timeout: success=false, timed_out=true, may have partially applied.' },

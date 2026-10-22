@@ -42,7 +42,10 @@ function valueOf(pv) {
 // The only "rule" we keep (plan §5): fold that into a semantic `textbox`.
 function editorTypeFrom(role, editable) {
   if (editable === 'richtext' || editable === 'contenteditable') return 'richtext';
-  if (role === 'textbox') {
+  // searchbox 与 textbox 同为可输入面，只是语义上被标成搜索框。此前只认
+  // textbox，导致 role=searchbox 的输入框**完全不出现在树的可编辑索引里** ——
+  // 于是"两个 editable"的场景里少算了一个，primary 反而可能指错。
+  if (role === 'textbox' || role === 'searchbox') {
     if (editable === 'multiline') return 'textarea';
     if (editable === 'plaintext') return 'textbox';
   }
@@ -100,6 +103,14 @@ let nodeStore = null; // current normalize pass's node map (see normalizeAxTree)
 // wrappers (§buildThroughIgnored); an AX node that a wrapper re-parents must not
 // be emitted twice.
 let seenNodes = null;
+// 本次 pass 收集到的"可编辑节点"清单，pass 结束时汇总成 tree.editors（见
+// summarizeEditors）。为什么要在树根上放索引：一个页面上有多个 editable 时，
+// 树的结构本身**不告诉你哪个是正文**。2026-10-19 知乎实机：顶部搜索框和
+// 正文编辑器都带 editable，按 editable 过滤先抓到搜索框（DOM 顺序在前），
+// 第一次粘贴直接糊进搜索框，靠字数校验才拦住没提交。
+// 面积是这里唯一可靠的区分信号（搜索框 300×36 vs 正文 720×600，差 30 倍），
+// 而它已经在每个节点的 bounds 里 —— 不需要额外读 DOM。
+let editables = null;
 
 // Descendants of an AX node that is `ignored: true`. AX marks presentational
 // wrappers (a `span` in a flex row, `<b>` inside a paragraph) as ignored, but
@@ -138,7 +149,10 @@ function build(node, idFor) {
     },
   };
   if (node.backendDOMNodeId != null) tn.backendDOMNodeId = node.backendDOMNodeId;
-  if (editorType) tn.editor_type = editorType;
+  if (editorType) {
+    tn.editor_type = editorType;
+    noteEditable(tn, editorType, node);
+  }
 
   if (role === 'textbox' || role === 'combobox' || role === 'listbox' || role === 'searchbox') {
     let v = valueOf(node.value);
@@ -183,6 +197,74 @@ function build(node, idFor) {
   return tn;
 }
 
+// 「这个输入框是不是搜索框」的判据。role=searchbox 是最强信号；其次是
+// placeholder/label 里的词。两者都没有时就靠面积（搜索框永远比正文小得多）。
+// 只用来**标注**，不用来排除 —— 排除错一个真编辑器，代价是 agent 找不到
+// 能写的地方。
+const SEARCH_LIKE = /搜索|查找|检索|search|find/i;
+
+// 面积下限：AX 里存在 1px 的表单元素（隐藏 input、脚手架占位），它们的
+// bounds 是 0 或 1，算进清单里只会制造噪音。
+const EDITABLE_MIN_AREA = 800;
+// 「像个正文编辑器」的下限。200×100 是保守值：真实正文区都在 400×200 以上，
+// 而搜索框在 300×36 量级。达不到就不给 primary —— 宁可让调用方自己看图，
+// 也不要指错。
+const PRIMARY_MIN_AREA = 20000;
+
+function noteEditable(tn, editorType, node) {
+  if (!editables) return;
+  const b = tn.bounds || {};
+  const w = Number(b.width) || 0;
+  const h = Number(b.height) || 0;
+  const area = w * h;
+  if (area < EDITABLE_MIN_AREA) return;
+  const ph = String(valueOf(prop(nodeStore, node.nodeId, 'placeholder')) || '');
+  const label = String(tn.label || '');
+  const searchlike = tn.role === 'searchbox'
+    || SEARCH_LIKE.test(ph)
+    || SEARCH_LIKE.test(label);
+  editables.push({
+    ref: tn.id,
+    role: tn.role,
+    editor_type: editorType,
+    label: label.slice(0, 40),
+    ...(ph ? { placeholder: ph.slice(0, 40) } : {}),
+    w,
+    h,
+    area,
+    readonly: (tn.states || []).indexOf('readonly') >= 0,
+    ...(searchlike ? { searchlike: true } : {}),
+  });
+}
+
+/**
+ * 把本 pass 收集到的可编辑节点汇总成树根上的 `editors` 索引。
+ *
+ * 存在的唯一理由：**树的结构不告诉你哪个 editable 是正文**。按 DOM 顺序
+ * 过滤 `editable` 拿到的是页面上第一个可输入的东西 —— 在知乎是顶部搜索框，
+ * 在掘金是登录框。agent 没法从 `[textbox] editable=richtext` 这一行判断
+ * "这是不是我要写的那个"，于是它要么猜，要么一个个试，要么把自己的正文
+ * 糊进搜索框（2026-10-19 真实发生，靠字数校验才拦住）。
+ *
+ * 输出按面积降序，`primary: true` 标给最大的那个非搜索非只读编辑区。
+ * 只有 1 个可编辑节点时**不输出**：没有歧义就不该多花 token。
+ *
+ * @returns {Array|undefined} 0/1 个节点返回 undefined
+ */
+export function summarizeEditors(list) {
+  if (!Array.isArray(list) || list.length < 2) return undefined;
+  const sorted = list.slice().sort((a, b) => b.area - a.area).slice(0, 8);
+  let primary = null;
+  for (const e of sorted) {
+    if (e.readonly || e.searchlike) continue;
+    if (e.area < PRIMARY_MIN_AREA) break; // 最大的可用编辑区都不像正文
+    primary = e.ref;
+    break;
+  }
+  // area 不外露：w/h 已经够了，重复字段只多花 token。
+  return sorted.map(({ area, ...rest }) => (rest.ref === primary ? { ...rest, primary: true } : rest));
+}
+
 /**
  * `InlineTextBox` 是 CDP 把一个 `StaticText` 按**换行和样式**切出来的文字碎片：
  * 一段两行的正文会变成两个 inline box，一个加粗的词再切一个。
@@ -225,6 +307,7 @@ export function normalizeAxTree(rawNodes, opts = {}) {
   nodeStore = new Map(all.map((n) => [n.nodeId, n]));
   seenNodes = new Set();
   readValue = opts.readValue || null;
+  editables = [];
   const idFor = opts.idFor || ((n) => 'ax-' + n.nodeId);
 
   // Parent map over ALL nodes, so "is this a root?" accounts for ignored
@@ -249,6 +332,11 @@ export function normalizeAxTree(rawNodes, opts = {}) {
     ? built[0]
     : { id: 'root', role: 'generic', label: '', states: ['visible'], actions: [], bounds: { x: 0, y: 0, width: 0, height: 0 }, children: built };
   tree._debug = { layer: 'ax', version: VERSION_TAG };
+  // 有歧义时才给索引（见 summarizeEditors）。挂在树根而不是散在各节点上：
+  // 调用方读一次根就能挑好目标，不用把整棵树扫一遍再自己比面积。
+  const editors = summarizeEditors(editables);
+  if (editors) tree.editors = editors;
+  editables = null;
   nodeStore = null;
   seenNodes = null;
   readValue = null;

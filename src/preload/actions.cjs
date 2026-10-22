@@ -160,10 +160,42 @@ function doPaste(el, params) {
   if (notPrevented) {
     return {
       success: false,
+      consumed: false,
       error: "paste event was not consumed by the page (defaultPrevented=false) — try a child node ref, or setContent for plain text"
     };
   }
-  return { success: true, method: "synthetic-clipboard-event" };
+  // 读回口径与 page_manager._pasteViaCdp 完全一致：候选里取最长，读不到给
+  // null 而不是 0。为什么必须有：preload 这条路以前**只要页面 preventDefault
+  // 就报 success**，连"有没有内容"都不看 —— 这正是"工具说成功、页面没变"
+  // 最纯粹的一种来源。0 表示确定空（可安全重试），null 表示读不到（先核对）。
+  var best = { n: 0, src: "target", p: "" };
+  var cands = [editor];
+  try {
+    if (document.activeElement && document.activeElement !== editor) cands.push(document.activeElement);
+  } catch (_e) {}
+  try {
+    var q = editor.querySelector && editor.querySelector("[contenteditable=true],textarea,.cm-content,.ProseMirror");
+    if (q) cands.push(q);
+  } catch (_e) {}
+  for (var i = 0; i < cands.length; i++) {
+    var e = cands[i], t = "";
+    try { t = (e.value != null) ? String(e.value) : String(e.innerText || e.textContent || ""); } catch (_e) {}
+    t = t.replace(/\s+/g, " ");
+    var L = t.replace(/ /g, "").length;
+    if (L > best.n) best = { n: L, src: (i === 0 ? "target" : "candidate"), p: t.slice(0, 200) };
+  }
+  var out = {
+    success: true,
+    method: "synthetic-clipboard-event",
+    consumed: true,
+    landed_chars: best.n > 0 ? best.n : null,
+    landed_verified: best.n > 0,
+  };
+  if (best.n > 0) out.landed_source = best.src;
+  if (!best.n) {
+    out.effect_hint = "paste was consumed but the editor content could not be read back — verify with get_value before retrying; re-pasting on a live editor duplicates the content.";
+  }
+  return out;
 }
 
 // setContent — write to any editor type including Draft.js/ProseMirror

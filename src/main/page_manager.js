@@ -15,6 +15,12 @@ import { WINDOW_OPEN_SHIM_SOURCE } from './window_open_shim_source.js';
 import { pickOpenedTab, openedTabGraceMs } from '../shared/opened_tab.js';
 // 动作回执自带的"页面到底动没动"三态，以及 ref 过期诊断（两个纯函数模块）。
 import { withEffectState, isTargetMiss as isTargetMissError } from '../shared/effect_state.js';
+// 前后快照探针：动作返回 success 只证明"命令发出去了"，不证明"页面接住了"。
+// 后者必须由掌握渲染进程的一侧给出（见 shared/page_probe.js 顶部事故说明）。
+import pageProbe from '../shared/page_probe.js';
+// 默认读法（DOM extractor）的"哪个 editable 才是正文"索引。AX 路径在
+// normalizeAxTree 里已经自带，这条补的是默认路径 —— 见文件内注释。
+import editorsProbe from '../shared/editors_probe.js';
 import { newTracker, noteTree, diagnoseMissingRef } from '../shared/ref_epoch.js';
 import { diffValues, previewOf, safeByteLength, DEFAULT_SNAPSHOT_JS, DIFF_MAX_ENTRIES, evictOldest } from './snapshot_diff.js';
 import { withDeadline, actionDeadlineMs } from '../shared/deadline.js';
@@ -753,7 +759,43 @@ class PageManager {
     // 「ref 过期了」（页面变过，重读树即可）和「ref 从来没对过」（改传参）。
     // 见 shared/ref_epoch.js 顶部注释。
     this._noteTreeRefs(tid, res && res.tree);
+    // 多编辑器的消歧索引（见 shared/editors_probe.js）。AX 路径的树根已经带
+    // `editors`，这里只补默认路径；focused_only 的子树没有"整页有哪几个编辑区"
+    // 这层语义，跳过。
+    if (res && res.tree && !res.tree.editors && !focusedOnly) {
+      const idx = await this._editorsIndex(tid, res.tree);
+      if (idx) res.tree.editors = idx;
+    }
     return res;
+  }
+
+  /**
+   * 扫一遍页面上的可编辑区，按面积给出 primary。
+   * 失败静默返回 null —— 消歧索引是**增强**，读不到不该让 get_tree 失败。
+   */
+  async _editorsIndex(tid, tree) {
+    const view = this._getView(tid);
+    if (!view) return null;
+    let rows = null;
+    try {
+      const d = view.webContents.debugger;
+      if (!d || typeof d.isAttached !== 'function' || !d.isAttached()) return null;
+      const r = await d.sendCommand('Runtime.evaluate', {
+        expression: editorsProbe.EDITORS_PROBE_JS,
+        returnByValue: true,
+      });
+      rows = r && r.result && r.result.value;
+    } catch (_e) {
+      return null;
+    }
+    const known = new Set();
+    const walk = (n) => {
+      if (!n) return;
+      if (n.id) known.add(n.id);
+      for (const c of n.children || []) walk(c);
+    };
+    walk(tree);
+    return editorsProbe.buildEditorsIndex(rows, known);
   }
 
   /** per-tab 的 ref 版本追踪器（懒建，避免动构造函数）。 */
@@ -1369,16 +1411,59 @@ class PageManager {
    * 放在这一层而不是各个子路径里，是因为挂住的位置不止一个（AX handles、指针目标
    * 解析、拖拽按键分发都可能），逐个补等于逐个漏。
    */
+  /**
+   * 动作前后各拍一次页面指纹（只读、不写属性、不触发事件）。
+   *
+   * 探针失效一律返回 null 并让调用方跳过 —— 观测能力不足不能反过来让动作失败。
+   * 三种失效都真实发生过：debugger 没 attach、主线程被占住导致 CDP 不返回、
+   * 页面返回了 __err。全部走静默降级，但**绝不用 null 冒充"没变化"**：
+   * diffProbe 对 null 显式返回 changed:null，回执里就不会出现 page_changed。
+   */
+  async _pageProbe(tid, action) {
+    if (!pageProbe.shouldProbe(action)) return null;
+    const view = this._getView(tid);
+    if (!view) return null;
+    try {
+      const d = view.webContents.debugger;
+      if (!d || typeof d.isAttached !== 'function' || !d.isAttached()) return null;
+      // 1.5s 硬上限：主线程卡住时 sendCommand 永不返回，等它等于把 ui.act
+      // 又挂死一次（这一层存在的全部意义就是不许挂）。
+      const call = d.sendCommand('Runtime.evaluate', {
+        expression: pageProbe.PAGE_PROBE_JS,
+        returnByValue: true,
+      });
+      const timer = new Promise((r) => setTimeout(() => r(null), 1500));
+      const r = await Promise.race([call.catch(() => null), timer]);
+      const v = r && r.result && r.result.value;
+      return v && !v.__err ? v : null;
+    } catch (_e) {
+      return null;
+    }
+  }
+
   async executeAction(action, target, params = {}, tabId) {
     const ms = actionDeadlineMs(action, params);
     const tid = tabId !== undefined ? tabId : this.activeTab;
+    // 动作前先拍一张。为什么拍在 withDeadline 外面：deadline 只应该盖住动作
+    // 本身，探针有它自己的 1.5s 上限，混进同一个预算会让"动作超时"和
+    // "探针慢"两种完全不同的故障共用一个错误码。
+    const probeBefore = await this._pageProbe(tid, action);
     try {
       const res = await withDeadline(
         this._executeActionInner(action, target, params, tabId),
         ms,
         `action:${action}`
       );
-      return this._annotateActResult(res, action, target, tid);
+      let out = this._annotateActResult(res, action, target, tid);
+      // 动作后拍第二张。settle 是必须的：paste/type 内部已经等过一轮，但 click
+      // 触发的弹窗/路由要等框架提交 + 一帧渲染，立刻拍必然拿到旧指纹 ——
+      // 那会把每一次成功的弹窗点击都误报成"页面没变"，比不报更糟。
+      if (probeBefore) {
+        await new Promise((r) => setTimeout(r, pageProbe.settleMs(action)));
+        const probeAfter = await this._pageProbe(tid, action);
+        out = pageProbe.applyProbe(out, probeBefore, probeAfter, action);
+      }
+      return out;
     } catch (e) {
       if (e && e.__deadline) {
         // 明确告诉 agent 两件事：① 它该重试/换策略；② 这个动作**可能已经部分生效**
@@ -2490,6 +2575,30 @@ class PageManager {
     // 派发不会向下传播到子节点，监听器收不到，defaultPrevented 恒为 false。
     // 实测：B站 read-editor 拆两步派发 → 编辑器完全无反应；合并 + 选定最深层
     // 可编辑元素后成功。
+    // 页面内"读回编辑器正文"的共用片段。参数是**已经在前面的表达式里定义好的
+    // 变量名**（不是选择器），因为不同时机能拿到的句柄不同：paste 那一刻有
+    // `ed`，之后重采样只能重新按 ref 查。
+    //
+    // 取"多个候选里最长的那个"而不是"第一个非空的"：页面上同时存在搜索框、
+    // 标题框、正文编辑器时，第一个非空的很可能是别的东西（知乎顶部搜索框就
+    // 这么骗过一次粘性校验）。而正文的长度必然最大 —— 这条启发式在
+    // 知乎/掘金/CSDN/OSChina/B站 五个站上都成立。
+    const landedProbe = (v) =>
+      `var cands=[],push=function(n,s){if(n&&cands.length<6)cands.push([n,s]);};` +
+      `push(${v},'target');` +
+      // 深层 activeElement（穿透 shadow root）：编辑面常常在编辑器组件自己的
+      // shadow DOM 里，document.activeElement 只到宿主元素。
+      `try{var a=document.activeElement,g=0;while(a&&a.shadowRoot&&a.shadowRoot.activeElement&&g++<8)a=a.shadowRoot.activeElement;push(a,'active');}catch(_e){}` +
+      // 目标内部的第一个编辑面（Draft.js / ProseMirror 的正文都是容器里的子节点）
+      `try{var q=${v}&&${v}.querySelector&&${v}.querySelector('[contenteditable=true],textarea,.cm-content,.ProseMirror,[data-lexical-editor=true]');push(q,'inner');}catch(_e){}` +
+      // 上层编辑器容器：目标可能只是工具栏/占位层，正文在它的祖先里
+      `try{var hh=${v}&&${v}.closest&&${v}.closest('.cm-editor,.cm-scroller,.CodeMirror,.ProseMirror,.DraftEditor-root,[contenteditable=true],form,article,main');push(hh,'host');}catch(_e){}` +
+      `var best={n:0,src:'',p:''};` +
+      `for(var i=0;i<cands.length;i++){var e=cands[i][0],s=cands[i][1],t='';` +
+      `try{t=(e.value!=null)?String(e.value):String(e.innerText||e.textContent||'');}catch(_e){}` +
+      `t=t.replace(/\\s+/g,' ');var L=t.replace(/ /g,'').length;` +
+      `if(L>best.n)best={n:L,src:s,p:t.slice(0,200)};}`;
+
     const payload = JSON.stringify({ html, text });
     const res = await run(
       `var p=${payload};` +
@@ -2507,7 +2616,11 @@ class PageManager {
       `dt.setData('text/plain',p.text||p.html.replace(/<[^>]+>/g,' ').replace(/&nbsp;/g,' ').replace(/\\s+/g,' ').trim());` +
       `var ev=new ClipboardEvent('paste',{clipboardData:dt,bubbles:true,cancelable:true,composed:true});` +
       `var notPrevented=ed.dispatchEvent(ev);` +
-      `return {ok:true,prevented:!notPrevented,tag:ed.tagName};`
+      // 同步读一次：CodeMirror 6 / ProseMirror / Quill 都在 paste handler 里
+      // 同步写文档，这一刻就能读到；异步提交的（Draft.js 走 setTimeout）
+      // 读不到，交给后面的延迟采样。
+      landedProbe('ed') +
+      `return {ok:true,prevented:!notPrevented,tag:ed.tagName,landed0:best};`
     );
     if (!res || !res.ok) {
       return { success: false, error: (res && res.err) || 'paste failed', method: 'synthetic-clipboard-event' };
@@ -2522,19 +2635,45 @@ class PageManager {
         consumed: false,
       };
     }
-    // 落盘校验：读回编辑器内容。归一化沿用 P0-2 修过的口径（换行会被编辑器
-    // 膨胀，逐字比对必然失配）。只给 html 时无法文本比对，退而检查"有内容"。
-    await new Promise((r) => setTimeout(r, 350)); // 编辑器处理粘贴多为异步（React 提交）
-    const landed = await run(`var e=${deepActiveExpr()};return {text:(e&&(e.innerText||e.value||''))||'',html:(e&&e.innerHTML||'')};`);
-    const landedText = (landed && landed.text) || '';
-    const landedLen = landedText.replace(/\s+/g, '').length;
+    // 落盘校验：读回编辑器内容。
+    //
+    // 为什么不能只读一次、也不能只读 activeElement（2026-10-19 掘金实机）：
+    //   掘金（CodeMirror 6）粘贴成功、正文完整，回执却是 landed_chars: 0。
+    //   根因是读回走了 deepActive —— 那一刻 activeElement 并不是编辑面（编辑器
+    //   把焦点放在 .cm-scroller 上，真正的内容在 .cm-content），于是读到空。
+    //   调用方看到 0 就再粘一次，正文变成两份。**假阴性比漏报贵得多**：它直接
+    //   诱发重复写入，而重复写入是这件工具最不该制造的事故。
+    //
+    // 所以现在：① 以**刚粘贴的那个元素**为主，activeElement / 内部编辑面 /
+    // 上层容器依次兜底；② 三次采样（同步 / +350ms / +900ms）取最大值，覆盖
+    // 异步提交；③ 真读不到时给 landed_chars: null 而不是 0 —— 0 是"确定空"，
+    // null 是"读不到"，这两种事实对调用方的决策完全相反。
+    let landed = res.landed0 && res.landed0.n > 0 ? res.landed0 : null;
+    let samples = 1;
+    for (const wait of [350, 900]) {
+      if (landed) break;
+      await new Promise((r) => setTimeout(r, wait));
+      const again = await run(
+        `var t=${findRefExpr(JSON.stringify(aiId))}||document.activeElement;if(!t)return {n:0,src:'none',p:''};` +
+        landedProbe('t') + `return best;`
+      ).catch(() => null);
+      samples++;
+      if (again && again.n > 0) landed = again;
+    }
+    const landedLen = landed ? landed.n : 0;
     if (!landedLen) {
       return {
         success: false,
-        error: 'paste was consumed but nothing landed — the editor may have rejected the payload (unsanitized HTML?). Read the editor content back to confirm.',
+        // 措辞从 "nothing landed"（断言）改成 "could not be read back"（观测）。
+        // 前者在掘金那种场景里是错的 —— 它会把一次成功的粘贴报成失败，而
+        // agent 对 success:false 的标准反应就是重试一次。
+        error: 'paste was consumed but the editor content could not be read back — this is NOT proof that nothing landed (CodeMirror-style editors keep the document outside the focused node). '
+          + 'Verify with get_value on the same ref before doing anything else; re-pasting on a live editor duplicates the content.',
         method: 'synthetic-clipboard-event',
         consumed: true,
-        landed_chars: 0,
+        landed_chars: null,
+        landed_verified: false,
+        landed_samples: samples,
       };
     }
     return {
@@ -2543,8 +2682,11 @@ class PageManager {
       consumed: true,
       in_frame: inFrame,
       landed_chars: landedLen,
-      // 只给 html 时调用方无法预知文本形态，把读回内容捎上，省一轮查询。
-      ...(html && !text ? { landed_preview: landedText.slice(0, 200) } : {}),
+      landed_verified: true,
+      // 读回来源：'target' 最可信；'host' 是容器兜底，可能把页面别处的文字
+      // 算进来 —— 长度只用于"有没有落地"，不做逐字比对，所以偏大是安全方向。
+      landed_source: landed.src,
+      ...(html && !text ? { landed_preview: landed.p || '' } : {}),
     };
   }
 
