@@ -55,6 +55,7 @@
   "scripts": {
     "start": "node scripts/start.cjs",
     "test": "vitest run",
+    "release": "node scripts/release.cjs",
     "test:watch": "vitest",
     "smoke": "node e2e/smoke_ws.cjs",
     "capabilities": "node e2e/capabilities_ws.cjs",
