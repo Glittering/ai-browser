@@ -195,3 +195,4 @@ README 的实际口径（Compatibility 表 + 安装段）是：
 - **Windows**：experimental / untested。
 
 已按 README 原文改写。教训记进 playbook：**边界声明要照 README 写，不能凭印象收紧——写过头等于把 Linux 读者一起劝退，而且是不诚实。**
+| 2026-10-22 09:04 | 4 | 0 | 0 | 48 | 28 | 873/272 | 2.1.1 | 410 | 2.1.1 | active | Δ较10-21 09:05：stars +0、views +2（46→48，+4.3%）、uniq +4（24→28）、clones +16/+5；views 以10-17基线18→48（+166.7%≥20%）正向信号（连续第5日）；npm 2.1.1持平无新版；npm_dl 410持平无新增（下载潮未延续亦未回落，观察持续性）；clones 873≫views 48（≈18.2×）非人类流量观察不计增长；✅ MCP Registry 1.2.2→2.1.1 active 且 isLatest=True，与 npm latest 2.1.1 一致，连续三日「Registry落后5版」告警解除（commit 0f6e189）；10-21晚间至10-22凌晨另有人工补采3行（19:04/19:57/01:11），views 48 自19:04起持平 |
