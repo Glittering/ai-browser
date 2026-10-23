@@ -222,12 +222,32 @@ if (!publisher) {
   if (pub.status === 0 && /successfully published/i.test(pubOut)) {
     ok('MCP registry 已发布');
     mark('mcp registry');
+  } else if (pub.status !== 0 && /was not found \(status: 404\)/i.test(pubOut)) {
+    // npm 刚发完，registry 的校验端还看不到新版本 —— 这是 npm CDN 的传播
+    // 延迟（实测 1-3 分钟），不是真的没发上去。连续两次发版都在这里被打断
+    // 叫回来手工重跑，所以直接自动等待重试。
+    let ok404 = false;
+    for (let i = 1; i <= 4; i++) {
+      warn(`registry 还没看到 npm 上的 v${to}（传播延迟），45s 后重试 ${i}/4…`);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 45000);
+      pub = doPublish();
+      pubOut = `${pub.stdout || ''}${pub.stderr || ''}`;
+      if (pub.status === 0 && /successfully published/i.test(pubOut)) { ok404 = true; break; }
+      // 错误形态变了（不再是传播延迟）就交回统一处理，别空转
+      if (!/was not found \(status: 404\)/i.test(pubOut)) break;
+    }
+    if (ok404) { ok('MCP registry 已发布'); mark('mcp registry'); }
+    else {
+      const pkgName = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).name;
+      fail('MCP registry 发布失败：' + pubOut.split('\n').filter(Boolean).slice(-6).join(' | '));
+      warn(`补救：确认 npm 上有 ${to}（npm view ${pkgName} version）后执行  mcp-publisher publish`);
+    }
   } else {
     fail('MCP registry 发布失败：' + pubOut.split('\n').filter(Boolean).slice(-6).join(' | '));
-    if (/was not found \(status: 404\)/i.test(pubOut)) {
-      warn('registry 要求 npm 上先有该版本 —— 先把 npm 那步修好，再重跑本脚本');
+    if (/auth|login|token|unauthor/i.test(pubOut)) {
+      warn('需要先登录一次：mcp-publisher login github（device flow，点一下浏览器）');
     }
-    warn('补救：mcp-publisher publish');
+    warn('补救：登录后执行  mcp-publisher publish');
   }
 }
 
