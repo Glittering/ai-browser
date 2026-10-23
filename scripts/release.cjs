@@ -48,6 +48,14 @@ function run(cmd, argv, opts = {}) {
 function git(...argv) { return run('git', argv); }
 function gitOut(...argv) { return run('git', argv).stdout.trim(); }
 
+// registry 的 github 登录可以吃环境变量，从而绕开 device flow ——
+// device flow 在无 TTY / 后台执行时会静默卡在 "Logging in..." 不打印 URL，
+// 看起来像卡死，实际是在等一个永远不会被打开的浏览器。
+function ghToken() {
+  try { return execFileSync('gh', ['auth', 'token'], { encoding: 'utf8' }).trim(); }
+  catch { return ''; }
+}
+
 const done = [];
 function mark(m) { done.push(m); }
 
@@ -160,8 +168,15 @@ if (npm.status === 0) {
   mark('npm publish');
 } else {
   const out = `${npm.stdout || ''}${npm.stderr || ''}`;
-  // token 失效的特征：whoami 401、PUT 404（npm 用 404 掩盖"没权限"）
-  if (/E401|E404|Unauthorized|Not found/i.test(out)) {
+  // 三层认证失败的表现各不相同，逐条给可执行的下一步（2026-10-23 一天踩完）：
+  //   401 / E404 on PUT  → token 过期或被撤销（npm 用 404 掩盖"没权限"）
+  //   403 + "bypass 2fa" → token 有效但建的时候没勾 Bypass 2FA
+  //   EPUBLISHCONFLICT  → 版本号已被占用
+  if (/bypass 2fa enabled is required/i.test(out)) {
+    fail('npm token 没有开 Bypass 2FA —— 账号开了 2FA 时，granular token 必须勾这个开关才能发布');
+    console.log('      https://www.npmjs.com/settings/glittering0717/tokens/new');
+    console.log('      Permissions: Read and write ｜ Scope: @glittering0717 ｜ 勾 Bypass 2FA');
+  } else if (/E401|E404|Unauthorized|Not found/i.test(out)) {
     fail('npm 认证失效（401/404）。需要重新登录一次，之后本脚本可全自动：');
     console.log('      npm login                      # 浏览器登录');
     console.log('      或：把新的 granular access token 写进 ~/.npmrc 的 //registry.npmjs.org/:_authToken');
@@ -181,17 +196,38 @@ if (!publisher) {
   warn('未找到 mcp-publisher，跳过。安装：gh release download --repo modelcontextprotocol/registry \\');
   console.log('      --pattern "mcp-publisher_darwin_arm64.tar.gz" && tar xzf ...');
 } else {
-  const pub = spawnSync(publisher, ['publish'], { cwd: ROOT, encoding: 'utf8' });
-  if (pub.status === 0) {
+  // registry 的登录态是一枚短期 JWT（几小时就过期）。过期表现是 401
+  // "token has invalid claims: token is expired" —— 不是"没登录"，
+  // 所以 `login` 会直接成功但不会有人去重跑它。这里自动续一次：
+  // MCP_GITHUB_TOKEN 让 login 走非交互路径（device flow 在无 TTY 时会静默卡住）。
+  const doPublish = () => spawnSync(publisher, ['publish'], { cwd: ROOT, encoding: 'utf8' });
+  let pub = doPublish();
+  let pubOut = `${pub.stdout || ''}${pub.stderr || ''}`;
+  if (pub.status !== 0 && /expired|invalid or expired|status 401/i.test(pubOut)) {
+    warn('registry 登录已过期，自动续期一次…');
+    const relogin = spawnSync(publisher, ['login', 'github'], {
+      cwd: ROOT,
+      encoding: 'utf8',
+      env: { ...process.env, MCP_GITHUB_TOKEN: ghToken() },
+    });
+    const reloginOut = `${relogin.stdout || ''}${relogin.stderr || ''}`;
+    if (relogin.status === 0 && /logged in/i.test(reloginOut)) {
+      ok('已重新登录');
+      pub = doPublish();
+      pubOut = `${pub.stdout || ''}${pub.stderr || ''}`;
+    } else {
+      warn('自动续期失败（需要 gh CLI 已登录）：' + reloginOut.trim().split('\n').pop());
+    }
+  }
+  if (pub.status === 0 && /successfully published/i.test(pubOut)) {
     ok('MCP registry 已发布');
     mark('mcp registry');
   } else {
-    const out = `${pub.stdout || ''}${pub.stderr || ''}`;
-    fail('MCP registry 发布失败：' + out.split('\n').filter(Boolean).slice(-6).join(' | '));
-    if (/auth|login|token|unauthor/i.test(out)) {
-      warn('需要先登录一次：mcp-publisher login github（device flow，点一下浏览器）');
+    fail('MCP registry 发布失败：' + pubOut.split('\n').filter(Boolean).slice(-6).join(' | '));
+    if (/was not found \(status: 404\)/i.test(pubOut)) {
+      warn('registry 要求 npm 上先有该版本 —— 先把 npm 那步修好，再重跑本脚本');
     }
-    warn('补救：登录后执行  mcp-publisher publish');
+    warn('补救：mcp-publisher publish');
   }
 }
 
