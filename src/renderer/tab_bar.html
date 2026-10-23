@@ -18,9 +18,24 @@
   }
   /* ---- 第一行：tab 条 ---- */
   #tabs-row { display: flex; align-items: stretch; height: 36px; flex: none; }
-  #tabs { display: flex; flex: 1; overflow: hidden; }
+  /* 标签超过可视宽度时必须能横向滚动，否则后面的标签点不到、也关不掉。
+     原来是 overflow:hidden —— 超出部分被裁掉且没有任何滚动途径，标签一多
+     就等于"后半截标签永久不可用"。 */
+  #tabs {
+    display: flex; flex: 1; min-width: 0;
+    overflow-x: auto; overflow-y: hidden;
+    -webkit-app-region: no-drag;
+  }
+  /* 细滚动条：既提示"还有更多标签"，又不占视觉高度 */
+  #tabs::-webkit-scrollbar { height: 3px; }
+  #tabs::-webkit-scrollbar-track { background: transparent; }
+  #tabs::-webkit-scrollbar-thumb { background: #3a3a3a; border-radius: 2px; }
+  #tabs::-webkit-scrollbar-thumb:hover { background: #4d4d4d; }
   .tab {
     display: flex; align-items: center;
+    /* flex:none：不参与收缩。否则标签会被一路压到 min-width 再溢出，
+       配合滚动后应该保持各自宽度、让容器去滚。 */
+    flex: none;
     max-width: 200px; min-width: 80px; padding: 0 12px; height: 36px;
     cursor: pointer; border-right: 1px solid #2a2a2a;
     transition: background 0.15s;
@@ -91,7 +106,15 @@
 </div>
 
 <script>
-const { ipcRenderer } = require('electron');
+// ipcRenderer 在 Electron 主窗口里才有。直接用浏览器/测试页打开本文件时
+// require 会抛错——以前这会让整个 <script> 中断，连布局和滚动监听都不生效
+// （UI 完全死掉）。现在降级成空操作：交互没了，但标签栏仍然看得见、滚得动。
+let ipcRenderer = null;
+try { ({ ipcRenderer } = require('electron')); } catch (e) { /* 非 Electron 环境 */ }
+function send(ch, payload) { try { ipcRenderer.send(ch, payload); } catch (e) {} }
+function invoke(ch, payload) {
+  return ipcRenderer ? ipcRenderer.invoke(ch, payload) : Promise.reject(new Error('no ipc'));
+}
 
 const $ = (id) => document.getElementById(id);
 const tabsEl = $('tabs'), addrEl = $('addr'), statusEl = $('status');
@@ -115,28 +138,78 @@ function applyNavState(s) {
   addrEl.style.borderColor = s.loading ? '#e0a33e' : '';
 }
 
+let lastIds = '';      // 上次渲染的 tab id 序列 —— 只有它变了才重建 DOM
+let lastActiveId = null;
+
+// 把指定 tab 滚进可视区（只在它确实在视区外时才动，避免无谓跳动）。
+// 用 getBoundingClientRect 而不是 offsetLeft：后者依赖 offsetParent，
+// 在 flex + 滚动容器里算出来的是错的值。
+function scrollTabIntoView(id) {
+  const el = tabsEl.querySelector('.tab[data-id="' + id + '"]');
+  if (!el) return;
+  const cr = tabsEl.getBoundingClientRect(), er = el.getBoundingClientRect();
+  if (er.left < cr.left) tabsEl.scrollLeft -= (cr.left - er.left) + 8;
+  else if (er.right > cr.right) tabsEl.scrollLeft += (er.right - cr.right) + 8;
+}
+
 async function renderTabs() {
   try {
-    const tabs = await ipcRenderer.invoke('tab:list');
-    tabsEl.innerHTML = '';
-    for (const tab of tabs) {
-      const el = document.createElement('div');
-      el.className = 'tab' + (tab.active ? ' active' : '');
-      const title = (tab.title || tab.url || 'New Tab').slice(0, 30);
-      el.innerHTML = '<span class="tab-id">[' + tab.id + ']</span>' +
-        '<span class="tab-title">' + escapeHtml(title) + '</span>' +
-        '<span class="tab-close" data-id="' + tab.id + '">&times;</span>';
-      el.addEventListener('click', function (e) {
-        if (e.target.classList.contains('tab-close')) {
-          ipcRenderer.send('tab:close', parseInt(e.target.dataset.id));
-        } else {
-          ipcRenderer.send('tab:activate', tab.id);
-        }
-      });
-      tabsEl.appendChild(el);
+    const tabs = await invoke('tab:list');
+    const ids = tabs.map(function (t) { return t.id; }).join(',');
+
+    if (ids !== lastIds) {
+      // 结构变了（增/删 tab）：重建 DOM，但必须保住横向滚动位置 ——
+      // 否则在右端关掉一个标签后视图会跳回最左，后面的标签又摸不着了。
+      const prevScroll = tabsEl.scrollLeft;
+      tabsEl.innerHTML = '';
+      for (const tab of tabs) {
+        const el = document.createElement('div');
+        el.className = 'tab' + (tab.active ? ' active' : '');
+        el.dataset.id = tab.id;
+        el.innerHTML = '<span class="tab-id">[' + tab.id + ']</span>' +
+          '<span class="tab-title">' + escapeHtml((tab.title || tab.url || 'New Tab').slice(0, 30)) + '</span>' +
+          '<span class="tab-close" data-id="' + tab.id + '">&times;</span>';
+        el.addEventListener('click', function (e) {
+          // 从 this.dataset 取 id，不用闭包里的 tab —— 增量更新时闭包会过期。
+          const id = parseInt(this.dataset.id);
+          if (e.target.classList.contains('tab-close')) send('tab:close', id);
+          else send('tab:activate', id);
+        });
+        tabsEl.appendChild(el);
+      }
+      lastIds = ids;
+      tabsEl.scrollLeft = prevScroll;
+    } else {
+      // 结构没变：只改标题和激活态。绝不重建 —— 这里每 1.5s 就跑一次，
+      // 一旦重建，用户刚滚到的位置就被重置，标签一多就永远滚不回去。
+      for (let i = 0; i < tabs.length && i < tabsEl.children.length; i++) {
+        const t = tabs[i], el = tabsEl.children[i];
+        el.classList.toggle('active', !!t.active);
+        const titleEl = el.querySelector('.tab-title');
+        const title = (t.title || t.url || 'New Tab').slice(0, 30);
+        if (titleEl && titleEl.textContent !== title) titleEl.textContent = title;
+      }
     }
+
+    // 激活的 tab 换人了（含 agent 用 browse_tabs 切的情况）就把它滚进来；
+    // 已经可见时上面的计算不会产生位移。
+    const active = tabs.find(function (t) { return t.active; });
+    const activeId = active ? active.id : null;
+    if (activeId !== null && activeId !== lastActiveId) scrollTabIntoView(activeId);
+    if (activeId !== null) lastActiveId = activeId;
   } catch (e) { /* ipcRenderer 尚未就绪 */ }
 }
+
+// 横向滚动：鼠标滚轮是垂直的，标签栏要的是左右滚（浏览器惯例）。
+// overflow 改成 auto 只是"能滚"，没有这一条仍然只能拖滚动条/用触控板横扫。
+tabsEl.addEventListener('wheel', function (e) {
+  if (tabsEl.scrollWidth <= tabsEl.clientWidth) return;
+  const d = Math.abs(e.deltaY) >= Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
+  if (!d) return;
+  tabsEl.scrollLeft += d;
+  e.preventDefault();
+}, { passive: false });
+
 function escapeHtml(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
@@ -147,27 +220,27 @@ function escapeHtml(s) {
 // 所以显示数据全部由主进程推送，本地不缓存。
 let activeTab = null;
 
-ipcRenderer.on('nav:state', (_e, s) => applyNavState(s));
+if (ipcRenderer) ipcRenderer.on('nav:state', (_e, s) => applyNavState(s));
 
-backBtn.addEventListener('click', () => ipcRenderer.send('nav:back'));
-fwdBtn.addEventListener('click', () => ipcRenderer.send('nav:forward'));
-reloadBtn.addEventListener('click', () => ipcRenderer.send('nav:reload'));
-stopBtn.addEventListener('click', () => ipcRenderer.send('nav:stop'));
+backBtn.addEventListener('click', () => send('nav:back'));
+fwdBtn.addEventListener('click', () => send('nav:forward'));
+reloadBtn.addEventListener('click', () => send('nav:reload'));
+stopBtn.addEventListener('click', () => send('nav:stop'));
 
 addrEl.addEventListener('keydown', (e) => {
   if (e.key !== 'Enter') return;
   const v = addrEl.value.trim();
   if (!v) return;
   addrEl.blur();
-  ipcRenderer.send('nav:go', v);
+  send('nav:go', v);
 });
 // 聚焦时全选，方便直接输入覆盖（浏览器惯例）
 addrEl.addEventListener('focus', () => addrEl.select());
 
-$('new-tab').addEventListener('click', () => ipcRenderer.send('tab:new'));
+$('new-tab').addEventListener('click', () => send('tab:new'));
 
 // 初始拉一次状态，然后 tab 条照旧定时刷新
-ipcRenderer.invoke('nav:state').then((s) => { if (s) applyNavState(s); });
+invoke('nav:state').then((s) => { if (s) applyNavState(s); }).catch(() => {});
 renderTabs();
 setInterval(renderTabs, 1500);
 </script>
