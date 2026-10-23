@@ -191,6 +191,11 @@ class PageManager {
     // 垫片登记完再导航，否则真实文档先到、垫片只对"下一次文档"生效，那个 tab
     // 就成了没有垫片的窗中窗（见 newTab 末尾长注释）。
     this._windowOpenShimReady = new Map();
+    // tabId -> 'pending' | 'loading' | 'ready' | 'blank'：这个 tab 现在处于导航的
+    // 哪一步。存在的理由：新 tab 在占位页（原先是纯白 about:blank）停留时，
+    // 光看 URL 分不清"正在加载"和"卡住了/开错了"。listTabs 把它报出去，
+    // agent 才知道该等而不是该重试。
+    this._tabNavState = new Map();
     this._axDiffCache = new Map();  // tabId -> lite interactive snapshot (get_tree {mode:'diff'})
     this._repaintTimers = new Map();// tabId -> 正在排队/已调度的重绘（合并同一批导航事件）
     this._snapshots = new Map();    // snapshotId -> { tabId, js, value, at }（ui.snapshot 存基线）
@@ -3271,6 +3276,8 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     const wc0 = view.webContents;
     const targetUrl = url || null;
     if (wc0 && !wc0.isDestroyed()) {
+      // 还没发起真实导航：停在占位页等垫片注入。
+      this._tabNavState.set(tabId, 'pending');
       // 垫片就绪信号：先挂上去，再去加载 about:blank。顺序不能反 ——
       // ai:window_open_nav 可能在这一行之后立刻到达（IPC 保序，但它不等我们）。
       let signalReady = () => {};
@@ -3281,19 +3288,38 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
         if (proceeded) return;
         proceeded = true;
         Promise.resolve(this._ensureWindowOpenShim(tabId, view)).finally(() => {
-          // 失败也放行：宁可这个 tab 没有垫片，也不能把它卡在 about:blank。
+          // 失败也放行：宁可这个 tab 没有垫片，也不能把它卡在占位页。
           signalReady();
           if (targetUrl && wc0 && !wc0.isDestroyed()) {
+            // 让"正在加载"可被观测：白屏最贵的地方不是慢，是慢得无法和
+            // "开错了"区分（见 listTabs 的 state 字段）。
+            this._tabNavState.set(tabId, 'loading');
+            wc0.once('did-finish-load', () => {
+              if (this._tabNavState.get(tabId) === 'loading') this._tabNavState.set(tabId, 'ready');
+            });
             wc0.loadURL(targetUrl).catch(() => {});
+          } else {
+            // 无目标 URL 的占位 tab（window.open("") 的老站模式）：它本来就
+            // 要停在这里等站点赋 location，不算"卡住"，但也不是就绪。
+            this._tabNavState.set(tabId, 'blank');
           }
         });
       };
-      // 兜底：about:blank 的 did-finish-load 万一来不了（renderer 异常、
+      // 兜底：占位页的 did-finish-load 万一来不了（renderer 异常、
       // 视图尚未 attach 等），也不能把真实导航永久挂住——1.2s 后照常放行，
       // 最坏退化成"首屏没有垫片"（与修复前一致），而不是打不开页面。
       const guard = setTimeout(proceed, 1200);
       if (guard.unref) guard.unref();
-      wc0.loadURL('about:blank').catch(() => {});
+      // ⚠️ 占位页用 loading.html 而不是 about:blank（2026-10-24 修）。
+      //
+      // 这段等待原本是纯白的 about:blank。快站约 4s，慢站实测 70s（GitHub
+      // OAuth 直到 ERR_CONNECTION_TIMED_OUT 才切到错误页）—— 用户和 agent
+      // 看到的都是"弹出来一个空白页面"，和"垫片没把导航发出去"那个老 bug
+      // （超星"进入学习"）在现象上完全一样，无法区分。
+      // loading.html 只做展示（目标地址 + 转圈），不发请求不跳转，真实导航
+      // 仍由上面的 proceed 发起。无目标 URL 的占位 tab（window.open("") 的
+      // 老站模式）保持 about:blank：它本来就要停在这里等 location 赋值。
+      wc0.loadURL(this._loadingPlaceholderUrl(targetUrl)).catch(() => {});
       wc0.once('did-finish-load', () => { clearTimeout(guard); proceed(); });
     }
 
@@ -3524,6 +3550,7 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     }
     this._windowOpenShimTabs.delete(tabId);
     this._windowOpenShimReady.delete(tabId);
+    this._tabNavState.delete(tabId);
     // Release per-tab network resources so a closed tab can never leak its
     // debugger attachment or cached request entries / stale monitors.
     this._cleanupTabResources(tabId);
@@ -3579,6 +3606,12 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
         url: view.webContents.getURL(),
         title: view.webContents.getTitle(),
         active: id === this.activeTab,
+        // 'pending' = 停在占位页等脚本注入（真实导航还没发起）
+        // 'loading' = 真实导航已发起、还没完成 —— 这时候页面多半还是空的，
+        //             是"正在打开"而不是"开错了"，等它，不要重试
+        // 'blank'   = window.open("") 的占位 tab，在等站点赋 location
+        // 'ready'   = 已就绪（没有记录时也按就绪处理）
+        state: this._tabNavState.get(id) || 'ready',
       });
     }
     return list;
@@ -3968,6 +4001,20 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
   // load about:blank，did-finish-load 后再调这里。
   // 幂等：每个 tab 只注册一次（_windowOpenShimTabs 记账）；跨导航自动保留
   // 正是 addScriptToEvaluateOnNewDocument 的语义，不需要重复注册。
+  // 新 tab 的占位页 URL：有目标地址时用 loading.html（把白屏变成可诊断的
+  // "正在打开 <url>"），无目标地址时保持 about:blank（window.open("") 的
+  // 占位 tab 要停在这里等站点赋 location，不能显示成"正在打开"）。
+  _loadingPlaceholderUrl(targetUrl) {
+    if (!targetUrl) return 'about:blank';
+    try {
+      const pagePath = path.join(__dirname, '../renderer/loading.html');
+      const q = new URLSearchParams({ url: String(targetUrl) });
+      return 'file://' + pagePath + '?' + q.toString();
+    } catch (_e) {
+      return 'about:blank';
+    }
+  }
+
   _ensureWindowOpenShim(tabId, view) {
     if (this._windowOpenShimTabs.has(tabId)) return Promise.resolve(true);
     this._windowOpenShimTabs.add(tabId);
