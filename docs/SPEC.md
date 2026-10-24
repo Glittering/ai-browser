@@ -246,6 +246,33 @@ macOS 底层仍是 `NSAlert` 模态循环，**会阻塞主进程**（实测对�
 "日志 + 横幅"这条链路真的通 —— 否则它只能等真事故发生才能验证，而那时候恰恰最
 不适合做实验。
 
+## 浏览器级对话框（alert / confirm / beforeunload）
+
+`alert()` / `confirm()` 不是页面 DOM：Chromium 交给 embedder，Electron 画成**原生
+sheet**，因此它既不在语义树里，也不受页面点击控制；**而且对话框打开期间整个渲染器
+被阻塞** —— `Runtime.evaluate` 不返回，任何动作都以"超时、主线程可能被阻塞"结束。
+2026-10-24 用户在掘金删重复评论时撞上的就是这个：屏幕上有个"确定/取消"，agent 和
+自动点击都够不到它。
+
+处理责任在浏览器进程这一侧（`src/shared/dialog_policy.cjs` +
+`PageManager._handleDialogOpening`）：主进程订阅 CDP `Page.javascriptDialogOpening`，
+按策略用 `Page.handleJavaScriptDialog` 应答（该命令由浏览器进程执行，不需要渲染器，
+所以对话框冻结页面时它照样有效）。
+
+- 默认策略 `auto`：`alert` 确认；`confirm` **接受**（点它的那个动作就是意图，拒绝会
+  让删除/提交永远失败）；`beforeunload` 放行（否则导航/关标签永久卡住）；`prompt`
+  用页面默认值提交（Electron 实际不支持 `prompt()`，会抛 `prompt() is not supported.`）。
+- 覆盖：`AI_BROWSER_DIALOG_POLICY=auto|accept|dismiss|manual`。`manual` 不自动应答，
+  对话框保持打开，`ui.list_tabs` 的该 tab 上出现 `dialog:{type,message}`，由人点。
+- 回执：动作期间被应答的对话框会写进 `browse_act` 结果的 `dialog:{type,message,accept,auto}`，
+  否则 agent 不知道"点击中间弹过确认框、被替它按了确定"。
+- 兜底：动作超时时还会主动探测一次（`PageManager.recoverBlockedTab`）—— 事件监听
+  依赖 `Page.enable` 成功，漏掉时不能让那条 tab 永久卡死。
+- Electron 侧的等价物是 `will-prevent-unload`（默认不处理会**静默**拦住导航），
+  策略共用同一套。
+- 回归：`e2e/dialog_ws.cjs`（`npm run dialog`）—— confirm / alert / beforeunload 三条
+  路径，断言"不超时、回执有 dialog、处理完页面立即能评估"。
+
 ## 配置（环境变量）
 
 | 变量 | 默认 | 作用 |
@@ -261,6 +288,7 @@ macOS 底层仍是 `NSAlert` 模态循环，**会阻塞主进程**（实测对�
 | `AI_BROWSER_WATCHDOG_URLS` | `example.com, baidu.com` | 看门狗探测目标（任一可达即算存活） |
 | `AI_BROWSER_NETWORK_CAPTURE` | 开 | `0` 关闭默认抓包 |
 | `AI_BROWSER_CANVAS_HOOK` | 开 | `0` 关闭 canvas 绘制记录注入 |
+| `AI_BROWSER_DIALOG_POLICY` | `auto` | `alert/confirm/beforeunload` 的应答策略：`auto` / `accept` / `dismiss` / `manual`（不自动应答，交给人） |
 
 **窗口必须显示**（人可随时介入），但 agent 操作不得夺走键盘焦点 —— 这是产品不变量，
 由 `e2e/focus_ws.cjs` 专门验证（含"不应发生"的阳性对照组）。

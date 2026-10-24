@@ -18,6 +18,10 @@ import { withEffectState, isTargetMiss as isTargetMissError } from '../shared/ef
 // 前后快照探针：动作返回 success 只证明"命令发出去了"，不证明"页面接住了"。
 // 后者必须由掌握渲染进程的一侧给出（见 shared/page_probe.js 顶部事故说明）。
 import pageProbe from '../shared/page_probe.js';
+// 浏览器级对话框（alert / confirm / prompt / beforeunload）的策略。它们是
+// Electron 画的原生 sheet，不在 DOM、不在 AX 树，而且**打开期间渲染器被阻塞**，
+// 所以必须由主进程通过 CDP Page.handleJavaScriptDialog 应答 —— 见该模块头部说明。
+import dialogPolicy from '../shared/dialog_policy.cjs';
 // 默认读法（DOM extractor）的"哪个 editable 才是正文"索引。AX 路径在
 // normalizeAxTree 里已经自带，这条补的是默认路径 —— 见文件内注释。
 import editorsProbe from '../shared/editors_probe.js';
@@ -196,6 +200,14 @@ class PageManager {
     // 光看 URL 分不清"正在加载"和"卡住了/开错了"。listTabs 把它报出去，
     // agent 才知道该等而不是该重试。
     this._tabNavState = new Map();
+    // tabId -> 最近一次被处理掉的 JS 对话框：{type, message, accept, promptText,
+    // auto, at}。回执里带上它，agent 才知道"刚才那个动作中间弹了个确认框，
+    // 我替你按了确定"—— 否则它会以为点击之后什么都没发生。
+    this._lastDialog = new Map();
+    // 已挂上"对话框监听"的 tab（每个 tab 一次；Page.enable 是幂等的）
+    this._dialogWatched = new Set();
+    // tabId -> 当前**仍然打开**的对话框（manual 策略下会长期存在）
+    this._openDialogs = new Map();
     this._axDiffCache = new Map();  // tabId -> lite interactive snapshot (get_tree {mode:'diff'})
     this._repaintTimers = new Map();// tabId -> 正在排队/已调度的重绘（合并同一批导航事件）
     this._snapshots = new Map();    // snapshotId -> { tabId, js, value, at }（ui.snapshot 存基线）
@@ -1449,6 +1461,9 @@ class PageManager {
   async executeAction(action, target, params = {}, tabId) {
     const ms = actionDeadlineMs(action, params);
     const tid = tabId !== undefined ? tabId : this.activeTab;
+    // 本次动作的起始时刻：用来判断"有没有对话框是在这一次动作里被应答的"，
+    // 并把结果写进回执（否则 agent 不知道点击中间弹过确认框）。
+    const startedAt = Date.now();
     // 动作前先拍一张。为什么拍在 withDeadline 外面：deadline 只应该盖住动作
     // 本身，探针有它自己的 1.5s 上限，混进同一个预算会让"动作超时"和
     // "探针慢"两种完全不同的故障共用一个错误码。
@@ -1468,18 +1483,28 @@ class PageManager {
         const probeAfter = await this._pageProbe(tid, action);
         out = pageProbe.applyProbe(out, probeBefore, probeAfter, action);
       }
+      const dlg = this._dialogSince(tid, startedAt);
+      if (dlg) out = { ...out, dialog: dlg };
       return out;
     } catch (e) {
       if (e && e.__deadline) {
+        // 超时的第一种解释是"主线程忙"，但更常见也更致命的是**有对话框把渲染器
+        // 冻住了**（alert/confirm 是原生 sheet，agent 看不见、也点不到）。
+        // 这里先探测并按策略解开，再回报；不解开的话这条 tab 之后每条命令都会
+        // 以同样的方式超时，agent 只会一路重试到放弃。
+        const dlg = await this.recoverBlockedTab(tid).catch(() => null);
         // 明确告诉 agent 两件事：① 它该重试/换策略；② 这个动作**可能已经部分生效**
         // （超时时指针可能已经按下、字符可能已经输入了一半）—— 后者必须说，否则
         // agent 会以为页面没被动过而直接重试，造成双倍输入。
         return this._annotateActResult({
           success: false,
-          error: `${e.message} — the page's main thread is likely blocked; the action may have partially applied`,
+          error: dlg
+            ? `blocked by a browser-level JS dialog (${dlg.type}) — it is a native sheet, not page DOM, and the page is frozen while it is open. It has been ${dlg.accept ? 'accepted' : 'dismissed'} automatically; re-read the tree before retrying.`
+            : `${e.message} — the page's main thread is likely blocked; the action may have partially applied`,
           timed_out: true,
           deadline_ms: ms,
           action,
+          ...(dlg ? { dialog: dlg, retry: 'verify_first' } : {}),
         }, action, target, tid);
       }
       throw e;
@@ -3239,6 +3264,14 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     // Mask automation fingerprint: remove Electron from UA
     view.webContents.setUserAgent(config.userAgent);
 
+    // beforeunload：Electron 侧的等价物。**不处理它会静默拦住导航** —— 既没有
+    // 对话框、也没有报错，表现成"点了链接/调了 navigate，页面就是不动"。
+    // 策略和 CDP 那条路共用一套（shared/dialog_policy.cjs）：默认放行。
+    view.webContents.on('will-prevent-unload', (e) => {
+      const policy = this.dialogPolicy || dialogPolicy.policyFromEnv();
+      if (dialogPolicy.allowUnload({ policy })) e.preventDefault();
+    });
+
     // Intercept window.open / new-window → create new tab instead
     view.webContents.setWindowOpenHandler(({ url: urlToOpen }) => {
       const childId = self.newTab(urlToOpen);
@@ -3551,6 +3584,10 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     this._windowOpenShimTabs.delete(tabId);
     this._windowOpenShimReady.delete(tabId);
     this._tabNavState.delete(tabId);
+    // 对话框状态跟着 tab 走：留着会让下次同 id 的 tab 继承一个不存在的对话框。
+    this._lastDialog.delete(tabId);
+    this._openDialogs.delete(tabId);
+    this._dialogWatched.delete(tabId);
     // Release per-tab network resources so a closed tab can never leak its
     // debugger attachment or cached request entries / stale monitors.
     this._cleanupTabResources(tabId);
@@ -3612,6 +3649,9 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
         // 'blank'   = window.open("") 的占位 tab，在等站点赋 location
         // 'ready'   = 已就绪（没有记录时也按就绪处理）
         state: this._tabNavState.get(id) || 'ready',
+        // 只有 manual 策略下才会长期存在。auto 模式下对话框在打开的瞬间就被
+        // 应答了，所以正常情况这个字段不出现 —— 出现即意味着"有人需要点它"。
+        ...(this._openDialogs.has(id) ? { dialog: this._openDialogs.get(id) } : {}),
       });
     }
     return list;
@@ -3973,6 +4013,127 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     }
   }
 
+  // === 浏览器级对话框（alert / confirm / prompt / beforeunload）===
+  //
+  // 这类对话框由 Chromium 交给 embedder 渲染，Electron 画成原生 sheet：不在
+  // DOM、不在 AX 树、点不到；**而且打开期间渲染器被阻塞**（Runtime.evaluate
+  // 都不返回）。所以它必须由主进程应答 —— 页面侧的任何办法（JS 覆盖
+  // window.confirm、语义树里找按钮）都治不了"渲染器已经停住"这件事。
+  //
+  // 应答走 CDP `Page.handleJavaScriptDialog`：该命令由浏览器进程处理，不需要
+  // 渲染器，所以对话框阻塞页面时它照样生效。
+  _ensureDialogWatch(tabId, view) {
+    if (this._dialogWatched.has(tabId)) return;
+    this._dialogWatched.add(tabId);
+    const wc = view && view.webContents;
+    if (!wc || wc.isDestroyed()) { this._dialogWatched.delete(tabId); return; }
+    try {
+      // 只有 Page 域启用后才会收到 javascriptDialogOpening。空文档上这条命令
+      // 可能挂住，所以不 await（挂住也无害：只是这个 tab 收不到事件，动作超时
+      // 时还有 recoverBlockedTab 的兜底探测）。
+      wc.debugger.sendCommand('Page.enable').catch(() => {});
+    } catch (_e) {
+      this._dialogWatched.delete(tabId);
+    }
+  }
+
+  /** 当前策略（实例字段优先，便于测试/诊断；否则读环境变量）。 */
+  _dialogPolicyNow() {
+    return this.dialogPolicy || dialogPolicy.policyFromEnv();
+  }
+
+  async _handleDialogOpening(tabId, params) {
+    const dialog = {
+      type: String((params && params.type) || 'alert'),
+      message: String((params && params.message) || ''),
+      defaultPrompt: params && params.defaultPrompt,
+      at: Date.now(),
+    };
+    const decision = dialogPolicy.decideDialog(dialog, { policy: this._dialogPolicyNow() });
+    if (!decision.auto) {
+      // manual：不替调用方决定，把状态挂出去（listTabs 可见），由人来点。
+      this._openDialogs.set(tabId, { type: dialog.type, message: dialog.message });
+      return;
+    }
+    const handled = await this._answerDialog(tabId, decision.accept, decision.promptText);
+    this._openDialogs.delete(tabId);
+    if (!handled) return;
+    this._lastDialog.set(tabId, {
+      type: dialog.type,
+      message: dialog.message,
+      accept: !!decision.accept,
+      ...(decision.accept && decision.promptText ? { prompt_text: decision.promptText } : {}),
+      auto: true,
+      at: dialog.at,
+    });
+  }
+
+  async _answerDialog(tabId, accept, promptText) {
+    const view = this._getView(tabId);
+    const wc = view && view.webContents;
+    if (!wc || wc.isDestroyed()) return false;
+    try {
+      const params = { accept: !!accept };
+      if (accept && typeof promptText === 'string' && promptText) params.promptText = promptText;
+      await withDeadline(
+        wc.debugger.sendCommand('Page.handleJavaScriptDialog', params),
+        2000,
+        'dialog_handle'
+      );
+      return true;
+    } catch (_e) {
+      return false;   // "No dialog is showing" / debugger 未 attach：都不是错误
+    }
+  }
+
+  /**
+   * 兜底：动作超时时**探测**是否有对话框把渲染器冻结了，并按策略应答。
+   *
+   * 为什么需要它：事件监听依赖 Page 域已启用。若某个 tab 从未启用（或启用被
+   * 1500ms deadline 掐掉），我们就收不到 javascriptDialogOpening，但仍然必须
+   * 有能力把它解开 —— 否则那条 tab 会永久卡死，只能重启浏览器。
+   * CDP 对"没有对话框"会返回 "No dialog is showing"，正好当探测用。
+   *
+   * @returns {null|{type,message,accept,auto,recovered:true}} 解开了就返回信息
+   */
+  async recoverBlockedTab(tabId) {
+    const tid = tabId !== undefined ? tabId : this.activeTab;
+    const decision = dialogPolicy.decideDialog({ type: 'confirm' }, { policy: this._dialogPolicyNow() });
+    if (!decision.auto) return null;          // manual 策略：不擅自替人点
+    const view = this._getView(tid);
+    const wc = view && view.webContents;
+    if (!wc || wc.isDestroyed()) return null;
+    try {
+      await withDeadline(
+        wc.debugger.sendCommand('Page.handleJavaScriptDialog', { accept: decision.accept }),
+        2000,
+        'dialog_probe'
+      );
+    } catch (_e) {
+      return null;                            // 没有对话框（或 CDP 不可用）
+    }
+    const known = this._openDialogs.get(tid) || {};
+    this._openDialogs.delete(tid);
+    const info = {
+      type: known.type || 'unknown',
+      message: known.message || '',
+      accept: !!decision.accept,
+      auto: true,
+      recovered: true,
+      at: Date.now(),
+    };
+    this._lastDialog.set(tid, info);
+    return info;
+  }
+
+  /** 取"这次动作期间"处理过的对话框（回执用）。 */
+  _dialogSince(tabId, since) {
+    const d = this._lastDialog.get(tabId);
+    if (!d || d.at < since) return null;
+    const { at, ...rest } = d;
+    return rest;
+  }
+
   _ensureCdp(tabId, view, domain) {
     try {
       const wc = view.webContents;
@@ -3983,6 +4144,9 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
         // Single shared listener per tab -> no duplicate broadcasts even when
         // many sessions subscribe to network/runtime events on the same tab.
         wc.debugger.on('message', (_event, method, params) => this._onCdpMessage(tabId, method, params));
+        // 任何 tab 一旦挂上 CDP，就顺手盯住对话框：漏掉一个 alert 会让整条 tab
+        // 永久卡死（渲染器被阻塞，后续每条命令都超时）。
+        this._ensureDialogWatch(tabId, view);
       }
       const entry = this._cdpTabs.get(tabId);
       if (!entry.domains.has(domain)) {
@@ -4132,6 +4296,16 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
   }
 
   _onCdpMessage(tabId, method, params) {
+    // 浏览器级对话框：**必须在最前面处理**，且不能受任何订阅条件限制 ——
+    // 它决定这条 tab 会不会被永久冻结（见 _ensureDialogWatch 注释）。
+    if (method === 'Page.javascriptDialogOpening') {
+      this._handleDialogOpening(tabId, params).catch(() => {});
+      return;
+    }
+    if (method === 'Page.javascriptDialogClosed') {
+      this._openDialogs.delete(tabId);
+      return;
+    }
     // 抓包：请求侧（method / headers / POST body / initiator）与响应侧都落进
     // network_monitor；旧的网络事件推送行为保持不变。
     if (typeof method === 'string' && method.indexOf('Network.') === 0) {

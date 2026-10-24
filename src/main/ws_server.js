@@ -142,14 +142,23 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
               send({ jsonrpc: '2.0', id, result });
             } catch (e) {
               if (e && e.__deadline) {
+                // 外层预算可能先于 page_manager 内层到期（内层还要等动作前探针）。
+                // 所以这条兜底路径也要能识别"是对话框把页面冻住了"—— 否则用户
+                // 看到的就是"点了删除，超时"，而屏幕上那个原生确认框没人应答。
+                const dlg = await Promise.resolve()
+                  .then(() => pageManager.recoverBlockedTab?.(tabId))
+                  .catch(() => null);
                 send({
                   jsonrpc: '2.0', id,
                   result: {
                     success: false,
-                    error: `${e.message} — the page's main thread is likely blocked; the action may have partially applied`,
+                    error: dlg
+                      ? `blocked by a browser-level JS dialog (${dlg.type}) — native sheet, not page DOM; the page is frozen while it is open. It has been ${dlg.accept ? 'accepted' : 'dismissed'} automatically; re-read the tree before retrying.`
+                      : `${e.message} — the page's main thread is likely blocked; the action may have partially applied`,
                     timed_out: true,
                     deadline_ms: budget,
                     action: params.action,
+                    ...(dlg ? { dialog: dlg, retry: 'verify_first' } : {}),
                   },
                 });
               } else {
