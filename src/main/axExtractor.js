@@ -295,6 +295,42 @@ function isRedundantInlineBox(rawChild, parentLabel) {
 
 let readValue = null; // opts.readValue — per-node DOM read hook for textbox values
 
+// 容器角色：这些角色的 AX name 在 Chromium 里是**从子树内容算出来的**（name from
+// contents），所以一个 listitem / generic 的 label 可能是一整段预览文字的拼接。
+// 2026-10-25 知乎私信：`<div class="ChatUserListItem">` 的 label 就是
+// "创作者小助手 10-21 ☄️最新一期「创作打卡挑战赛」活动来喽！…"，于是按文字找链接
+// 会命中这个行容器（点它只选中会话，不跳转），而真正的 `<a>创作打卡挑战赛第五十四期</a>`
+// 在会话面板里。用户看到的现象就是"树里有、点不动"。
+//
+// 判据（纯结构、不看站点）：角色是容器 + 有子孙节点 + 某个子孙的 label（≥4 字）是
+// 自己 label 的**真子串且更短** —— 说明这段文字不是它自己的，是从下面拼上来的。
+// 命中就打 `agg: 1`。读树的人（和 agent）看到 agg 就知道"这是容器，文字归子节点"。
+const AGG_CONTAINER_ROLES = {
+  generic: 1, group: 1, list: 1, listitem: 1, row: 1, cell: 1, gridcell: 1,
+  section: 1, main: 1, article: 1, navigation: 1, complementary: 1, form: 1,
+  table: 1, rowgroup: 1, toolbar: 1, tablist: 1, menu: 1, tabpanel: 1, document: 1,
+};
+
+export function markAggregatedLabels(tree) {
+  const visit = (n) => {
+    if (!n) return { labels: [] };
+    const kids = (n.children || []).map(visit);
+    const descendantLabels = [];
+    for (const k of kids) {
+      if (k.self) descendantLabels.push(k.self);
+      for (const l of k.labels) descendantLabels.push(l);
+    }
+    const label = String(n.label || '');
+    if (AGG_CONTAINER_ROLES[n.role] && label.length >= 8 && descendantLabels.length) {
+      const aggregated = descendantLabels.some((l) => l.length >= 4 && l.length < label.length && label.indexOf(l) >= 0);
+      if (aggregated) n.agg = 1;
+    }
+    return { self: label.length >= 4 ? label : '', labels: descendantLabels };
+  };
+  visit(tree);
+  return tree;
+}
+
 // Public pure API.
 // opts: { idFor: (node)=>string, readValue: (node)=>string }
 export function normalizeAxTree(rawNodes, opts = {}) {
@@ -331,6 +367,7 @@ export function normalizeAxTree(rawNodes, opts = {}) {
   const tree = built.length === 1
     ? built[0]
     : { id: 'root', role: 'generic', label: '', states: ['visible'], actions: [], bounds: { x: 0, y: 0, width: 0, height: 0 }, children: built };
+  markAggregatedLabels(tree);
   tree._debug = { layer: 'ax', version: VERSION_TAG };
   // 有歧义时才给索引（见 summarizeEditors）。挂在树根而不是散在各节点上：
   // 调用方读一次根就能挑好目标，不用把整棵树扫一遍再自己比面积。
@@ -632,4 +669,4 @@ export function diffLite(prevLite, newLite) {
   return { revealed, hidden };
 }
 
-export default { normalizeAxTree, mergeFrameTrees, modalsFromAx, extractFromDebugger, axRead, axRaw, ensureHandles, attachHrefs, filterInteractive, liteSnapshot, diffLite, VERSION_TAG };
+export default { normalizeAxTree, markAggregatedLabels, mergeFrameTrees, modalsFromAx, extractFromDebugger, axRead, axRaw, ensureHandles, attachHrefs, filterInteractive, liteSnapshot, diffLite, VERSION_TAG };

@@ -22,6 +22,9 @@ import pageProbe from '../shared/page_probe.js';
 // Electron 画的原生 sheet，不在 DOM、不在 AX 树，而且**打开期间渲染器被阻塞**，
 // 所以必须由主进程通过 CDP Page.handleJavaScriptDialog 应答 —— 见该模块头部说明。
 import dialogPolicy from '../shared/dialog_policy.cjs';
+// "你点的是容器"诊断：容器节点的 label 是从子孙文字拼出来的，点它往往什么都不发生。
+// 见 shared/wrapper_hint.js 顶部（2026-10-25 知乎私信活动链接事故）。
+import { wrapperHintExpr, wrapperHintText } from '../shared/wrapper_hint.js';
 // 默认读法（DOM extractor）的"哪个 editable 才是正文"索引。AX 路径在
 // normalizeAxTree 里已经自带，这条补的是默认路径 —— 见文件内注释。
 import editorsProbe from '../shared/editors_probe.js';
@@ -1485,6 +1488,13 @@ class PageManager {
       }
       const dlg = this._dialogSince(tid, startedAt);
       if (dlg) out = { ...out, dialog: dlg };
+      // 点"成功"了但页面没变，而目标自身不带文字（文字是从子节点拼出来的）——
+      // 这是"树里有、点不动"最常见的一种：点在了包着一整段文字的容器上。
+      // 只在这种组合下才去页面里找真正的归属节点：正常成功的点击不付这份代价。
+      if (action === 'click' && out && out.success && out.page_changed === false && target) {
+        const w = await this._wrapperHint(tid, target).catch(() => null);
+        if (w) out = { ...out, wrapper: w, effect_hint: wrapperHintText(w) };
+      }
       return out;
     } catch (e) {
       if (e && e.__deadline) {
@@ -1542,6 +1552,20 @@ class PageManager {
       } catch (_) { /* 诊断失败不影响主回执 */ }
     }
     return withEffectState(res, extras);
+  }
+
+  /**
+   * 「这个目标是不是个包着文字的容器」—— 是的话返回那段文字真正的归属节点。
+   *
+   * 为什么只在 click 且 page_changed=false 时才跑：这是"点不动"的信号，
+   * 正常成功的点击没有理由再做一次页面扫描。诊断永远不能成为常开开销。
+   * 任何异常/超时都吞掉（返回 null）：观测能力不足不能让动作本身失败。
+   */
+  async _wrapperHint(tid, target) {
+    const js = wrapperHintExpr(target);
+    const v = await withDeadline(this.evaluate(js, tid), 1500, 'wrapper_hint').catch(() => null);
+    if (!v || !v.is_wrapper) return null;
+    return v;
   }
 
   async _executeActionInner(action, target, params = {}, tabId) {
