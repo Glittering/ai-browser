@@ -27,7 +27,11 @@ const args = process.argv.slice(2);
 const dry = args.includes('--dry');
 const bumpKind = args.find((a) => ['patch', 'minor', 'major'].includes(a)) || 'patch';
 const notesIdx = args.indexOf('--notes');
-const notesFile = notesIdx >= 0 ? args[notesIdx + 1] : null;
+const notesArg = notesIdx >= 0 ? args[notesIdx + 1] : null;
+// --notes 既接受仓库内相对路径，也接受绝对路径（写手稿时通常放在 /tmp）。
+// path.join(ROOT, '/tmp/x') 会拼出 ROOT/tmp/x 这种不存在的路径，所以先判绝对。
+const notesPath = notesArg ? (path.isAbsolute(notesArg) ? notesArg : path.join(ROOT, notesArg)) : null;
+const notesFile = notesPath && fs.existsSync(notesPath) ? notesPath : null;
 // 全量测试 4 分钟起，发版时默认只跑"会拦住错误发版"的那几个：
 // 版本一致性、导入完整性、schema 预算。其余靠 CI / 平时。
 const fullTests = args.includes('--full-test');
@@ -125,8 +129,8 @@ mark('测试');
 
 // ---- 3. commit + tag ------------------------------------------------------
 step('提交并打 tag');
-const notes = notesFile && fs.existsSync(path.join(ROOT, notesFile))
-  ? fs.readFileSync(path.join(ROOT, notesFile), 'utf8').trim()
+const notes = notesFile
+  ? fs.readFileSync(notesFile, 'utf8').trim()
   : `v${to}`;
 git('add', 'package.json', 'server.json', 'src/shared/version.js');
 git('commit', '-m', `chore(release): v${to}`);
@@ -158,6 +162,46 @@ try {
 } catch (e) {
   fail('推送失败（网络或权限）：' + String(e.message).split('\n')[0]);
   warn(`本地 commit 与 tag 都在，网络恢复后执行：git push origin main dev v${to}`);
+}
+
+// ---- 4.5 GitHub Release ---------------------------------------------------
+// **tag ≠ Release**。git tag 只是仓库里的一个 ref，GitHub 的 /releases 页面
+// 读的是 Release 对象；只打 tag 不建 Release，页面会一直停在很久以前的版本
+// （2026-10-24 用户就是在这里发现"releases 还是 2.1.1"，而 tag 已经有 2.1.7）。
+//
+// 用 --generate-notes：GitHub 按 commit 自动生成 changelog，比手写更容易保持。
+// 幂等：重复跑发版时该 tag 的 Release 已存在就跳过，不报错。
+step('创建 GitHub Release');
+let releaseOk = false;
+{
+  const hasGh = spawnSync('gh', ['--version'], { encoding: 'utf8' }).status === 0;
+  if (!hasGh) {
+    warn('未找到 gh CLI，跳过 Release 创建。补救：gh release create v' + to + ' --generate-notes');
+  } else {
+    const exists = spawnSync('gh', ['release', 'view', `v${to}`], { cwd: ROOT, encoding: 'utf8' }).status === 0;
+    if (exists) {
+      ok(`v${to} 的 Release 已存在，跳过`);
+      releaseOk = true;
+      mark('github release');
+    } else {
+      const argv = ['release', 'create', `v${to}`, '--verify-tag', '--latest', '--title', `v${to}`];
+      if (notesFile) {
+        argv.push('--notes-file', notesFile);
+      } else {
+        argv.push('--generate-notes');
+      }
+      const r = spawnSync('gh', argv, { cwd: ROOT, encoding: 'utf8' });
+      const out = `${r.stdout || ''}${r.stderr || ''}`.trim();
+      if (r.status === 0) {
+        ok('Release 已创建：' + out.split('\n').filter(Boolean).pop());
+        releaseOk = true;
+        mark('github release');
+      } else {
+        fail('创建 Release 失败：' + out.split('\n').filter(Boolean).slice(-3).join(' | '));
+        warn(`补救：gh release create v${to} --verify-tag --latest --generate-notes`);
+      }
+    }
+  }
 }
 
 // ---- 5. 打包（桌面 App）---------------------------------------------------
@@ -200,6 +244,24 @@ step('打包桌面 App');
     fail('打包产物与源码不一致，发版中止（否则用户装的还是旧代码）：');
     console.log((v.stdout || '').split('\n').map((l) => '    ' + l).join('\n'));
     process.exit(1);
+  }
+
+  // 把 dmg 挂到 Release 上 —— 否则 /releases 页面只有一段 changelog，用户还得
+  // 自己去找 App。上传放在校验之后：不一致的产物绝对不能对外发。
+  const dmg = path.join(ROOT, 'dist', `AI-Browser-${to}-arm64.dmg`);
+  if (releaseOk && fs.existsSync(dmg)) {
+    const up = spawnSync('gh', ['release', 'upload', `v${to}`, dmg, '--clobber'], {
+      cwd: ROOT, encoding: 'utf8',
+    });
+    if (up.status === 0) {
+      ok(`dmg 已挂到 Release（${(fs.statSync(dmg).size / 1024 / 1024).toFixed(1)} MB）`);
+      mark('release asset');
+    } else {
+      fail('dmg 上传失败：' + `${up.stdout || ''}${up.stderr || ''}`.trim().split('\n').slice(-2).join(' | '));
+      warn(`补救：gh release upload v${to} ${dmg} --clobber`);
+    }
+  } else if (!fs.existsSync(dmg)) {
+    warn('dmg 不存在，跳过上传');
   }
 }
 
@@ -319,7 +381,7 @@ if (process.platform !== 'darwin') {
 // ---- 摘要 -----------------------------------------------------------------
 console.log(`\n${c(36)}── v${to} 发版摘要 ──${c(0)}`);
 console.log('   已完成: ' + (done.length ? done.join(' → ') : '（无）'));
-const skipped = ['版本号', '测试', 'commit', 'tag', 'git push', '打包', '打包校验', 'npm publish', 'mcp registry', '安装']
+const skipped = ['版本号', '测试', 'commit', 'tag', 'git push', 'github release', '打包', '打包校验', 'release asset', 'npm publish', 'mcp registry', '安装']
   .filter((s) => !done.includes(s));
 if (skipped.length) console.log(`   未完成: ${skipped.join(', ')}`);
 process.exit(skipped.length ? 2 : 0);
