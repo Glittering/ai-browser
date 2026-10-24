@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ai-browser 全平台运营效果评估报告 · 2026-10-24</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, "PingFang SC", "Helvetica Neue", "Microsoft YaHei", sans-serif; background: #f5f6f8; color: #1f2329; line-height: 1.7; padding: 32px 20px; }
+  .wrap { max-width: 980px; margin: 0 auto; }
+  .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 28px 32px; margin-bottom: 22px; box-shadow: 0 1px 3px rgba(0,0,0,.04); }
+  h1 { font-size: 26px; margin-bottom: 6px; }
+  .sub { color: #6b7280; font-size: 13px; margin-bottom: 18px; }
+  h2 { font-size: 19px; margin: 26px 0 12px; padding-left: 10px; border-left: 4px solid #2563eb; }
+  h3 { font-size: 15px; margin: 18px 0 8px; color: #111827; }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 13px; }
+  th { background: #f3f4f6; text-align: left; padding: 8px 10px; border: 1px solid #e5e7eb; font-weight: 600; white-space: nowrap; }
+  td { padding: 8px 10px; border: 1px solid #e5e7eb; vertical-align: top; }
+  tr:nth-child(even) td { background: #fafbfc; }
+  .num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .tag { display: inline-block; padding: 1px 8px; border-radius: 4px; font-size: 12px; font-weight: 600; margin-right: 4px; }
+  .ok { background: #dcfce7; color: #15803d; }
+  .warn { background: #fef3c7; color: #b45309; }
+  .bad { background: #fee2e2; color: #b91c1c; }
+  .info { background: #dbeafe; color: #1d4ed8; }
+  .gray { background: #f3f4f6; color: #4b5563; }
+  .kpi { display: flex; gap: 14px; flex-wrap: wrap; margin: 14px 0; }
+  .kpi .box { flex: 1; min-width: 140px; background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 10px; padding: 14px 16px; }
+  .kpi .v { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .kpi .l { font-size: 12px; color: #6b7280; margin-top: 2px; }
+  .callout { border-radius: 8px; padding: 12px 16px; margin: 12px 0; font-size: 13.5px; }
+  .c-red { background: #fef2f2; border: 1px solid #fecaca; }
+  .c-amber { background: #fffbeb; border: 1px solid #fde68a; }
+  .c-blue { background: #eff6ff; border: 1px solid #bfdbfe; }
+  .c-green { background: #f0fdf4; border: 1px solid #bbf7d0; }
+  ul, ol { padding-left: 22px; margin: 8px 0; }
+  li { margin: 4px 0; font-size: 13.5px; }
+  p { font-size: 13.5px; margin: 8px 0; }
+  .small { font-size: 12px; color: #6b7280; }
+  code { background: #f3f4f6; padding: 1px 6px; border-radius: 4px; font-size: 12.5px; font-family: "SF Mono", Menlo, monospace; }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 720px) { .two-col { grid-template-columns: 1fr; } }
+  .footer { text-align: center; color: #9ca3af; font-size: 12px; margin-top: 10px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<div class="card">
+  <h1>ai-browser 全平台运营效果评估报告</h1>
+  <div class="sub">评估日期 2026-10-24（数据当天实测采集）· 对比基线 2026-10-21 全平台复盘 · 覆盖 10 个投放渠道 / 22 篇内容 · GitHub <code>Glittering/ai-browser</code> · npm <code>@glittering0717/ai-browser</code></div>
+
+  <div class="kpi">
+    <div class="box"><div class="v">4</div><div class="l">GitHub stars（持平 7 天）</div></div>
+    <div class="box"><div class="v">48</div><div class="l">GitHub views14（10-22 起冻结）</div></div>
+    <div class="box"><div class="v">~1000</div><div class="l">国内平台累计阅读/播放</div></div>
+    <div class="box"><div class="v">3 篇</div><div class="l">知乎今日新发回答（均未折叠）</div></div>
+    <div class="box"><div class="v">1 篇</div><div class="l">CSDN 草稿卡住 48h+（最高优先待办）</div></div>
+  </div>
+
+  <div class="callout c-blue"><b>一句话结论：</b>内容产能已经不是瓶颈（10-22 至 10-24 发了 7 篇新内容），瓶颈按严重度排序是——① <b>CSDN#5 草稿卡在发布执行链路 48h 无人修</b>（流程问题，第二次发生同类空转）；② <b>掘金 CTR 2.5–4.4% 长期低于 5% 健康线</b>（曝光给足了，点击接不住）；③ <b>知乎账号权重受损</b>（2 个回答被折叠、4 个内容零互动，今天 3 连发未折叠是修复起点）；④ <b>GitHub views14 对内容增量零响应</b>（国内总触达太小，换算不出仓库 delta，漏斗真正断点在顶部）。</div>
+</div>
+
+<div class="card">
+  <h2>一、全平台横向数据（10-24 实测 vs 10-21 基线）</h2>
+  <table>
+    <tr><th>平台 / 内容</th><th>发布时间</th><th>阅读/播放</th><th>赞</th><th>收藏</th><th>评论</th><th>较 10-21 基线</th><th>状态判定</th></tr>
+    <tr><td>CSDN#1 语义树方案</td><td>10-17</td><td class="num">309</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">297→309（+12）</td><td><span class="tag ok">SEO 长尾</span>增速见顶</td></tr>
+    <tr><td>CSDN#2 不截图不 OCR</td><td>10-20</td><td class="num">260</td><td class="num">3</td><td class="num">5</td><td class="num">0</td><td class="num">301→260（↓）</td><td><span class="tag warn">口径存疑</span>疑反作弊扣量</td></tr>
+    <tr><td>CSDN#3 三方案选型</td><td>10-22</td><td class="num">278</td><td class="num">1</td><td class="num">2</td><td class="num">0</td><td class="num">9→278</td><td><span class="tag ok">48h 达标</span>慢热兑现</td></tr>
+    <tr><td>CSDN#4 富文本编辑器自动化</td><td>10-24 12:15</td><td class="num">77</td><td class="num">1</td><td class="num">1</td><td class="num">0</td><td class="num">3→77（13.5h）</td><td><span class="tag info">48h 判定线</span>10-26 回采</td></tr>
+    <tr><td>CSDN#5 MCP 排障清单</td><td>10-22</td><td class="num">0</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">草稿→草稿</td><td><span class="tag bad">最高优先</span>连续 48h 未发布</td></tr>
+    <tr><td>CSDN#6 Agent 跑 8 平台</td><td>10-23 15:07</td><td class="num">132</td><td class="num">0</td><td class="num">4</td><td class="num">0</td><td class="num">126→132</td><td><span class="tag ok">阅读 ≥100 达成</span>收藏差 1</td></tr>
+    <tr><td>掘金#1 语义树（未挂话题）</td><td>10-16</td><td class="num">59</td><td class="num">0</td><td class="num">0</td><td class="num">0</td><td class="num">42→59</td><td><span class="tag gray">纯搜索长尾</span>无分发</td></tr>
+    <tr><td>掘金#2 三方案实测（挂 AI 编程）</td><td>10-19</td><td class="num">61</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">34→61</td><td><span class="tag warn">CTR ~4.4%</span>低于 5% 线</td></tr>
+    <tr><td>掘金#3 Dogfooding 实录</td><td>10-23</td><td class="num">53–56</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">新发</td><td><span class="tag warn">与老文持平</span>未破点击密码</td></tr>
+    <tr><td>知乎 文章#1</td><td>10-16</td><td class="num">—</td><td class="num">0</td><td class="num">—</td><td class="num">0</td><td class="num">持平</td><td><span class="tag bad">零互动</span>营销腔旧稿</td></tr>
+    <tr><td>知乎 专栏#3</td><td>10-23</td><td class="num">—</td><td class="num">0</td><td class="num">—</td><td class="num">0</td><td class="num">新发</td><td><span class="tag bad">零互动</span>冷启动</td></tr>
+    <tr><td>知乎 回答#1（手机 Agent）</td><td>10-20</td><td class="num">—</td><td class="num">0</td><td class="num">—</td><td class="num">0</td><td class="num">持平</td><td><span class="tag bad">已被折叠</span>曝光受限</td></tr>
+    <tr><td>知乎 回答#2（MCP 命令行）</td><td>10-23</td><td class="num">—</td><td class="num">0</td><td class="num">—</td><td class="num">0</td><td class="num">持平</td><td><span class="tag bad">已被折叠</span>曝光受限</td></tr>
+    <tr><td>知乎 回答#3（省时间）</td><td><b>10-24 11:18</b></td><td class="num">—</td><td class="num">0</td><td class="num">—</td><td class="num">0</td><td class="num">新发</td><td><span class="tag ok">未折叠</span>问题 61 浏览</td></tr>
+    <tr><td>知乎 回答#4（多模型路由）</td><td><b>10-24 11:21</b></td><td class="num">—</td><td class="num">0</td><td class="num">—</td><td class="num">0</td><td class="num">新发</td><td><span class="tag ok">未折叠</span>问题 737 浏览</td></tr>
+    <tr><td>知乎 回答#5（深度研究 vs agent）</td><td><b>10-24 11:29</b></td><td class="num">—</td><td class="num">0</td><td class="num">—</td><td class="num">0</td><td class="num">新发</td><td><span class="tag ok">未折叠</span>问题 518 浏览</td></tr>
+    <tr><td>OSChina#1 可见浏览器</td><td>10-19</td><td class="num">148</td><td class="num">2</td><td class="num">—</td><td class="num">0</td><td class="num">~30→148（+118）</td><td><span class="tag ok">复审已过</span>慢热持续</td></tr>
+    <tr><td>OSChina#3 Agent 接管 8 平台</td><td>10-23</td><td class="num">47</td><td class="num">1</td><td class="num">—</td><td class="num">0</td><td class="num">新发</td><td><span class="tag ok">复审已过</span>无审核标记</td></tr>
+    <tr><td>51CTO#1 语义树落地</td><td>10-19</td><td class="num">13</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">8→13</td><td><span class="tag gray">已过审</span>低量</td></tr>
+    <tr><td>51CTO#3 8 平台落地实践</td><td>10-23</td><td class="num">11</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">新发</td><td><span class="tag gray">人工审核中</span>留足 24h</td></tr>
+    <tr><td>头条#1（10-17 稿）</td><td>10-17</td><td class="num">前台不可见</td><td class="num">—</td><td class="num">—</td><td class="num">1</td><td class="num">评论 +1</td><td><span class="tag warn">数据口径缺</span>只能拿评论增量</td></tr>
+    <tr><td>头条#2（8 平台一句话）</td><td>10-23</td><td class="num">前台不可见</td><td class="num">—</td><td class="num">—</td><td class="num">0</td><td class="num">新发</td><td><span class="tag warn">投放恢复后</span>待账号决策</td></tr>
+    <tr><td>B站 视频</td><td>10-17</td><td class="num">17 播放</td><td class="num">2</td><td class="num">0</td><td class="num">0</td><td class="num">15→17</td><td><span class="tag gray">缺 demo 录屏</span>阻塞中</td></tr>
+    <tr><td>B站 专栏 opus</td><td>10-17</td><td class="num">4</td><td class="num">0</td><td class="num">—</td><td class="num">0</td><td class="num">本次未采到</td><td><span class="tag gray">暂停</span>与视频同内容</td></tr>
+    <tr><td>微博</td><td>10-21</td><td class="num">9</td><td class="num">—</td><td class="num">—</td><td class="num">1 转发</td><td class="num">1→9</td><td><span class="tag gray">归档达成</span>短内容渠道</td></tr>
+    <tr><td>简书#1</td><td>10-19</td><td class="num">10</td><td class="num">0</td><td class="num">—</td><td class="num">0</td><td class="num">7→10</td><td><span class="tag gray">归档达成</span></td></tr>
+    <tr><td>简书#3（8 平台随笔）</td><td>10-23</td><td class="num">2</td><td class="num">0</td><td class="num">—</td><td class="num">0</td><td class="num">锁文→已解锁</td><td><span class="tag ok">申诉成功</span>反垃圾误判已解除</td></tr>
+  </table>
+  <p class="small">口径说明：① CSDN#2 阅读 301→260、赞 18→3、藏 21→5，与平台其余文章只涨不跌的走势相反，疑似反作弊扣量或数据刷新口径变化，如实记录差异、不做单方面解读，下轮回采再确认；② 头条/B站 opus 前台不显示阅读数，用评论增量 + 基线值；③ 掘金互动数据本次未采到（新版互动按钮 aria-label 不可用），只记录后台阅读真值；④ 知乎所有内容的赞同/评论为 API 或页面 initialData 真值。</p>
+</div>
+
+<div class="card">
+  <h2>二、漏斗诊断：触达 → 阅读 → 互动 → 仓库访问</h2>
+  <table>
+    <tr><th>漏斗段</th><th>现状（证据）</th><th>判定</th></tr>
+    <tr><td><b>① 触达（曝光）</b></td><td>掘金#2 单篇展现 1380 是全平台唯一规模化曝光；其余平台均无前台曝光数据（CSDN 搜索直达、知乎问题页浏览）</td><td><span class="tag bad">总触达太小</span>真正瓶颈在顶部</td></tr>
+    <tr><td><b>② 阅读（点击）</b></td><td>掘金 CTR 2.5–4.4%（1380 展现 → 61 阅读）；头条 CTR 3.5%（369→13）；CSDN 搜索点击正常（309/260/278）</td><td><span class="tag bad">推荐池 CTR 全线低于 5%</span>标题是唯一变量</td></tr>
+    <tr><td><b>③ 互动（赞藏评）</b></td><td>CSDN#2 曾是互动之王（18 赞/21 藏）但本次回采数据大降；全平台评论总数 ≈3；知乎 4 个内容 + 今天 3 个回答全部 0 赞同 0 评论</td><td><span class="tag warn">弱</span>与折叠、冷启动、低曝光互因果</td></tr>
+    <tr><td><b>④ 仓库访问</b></td><td>GitHub views14 卡在 48（10-22 零增量、10-23 仅 +1）；同期发了 7 篇新内容；referrers 仍为 0（已定为计量假象：国内平台外链全部走中转不带 referrer）</td><td><span class="tag bad">零响应</span>但按 ①② 换算本就不该有大 delta</td></tr>
+  </table>
+  <div class="callout c-amber"><b>漏斗结论：</b>10-21 曾判断「漏斗断在第三段（阅读→点仓库）」，本轮数据推翻该判断的权重——同期国内总阅读 ≈1000，其中过半来自 CSDN 搜索长尾（老文），<b>新增内容的阅读贡献极小</b>，views14 冻结是顶部触达不足的必然结果，不是CTA 断裂。**后续主攻方向回到漏斗顶部：掘金/头条的推荐池 CTR + CSDN 新文进池速度**。仓库侧继续用 views/clones/stars delta 衡量，不再盯 referrers。</div>
+  <h3>GitHub / npm 侧（10-24 采集）</h3>
+  <table>
+    <tr><th>指标</th><th>10-21 基线</th><th>10-24 现值</th><th>判读</th></tr>
+    <tr><td>stars</td><td class="num">4</td><td class="num">4</td><td>持平 7 天，无自然增长</td></tr>
+    <tr><td>views14 / uniques</td><td class="num">48 / 28</td><td class="num">48 / 28</td><td>冻结；10-22 零、10-23 仅 +1</td></tr>
+    <tr><td>clones14 / uniques</td><td class="num">873 / 272</td><td class="num">1003 / 315</td><td>clones ≈ 21× views，镜像/扫描器特征，不计人类增长</td></tr>
+    <tr><td>npm latest</td><td class="num">2.1.1</td><td class="num">2.1.5</td><td>版本线正常推进</td></tr>
+    <tr><td>npm 周下载</td><td class="num">410</td><td class="num">397–444</td><td>较 10-20 峰值 410 略降，2.1.0 下载潮未延续</td></tr>
+    <tr><td>MCP Registry</td><td class="num">2.1.1 active</td><td class="num">2.1.1 active</td><td>正常（落后 npm 一个 minor，下轮发版同步）</td></tr>
+  </table>
+</div>
+
+<div class="card">
+  <h2>三、分平台反思（每平台：效果 → 反思 → 下一步）</h2>
+
+  <h3>CSDN —— 唯一有量的渠道，但出现了两个流程红灯</h3>
+  <p><b>效果：</b>6 篇已发 + 1 篇草稿；阅读 77–309；#6 达成 48h 破百判定线（126→132）；#4 发布 13.5h 到 77 阅读、增速可观；账号累计 7 原创 / 22 赞 / 29 藏 / 0 粉。</p>
+  <p><b>反思：</b>① SEO 长尾型平台，「选题+标题进搜索池」是被反复验证的路径（#3 从 9 到 278、#6 两天 132）；② <b>#5 草稿卡了整整 48h+</b>——24h 回采就提出「补发布」，48h 复查发现该动作无人执行，期间 #6 补发、#4 发布都在推进，唯独 #5 没动。这是本轮最严重的流程问题：<b>回采结论没有载体，第二次发生同类空转</b>（CSDN#5 第一次、知乎#2 折叠观察第二次）；③ #2 互动数据回降（301→260、18 赞→3、21 藏→5）原因未明，需下轮确认；④ 封面上传链路已判定不可用，不再重复踩坑。</p>
+  <p><b>下一步：</b>立即补发 #5 草稿（正文完好，走 `csdn6_repub.mjs` 已验证路径）；发布后重新起算 24h；以后每条 24h 回采结论必须挂到具体执行任务上。</p>
+
+  <h3>掘金 —— 分发开关已验证，点击密码还没找到</h3>
+  <p><b>效果：</b>#2 展现 1380 / 阅读 61（CTR ~4.4%）；#1 未挂话题阅读 59 全来自搜索；#3 新文 53–56，与两篇老文持平。</p>
+  <p><b>反思：</b>① 「挂话题 = 分发开关」结论稳固（#1 vs #2 的对照）；② 10-22 诊断「曝光给足、瓶颈在标题」被本轮数据再次确认——#3 换成 Dogfooding 真实数据题材，阅读仍与老文持平，说明<b>问题不在选题类型，在标题结构</b>；③ 账号 0 粉丝 / 掘力值 35，仍在新号成长期；④ 遗留人工项：旧文 7699096352638599211 待删 + 3 条重复自评待删 2 条。</p>
+  <p><b>下一步：</b>对 #2/#3 做标题 A/B 式改写测试（同选题重发或编辑），CTR 判定线 5%；人工清理旧文和重复评论。</p>
+
+  <h3>知乎 —— 权重受损是主要矛盾，今天 3 连发是修复起点</h3>
+  <p><b>效果：</b>4 个历史内容（2 文章 + 2 回答）全部 0 赞同 0 评论；2 个回答被折叠（曝光受限、归因不干净）；今天 3 个新回答（省时间 / 多模型路由 / 深度研究 vs agent）发布后<b>均未折叠</b>，落点问题浏览 61 / 737 / 518。</p>
+  <p><b>反思：</b>① 折叠是机制问题不是内容问题（回答#2 正文完整可读、无违规标记），账号在知乎社区的可信度状态需要修复；② 落点筛选线（关注 ≥20）只被 #2 严格满足（38 关注/18,888 浏览）却仍被折叠，说明筛选线管得住曝光、管不住折叠；③ 今天 3 连发全部未折叠是正面信号——<b>新内容没有被立即打压</b>；④ 0 赞同符合冷启动预期，3 个问题合计 1,316 浏览是真实曝光面，48h 后看赞同/收藏增量再判内容质量。</p>
+  <p><b>下一步：</b>48h 回采 3 个回答的赞同/评论/折叠态；参与「创作打卡挑战赛」养账号活跃度（见第五节）；后续知乎发布前后都查 is_collapsed。</p>
+
+  <h3>OSChina —— 性价比最高的渠道</h3>
+  <p><b>效果：</b>#1 从 ~30 慢热到 148 阅读 / 2 赞（+118）；#3 新发 47 阅读 / 1 赞；两篇人工复审均已通过、无审核标记。</p>
+  <p><b>反思：</b>零推广纯内容、复审通过后持续给长尾，是全单位成本最低的渠道；机审对「扫码/滑块」类词误判的问题已在两篇上各踩一次，后续稿件可预判。</p>
+  <p><b>下一步：</b>保持两周一更；新稿发布后主动盯机审结果。</p>
+
+  <h3>51CTO —— 人工审核慢，量低但稳</h3>
+  <p><b>效果：</b>#1 过审后 13 阅读；#3 审核中（留足 24h）。</p>
+  <p><b>反思：</b>审核周期 1–5 天，内容质量过关都能过；阅读量级与账号等级挂钩，短期不作为主渠道。</p>
+  <p><b>下一步：</b>等 #3 过审；一个月后视阅读决定加投或维持。</p>
+
+  <h3>头条 —— 数据口径缺失是最大问题</h3>
+  <p><b>效果：</b>#1 评论 +1、#2 评论 0；前台不显示阅读数，后台表格异步渲染采不到。</p>
+  <b>反思：</b>投放恢复后缺少可衡量数据，等于盲投；账号标签混杂问题未决策。
+  <p><b>下一步：</b>需要用户决策是否继续投放；若继续，先用移动端 UA 的后台页面或人工截图补数据口径。</p>
+
+  <h3>B站 / 微博 / 简书 —— 归档层</h3>
+  <p><b>效果：</b>B站视频 17 播放 / 2 赞（缺 demo 录屏是阻塞项）；微博 9 阅读 / 1 转发；简书#1 阅读 10、#3 申诉成功解锁（阅读 2）。</p>
+  <p><b>反思：</b>三渠道均达成「归档 + 占位」定位；简书#3 的锁文申诉成功证明反垃圾触发点是文末裸 URL + 营销倾向表述，修正稿（去裸 URL）后即解锁——<b>该经验已固化进 md2plain 流程</b>。</p>
+  <p><b>下一步：</b>B站等 demo 录屏补齐后再投；微博/简书维持月度更新。</p>
+</div>
+
+<div class="card">
+  <h2>四、知乎专项（今日重点：消息 + 邀请问答处理实录）</h2>
+
+  <h3>4.1 今日发布的 3 个回答</h3>
+  <table>
+    <tr><th>#</th><th>问题</th><th>aid</th><th>发布</th><th>折叠</th><th>赞同/评论</th><th>问题热度</th><th>角度</th></tr>
+    <tr><td>3</td><td>你用 AIAgent 自动化过哪些重复工作，真的省时间了吗？</td><td class="num">2097406518060642613</td><td class="num">11:18</td><td><span class="tag ok">否</span></td><td class="num">0 / 0</td><td class="num">61 浏览 / 2 关注</td><td>Dogfooding 诚实账单 + 三个摔坑教训</td></tr>
+    <tr><td>4</td><td>有没有 AI agent 应用能在同一任务中分配调用不同模型？</td><td class="num">2097407489935422059</td><td class="num">11:21</td><td><span class="tag ok">否</span></td><td class="num">0 / 0</td><td class="num">737 浏览 / 11 关注</td><td>三级路由机制拆解 + 「验证不是分配」</td></tr>
+    <tr><td>5</td><td>为什么我喜欢深度研究功能、不喜欢 AI agent？自主性太强？</td><td class="num">2097409392450736482</td><td class="num">11:29</td><td><span class="tag ok">否</span></td><td class="num">0 / 0</td><td class="num">518 浏览 / 8 关注</td><td>人机信任结构 + 自主性按验收成本切层</td></tr>
+  </table>
+  <p>三篇均：T1 讲理不吹、800–1500 字、无外链、四条铁律在位（平台边界 / 扫码滑块归人 / star 退路句 / 定位用稳定 ID）。发布链路全部走 <code>/question/&lt;qid&gt;/write</code> 直链（绕过问题页按钮的 SPA 卡死），paste 后核验字数 + 特征串再点发布，发布后以问题页 initialData 的 entities.answers 真值核验 aid/作者/折叠态——三篇全部「作者 Glittering + is_collapsed=false」。</p>
+
+  <h3>4.2 消息中心处理（51 封私信 + 通知）</h3>
+  <table>
+    <tr><th>类别</th><th>数量</th><th>内容</th><th>处理决定</th></tr>
+    <tr><td>营销 spam</td><td class="num">31 条</td><td>AI技能研究所「AI产品经理进阶训练营」系列广告（最新 10-23 11:01）；另有 2021–2022 年历史引流/推文/版权通知约 12 条</td><td><span class="tag gray">不回</span>回复=确认账号活跃=更多 spam；与项目零相关，回了也没用</td></tr>
+    <tr><td>官方活动</td><td class="num">1 条</td><td>创作者小助手「创作打卡挑战赛第五十四期」（10-23 开启，打卡 1 天即可瓜分盐粒，发想法/回答都算）</td><td><span class="tag ok">建议参与</span>低成本养账号权重——而知乎账号权重正是当前最大瓶颈（2 个回答被折叠）</td></tr>
+    <tr><td>邀请问答</td><td class="num">10 个</td><td>见 4.3</td><td>按挂钩度 + 竞争格局分级</td></tr>
+  </table>
+
+  <h3>4.3 十个邀请问题的分级处理</h3>
+  <table>
+    <tr><th>问题</th><th>关注/浏览/回答</th><th>决定</th><th>理由</th></tr>
+    <tr><td>省时间了吗（Dogfooding）</td><td class="num">2 / 61 / 2</td><td><span class="tag ok">已答</span>#3</td><td>先发优势位，0 竞争</td></tr>
+    <tr><td>同一任务分配不同模型</td><td class="num">11 / 737 / 7</td><td><span class="tag ok">已答</span>#4</td><td>真实浏览量 + 与项目机制直接相关</td></tr>
+    <tr><td>深度研究 vs agent</td><td class="num">8 / 518 / 6</td><td><span class="tag ok">已答</span>#5</td><td>问主困惑真实（自主性边界），角度差异不重复</td></tr>
+    <tr><td>ai agent 架构同质化</td><td class="num">91 回答</td><td><span class="tag bad">不投</span></td><td>红海，新回答沉底</td></tr>
+    <tr><td>Agentic Coding 团队规模化瓶颈</td><td class="num">14 / 1202 / 13</td><td><span class="tag bad">不投</span></td><td>13 回答红海 + 我们没有团队落地经验，硬答会露怯</td></tr>
+    <tr><td>以后的 agent 配备给每个普通人吗</td><td class="num">21 / 952 / 15</td><td><span class="tag bad">不投</span></td><td>15 回答红海 + 话题泛，不是我们的差异化</td></tr>
+    <tr><td>理论工作者如何快速转 AI</td><td class="num">1 / 3 / 0</td><td><span class="tag gray">不投</span></td><td>0 回答但仅 3 浏览，发了也没人看</td></tr>
+    <tr><td>AI 做什么事最有用</td><td class="num">2 / 53 / 1</td><td><span class="tag gray">不投</span></td><td>竞争极小，但题材与回答#3 重复（同为省时间账单），按「同题材同平台周期内只发一次」纪律弃</td></tr>
+    <tr><td>零基础学 HTML 的坑</td><td class="num">—</td><td><span class="tag gray">不答</span></td><td>与项目不挂钩</td></tr>
+    <tr><td>学而思平板怎么下载第三方软件</td><td class="num">—</td><td><span class="tag gray">不答</span></td><td>与项目不挂钩</td></tr>
+  </table>
+</div>
+
+<div class="card">
+  <h2>五、回答你的问题：「跟项目不挂钩的，是不是就无所谓了？」</h2>
+  <p><b>不是无所谓——但「不挂钩」内部要分级，不能一刀切，也不能全回。</b>今天的知乎消息正好是三个活样本，处理原则如下：</p>
+  <ol>
+    <li><b>营销 spam（31 条训练营广告）：不回，而且是无成本地忽略。</b>理由很直接：回复任何 spam 都是在向发件方和平台确认「这个号是活的」，只会招来更多；内容与项目零相关，回复了也没有任何转化可能。这类消息的正确处理成本就是 0。</li>
+    <li><b>官方活动（创作者小助手打卡挑战赛）：建议参与，这是「不挂钩但要办」的事。</b>打卡本身跟项目内容没关系，但它养的是<b>账号权重</b>——而知乎账号权重恰恰是我们当前最大的渠道瓶颈（2 个回答被折叠、4 个内容零互动）。一个被折叠压制曝光的账号，发再多挂钩的好内容也出不来。所以这不是「无所谓」，这是在修渠道本身，属于运营动作不是内容动作。</li>
+    <li><b>不挂钩的邀请问题（HTML、学而思平板）：不答，但要知道不答也有成本。</b>知乎的邀请响应率会影响后续邀请质量，长期零响应会降低系统给你推问题的档次。成本可控的做法是：绝大多数不答，偶尔答一个通用向的（比如「AI 做什么最有用」这种）保持响应率——但本次因为题材与已发的回答#3 撞车，按发布纪律弃了。</li>
+    <li><b>挂钩但不投的（架构同质化 91 回答、Agentic Coding 13 回答）：这和「不挂钩」是两回事，别混。</b>它们不是不想答，是竞争格局不答——没有团队落地经验去答团队瓶颈问题，硬答会露怯；91 回答的问题页新回答直接沉底。判断依据是「我们有没有独特的一手经验」，不是「话题相不相同」。</li>
+  </ol>
+  <div class="callout c-green"><b>一句话原则：消息处理按「渠道价值」分级，不按「是否挂钩项目」分级。</b>营销 spam 忽略（成本 0）、官方活动参与（养权重）、不挂钩邀请不答（保响应率底线）、竞争红海不投（保内容口碑）。四类的处理成本截然不同，但没有任何一类是「无所谓」。</div>
+</div>
+
+<div class="card">
+  <h2>六、行动清单（按优先级）</h2>
+  <table>
+    <tr><th>优先级</th><th>动作</th><th>归属</th><th>判定线 / 完成标准</th></tr>
+    <tr><td><span class="tag bad">P0</span></td><td>补发 CSDN#5 草稿（卡了 48h+，正文完好无需重写）</td><td>自动化（下个任务立即执行）</td><td>已发布 tab 出现该标题 + 文章页状态「公开 · N 阅读」；发布后重新起算 24h，阅读 ≥100</td></tr>
+    <tr><td><span class="tag bad">P0</span></td><td>掘金旧文 7699096352638599211 删除 + 3 条重复自评删 2 条</td><td>人工（用户）</td><td>文章页 404 + 评论区无重复</td></tr>
+    <tr><td><span class="tag warn">P1</span></td><td>参与知乎「创作打卡挑战赛」</td><td>人工（低成本）</td><td>连续打卡，观察邀请质量与回答曝光变化</td></tr>
+    <tr><td><span class="tag warn">P1</span></td><td>48h 回采：知乎 3 个回答（赞同 ≥3 / 折叠态）、CSDN#4（阅读 ≥100 / 收藏 ≥5）、CSDN#6 收藏增量、掘金#3 CTR、OSChina#3 增量</td><td>自动化（10-26 排期）</td><td>见各判定线；知乎回答另查 is_collapsed</td></tr>
+    <tr><td><span class="tag warn">P1</span></td><td>掘金标题 A/B 改写（#2/#3 同选题重发测试）</td><td>内容 + 自动化</td><td>CTR ≥5%（基线 4.4%）</td></tr>
+    <tr><td><span class="tag info">P2</span></td><td>流程修复：24h 回采结论必须挂载到具体执行任务，杜绝「查出问题→无人修复→复查结论不变」空转（本轮第二次）</td><td>流程</td><td>每条回采结论有对应 task id</td></tr>
+    <tr><td><span class="tag info">P2</span></td><td>头条数据口径补齐（后台阅读数采集或人工截图）；用户决策头条是否继续投放</td><td>人工（用户）</td><td>能采到展现/阅读真值</td></tr>
+    <tr><td><span class="tag gray">P3</span></td><td>B站 demo 录屏补齐后再投；51CTO#3 等审核（留足 24h）</td><td>阻塞项</td><td>—</td></tr>
+    <tr><td><span class="tag gray">P3</span></td><td>MCP Registry 同步 npm 2.1.5（registry 现 2.1.1）</td><td>自动化（下次发版带上）</td><td>registry latest = npm latest</td></tr>
+  </table>
+</div>
+
+<div class="card">
+  <h2>七、本轮新固化经验（进 playbook / 记忆）</h2>
+  <ul>
+    <li><b>知乎回答发布直链</b>：<code>zhihu.com/question/&lt;qid&gt;/write</code> 直接进编辑器，彻底绕过问题页「写回答」按钮的 SPA 卡死（点按钮后 evaluate 全面超时，换 driver 才恢复）。</li>
+    <li><b>知乎 paste 回执「consumed but could not be read back」≠ 没落地</b>：Draft.js 的 innerText 更新有延迟，回执读不回时用独立 evaluate 轮询 <code>.public-DraftEditor-content</code> 的字数 + 特征串判定，两次都证明内容实际已完整落地。</li>
+    <li><b>知乎草稿自动保存可断点续传</b>：paste 成功后即使 driver 超时被杀，内容已在知乎服务端草稿里，重开 <code>/write</code> 直接点发布即可——今天 3 篇全部靠这个机制在超时后抢救成功。</li>
+    <li><b>CSDN#2 互动数据回降</b>（301→260、18 赞→3、21 藏→5）与全平台只涨不跌的走势相反，疑似反作弊扣量，下轮回采确认后再下结论。</li>
+    <li><b>简书反垃圾触发点确认</b>：文末裸 URL + 营销倾向表述会锁文；修正稿去裸 URL + 走人工申诉可解锁（一稿限 2 次申诉）。</li>
+  </ul>
+</div>
+
+<div class="footer">ai-browser 运营评估报告 · 2026-10-24 · 数据来源：各平台后台真值 / 页面 initialData / GitHub Traffic API / B站公开 API，当天实测采集</div>
+</div>
+</body>
+</html>
