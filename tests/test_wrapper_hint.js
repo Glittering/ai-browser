@@ -78,6 +78,37 @@ describe('wrapperHintExpr — 点容器时指出真正的归属节点', () => {
     if (hint && hint.better_target) expect(hint.better_target.id).not.toBe('e:sec');
   });
 
+
+  it('同一段文字里有多个近似项（第五十期/第五十四期）→ 选整串命中的那个，不是面积最小的', () => {
+    const { run } = page(`
+      <div class="row" data-ai-id="e:div-30" data-w="286">
+        <div>创作者小助手</div>
+        <div>10-21 ☄️最新一期「创作打卡挑战赛」活动来喽！「创作打卡挑战赛第五十四期 」将于 10 月 23 日开始</div>
+      </div>
+      <a data-ai-id="e:a-136" data-w="158">创作打卡挑战赛第五十期</a>
+      <a data-ai-id="e:a-236" data-w="173">创作打卡挑战赛第五十四期</a>
+    `);
+    const w = run('e:div-30');
+    expect(w && w.better_target && w.better_target.id).toBe('e:a-236');
+    expect(w.better_target.exact).toBe(true);
+  });
+
+  it('整串命中的在视口外、近似的在视口内 → 仍然选整串命中（scrollIntoView 会把它带进来）', () => {
+    const { w: win, run } = page(`
+      <div class="row" data-ai-id="e:div-30" data-w="286">
+        <div>创作者小助手</div>
+        <div>「创作打卡挑战赛第五十四期 」将于 10 月 23 日开始</div>
+      </div>
+      <a data-ai-id="e:a-236">创作打卡挑战赛第五十四期</a>
+      <a data-ai-id="e:a-999">创作打卡挑战赛</a>
+    `);
+    // 把整串命中的那个挪到视口外
+    win.document.querySelector('[data-ai-id="e:a-236"]').getBoundingClientRect =
+      () => ({ x: 10, y: -3000, width: 173, height: 17, top: -3000, left: 10, right: 183, bottom: -2983 });
+    const w = run('e:div-30');
+    expect(w && w.better_target && w.better_target.id).toBe('e:a-236');
+  });
+
   it('ref 不存在 → null（不是崩溃）', () => {
     const { run } = page(`<div data-ai-id="e:real">很长的文字在这里用来测试不存在的情况</div>`);
     expect(run('e:not-exist')).toBe(null);

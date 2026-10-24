@@ -54,20 +54,22 @@ export function wrapperHintExpr(aiId) {
     // 而这恰恰就是要找的那个链接。退一步用"8 字窗口命中"：只要候选文字里有连续
     // 8 个字出现在容器文字里，就算相关 —— 中文 8 个字已经足够特异。
     function related(aggText, t) {
-      if (aggText.indexOf(t) >= 0) return true;
-      if (t.length < 8) return false;
+      if (aggText.indexOf(t) >= 0) return 2;      // 整串命中：最可信
+      if (t.length < 8) return 0;
       for (var k = 0; k + 8 <= t.length; k++) {
-        if (aggText.indexOf(t.slice(k, k + 8)) >= 0) return true;
+        if (aggText.indexOf(t.slice(k, k + 8)) >= 0) return 1;
       }
-      return false;
+      return 0;
     }
+    var viewH = window.innerHeight || 800;
     for (var i = 0; i < limit; i++) {
       var c = cands[i];
       if (c === el) continue;
       if (c.contains(el)) continue;             // 目标的祖先：点它等于又点一次外层
       var t = ownText(c);
       if (t.length < 6) continue;
-      if (!related(agg, t)) continue;
+      var match = related(agg, t);
+      if (!match) continue;
       var r = c.getBoundingClientRect();
       if (r.width < 4 || r.height < 4) continue;
       var cs = getComputedStyle(c);
@@ -76,8 +78,23 @@ export function wrapperHintExpr(aiId) {
       var role = String((c.getAttribute && c.getAttribute('role')) || '');
       var clickable = (tag === 'A' || tag === 'BUTTON' || role === 'link' || role === 'button' || cs.cursor === 'pointer');
       var area = Math.max(1, Math.round(r.width) * Math.round(r.height));
-      // 先看能不能点（拦不住点击的节点没有价值），再比谁更精确（面积小的更贴近那段文字）
-      var score = (clickable ? 0 : 1e9) + area;
+      // 排序必须按"相关性"而不是"谁小"：
+      //   ① 整串命中优先于 8 字窗口命中 —— 知乎那边同一条私信里躺着第一期到第五十四期
+      //      五个链接，它们的 8 字窗口全都命中"创作打卡挑战赛"，只按面积排会挑中
+      //      面积最小的那一期（实测挑成了第五十期，还滚在视口外 4500px）；
+      //   ② 视口内优先 —— 用户看到并想点的是屏幕上那个；
+      //   ③ 能点的优先；
+      //   ④ 最后才用面积（越贴近那段文字越精确）。
+      var inView = (r.y + r.height > 0 && r.y < viewH) ? 0 : 1;
+      // 更长的那段文字更具体：同一段预览里"创作打卡挑战赛"和"创作打卡挑战赛第五十四期"
+      // 都是整串命中，但后者才是用户想点的那一期。
+      var specificity = 200 - Math.min(199, t.length);
+      // 排序：整串命中 > 能点 > 更具体（文字更长）> 视口内 > 面积小。
+      // 为什么"更具体"排在"视口内"前面：同一段预览里的第一期…第五十四期五个链接，
+      // 整串命中的只有对的那一期，即使它在视口外也值得点（点击前会 scrollIntoView）；
+      // 反过来点一个"看得见但期数错了"的链接，是把人带到错误页面。
+      var score = (2 - match) * 1e15 + (clickable ? 0 : 1e13)
+        + specificity * 1e9 + inView * 1e8 + Math.min(area, 99999);
       if (!best || score < best.score) {
         best = {
           score: score,
@@ -87,6 +104,7 @@ export function wrapperHintExpr(aiId) {
           text: t.slice(0, 60),
           box: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) },
           clickable: clickable,
+          exact: match === 2,
         };
       }
     }
