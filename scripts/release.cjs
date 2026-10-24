@@ -115,7 +115,7 @@ mark('版本号');
 step(fullTests ? '全量测试' : '发版闸门测试');
 const testFiles = fullTests
   ? []
-  : ['tests/test_version.js', 'tests/test_imports.js', 'tests/test_api_budget.js', 'tests/test_mcp_tools.js'];
+  : ['tests/test_version.js', 'tests/test_imports.js', 'tests/test_api_budget.js', 'tests/test_mcp_tools.js', 'tests/test_release_loop.js'];
 const t = spawnSync('npx', ['vitest', 'run', ...testFiles, '--no-file-parallelism'], {
   cwd: ROOT, encoding: 'utf8',
 });
@@ -383,10 +383,37 @@ if (process.platform !== 'darwin') {
   }
 }
 
+// ---- 8. 验收"装好的那个 App" ----------------------------------------------
+// 前面每一步验的都是"仓库里的东西"：测试跑 dev 树、verify_build 比 asar 里的
+// 字节。但用户双击的是 /Applications 里那个包，**没有人跑过它**。
+// 2026-10-24 两次事故（App 落后 4 个版本 / 对话框修复只在 dev 生效）都出在这一层。
+// 现在装完立刻用 e2e/shipped_ws.cjs 直接 spawn 这个包，跑对话框和多标签关键路径。
+step('验收已安装的 App（在打包产物上跑，不是 dev 树）');
+if (process.platform !== 'darwin' || args.includes('--no-install')) {
+  warn('跳过（非 macOS 或 --no-install）');
+} else {
+  const vEnv = { ...process.env, AI_BROWSER_PORT: '9233' };
+  delete vEnv.ELECTRON_RUN_AS_NODE;
+  delete vEnv.NODE_OPTIONS;
+  const vr = spawnSync(process.execPath, ['e2e/shipped_ws.cjs'], {
+    cwd: ROOT, encoding: 'utf8', env: vEnv,
+  });
+  const vrOut = `${vr.stdout || ''}${vr.stderr || ''}`;
+  const tally = (vrOut.match(/PASS=(\d+) FAIL=(\d+)/) || []).slice(1);
+  if (vr.status === 0) {
+    ok(`已安装的 App 通过验收（PASS=${tally[0] || '?'}）`);
+    mark('产物验收');
+  } else {
+    fail(`已安装的 App 验收失败（PASS=${tally[0] || '?'} FAIL=${tally[1] || '?'}）—— 桌面上那个包的行为和源码不一致：`);
+    console.log((vrOut.split('\n').filter((l) => /FAIL \||ERR|失败明细/.test(l)).slice(0, 12)).map((l) => '    ' + l).join('\n'));
+    warn('补救：npm run verify:app  （默认验 /Applications/AI Browser.app，可用 AIB_APP= 指定）');
+  }
+}
+
 // ---- 摘要 -----------------------------------------------------------------
 console.log(`\n${c(36)}── v${to} 发版摘要 ──${c(0)}`);
 console.log('   已完成: ' + (done.length ? done.join(' → ') : '（无）'));
-const skipped = ['版本号', '测试', 'commit', 'tag', 'git push', 'github release', '打包', '打包校验', 'release asset', 'npm publish', 'mcp registry', '安装']
+const skipped = ['版本号', '测试', 'commit', 'tag', 'git push', 'github release', '打包', '打包校验', 'release asset', 'npm publish', 'mcp registry', '安装', '产物验收']
   .filter((s) => !done.includes(s));
 if (skipped.length) console.log(`   未完成: ${skipped.join(', ')}`);
 process.exit(skipped.length ? 2 : 0);

@@ -80,7 +80,8 @@
     "build": "node scripts/build_dmg.cjs",
     "verify:build": "node scripts/verify_build.cjs",
     "install:app": "node scripts/install_app.cjs",
-    "dialog": "node e2e/dialog_ws.cjs"
+    "dialog": "node e2e/dialog_ws.cjs",
+    "verify:app": "node e2e/shipped_ws.cjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
