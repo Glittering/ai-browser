@@ -1,6 +1,6 @@
 {
   "name": "@glittering0717/ai-browser",
-  "version": "2.1.10",
+  "version": "2.1.11",
   "description": "AI-native browser — renders pixels for humans, structured semantic-tree API for agents. No screenshots, no OCR, no coordinate guessing.",
   "main": "src/main/index.js",
   "bin": {
