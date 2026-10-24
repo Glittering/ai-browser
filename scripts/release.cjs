@@ -184,7 +184,12 @@ let releaseOk = false;
       releaseOk = true;
       mark('github release');
     } else {
-      const argv = ['release', 'create', `v${to}`, '--verify-tag', '--latest', '--title', `v${to}`];
+      // 标题尽量带上人话摘要：notes 的第一行通常写成 "# v2.1.8 — xxx"，
+      // 直接用它，releases 列表就不会是一串光秃秃的版本号。
+      let releaseTitle = `v${to}`;
+      const headLine = String(notes || '').split('\n')[0].replace(/^#+\s*/, '').trim();
+      if (headLine.startsWith(`v${to}`) && headLine.length > `v${to}`.length) releaseTitle = headLine;
+      const argv = ['release', 'create', `v${to}`, '--verify-tag', '--latest', '--title', releaseTitle];
       if (notesFile) {
         argv.push('--notes-file', notesFile);
       } else {
