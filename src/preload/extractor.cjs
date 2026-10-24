@@ -309,6 +309,40 @@ function extractTree() {
   function hasIconInside(el) {
     try { return !!(el.querySelector && el.querySelector("svg,img,i[class],[class*=icon]")); } catch (e) { return false; }
   }
+
+  // ---- label 是否"由子树文字拼出来"（agg 标记的判据）-------------------------
+  //
+  // 为什么需要（2026-10-25 知乎私信活动链接）：列表行 `<div class="ChatUserListItem" onclick>`
+  // 在树里是 `generic`，label 却是整段预览文字的拼接：
+  //   "创作者小助手 10-21 ☄️最新一期「创作打卡挑战赛」活动来喽！「创作打卡挑战赛第五十四期 」将于…"
+  // 于是"按文字找链接"必定先命中这个容器（点它只选中会话），而真链接的 label 只有
+  // 那 11 个字。用户看到的现象是"树里有、点不动"，且完全无从判断为什么。
+  //
+  // 判据是 DOM 事实，不猜：**自身没有直接文字**（own text 为空）却有子元素、
+  // 而 label 又够长 —— 这段 label 只可能是从下面拼上来的，打 agg:1 让读树的人
+  // 一眼看出"文字不归它"。可交互角色（a/button/input…）即使包着 span，文字语义
+  // 也归它自己，不标；aria-label/title 是作者写的名字，也不是拼接，同样不标。
+  var CONTAINER_ROLES = {
+    generic: 1, group: 1, list: 1, listitem: 1, table: 1, row: 1, cell: 1, gridcell: 1,
+    article: 1, region: 1, main: 1, navigation: 1, section: 1, paragraph: 1, none: 1
+  };
+  function ownTextOf(el) {
+    var s = "";
+    try {
+      for (var i = 0; i < el.childNodes.length; i++) {
+        var c = el.childNodes[i];
+        if (c.nodeType === 3) s += c.textContent;
+      }
+    } catch (e) {}
+    return String(s).replace(/\s+/g, " ").trim();
+  }
+  function isAggregatedLabel(el, role, label, labelMeta) {
+    if (!label || label.length < 8) return false;
+    if (!CONTAINER_ROLES[role]) return false;
+    if (labelMeta && labelMeta.kind && labelMeta.kind !== "text") return false;
+    if (!el.children || !el.children.length) return false;
+    return ownTextOf(el).length < 3;
+  }
   function isNamed(el) {
     return !!elementName(el).trim() || hasIconInside(el);
   }
@@ -821,6 +855,14 @@ function extractTree() {
     // 把 aria-label / alt / title / placeholder 排除掉（它们不在 innerText 里）。
     // 正常节点不写，省 token。
     if (labelMeta.kind && labelMeta.kind !== "text") node.label_kind = labelMeta.kind;
+    // label 是**子树文字的拼接**时打 agg:1 —— 读树的人必须能分辨"这段文字是我的"
+    // 和"这段文字在我下面"，否则按文字找链接会命中列表行容器，点了什么都不会发生。
+    // 2026-10-25 知乎私信：`<div class="ChatUserListItem" onclick>` 的 label 成了
+    // "创作者小助手 10-21 ☄️最新一期「创作打卡挑战赛」活动来喽！…"，agent 点它
+    // 只选中会话，真链接（<a>创作打卡挑战赛第五十四期</a>）在会话面板里。
+    // 判据用 DOM 事实而不是猜：自身没有直接文字（own text 为空）却有子元素、
+    // label 还够长 —— 那这段 label 只可能是从下面拼上来的。
+    if (isAggregatedLabel(el, role, label, labelMeta)) node.agg = 1;
     // Attach current value for input/textarea/contenteditable.
     // 截断走共享契约（src/shared/value_contract.cjs）：按 Unicode code point
     // 计数，截断时带 value_truncated / value_full_length / value_fetch_ref，

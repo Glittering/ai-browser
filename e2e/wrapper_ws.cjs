@@ -117,16 +117,28 @@ async function main() {
   const tab = unwrap(await b.call('ui.new_tab', { url: URL })).tab;
   await sleep(1200);
 
-  // 走 AX 读层：agg 标记只在这一层（默认 DOM extractor 没有 AX name 概念）
-  const tree = unwrap(await b.call('ui.get_tree', { tab, subset: 'all', ax: true }));
-  const rows = findNodes(tree && tree.tree, (n) => n.role === 'generic' && /创作者小助手/.test(String(n.label || '')));
-  const links = findNodes(tree && tree.tree, (n) => n.role === 'link' && /第五十四期/.test(String(n.label || '')));
+  // 两条读层都要测：默认（preload DOM extractor，agent 实际用的就是它）
+  // 和 AX 层（get_tree {ax:true}）。agg 标记必须在两条路径上一致 —— 只修一条的话，
+  // 换个读法就又开始"点不动"，而且没有任何报错。
+  const domTree = unwrap(await b.call('ui.get_tree', { tab, subset: 'all' }));
+  const axTree = unwrap(await b.call('ui.get_tree', { tab, subset: 'all', ax: true }));
+
+  const pick = (tree) => ({
+    rows: findNodes(tree && tree.tree, (n) => n.role === 'generic' && /创作者小助手/.test(String(n.label || ''))),
+    links: findNodes(tree && tree.tree, (n) => n.role === 'link' && /第五十四期/.test(String(n.label || ''))),
+  });
+  const dom = pick(domTree);
+  const ax = pick(axTree);
+  const rows = dom.rows.length ? dom.rows : ax.rows;
+  const links = dom.links.length ? dom.links : ax.links;
 
   console.log('\n[W1] 容器的 label 是拼接出来的 → 打 agg:1；文字归属的链接不打');
   {
-    check('W1 树里有会话行容器', rows.length > 0, `rows=${rows.length}`);
+    check('W1 默认读层里有会话行容器', dom.rows.length > 0, `rows=${dom.rows.length}`);
+    check('W1 AX 读层里也有会话行容器', ax.rows.length > 0, `rows=${ax.rows.length}`);
     const row = rows[0] || {};
-    check('W1 行容器带 agg:1', row.agg === 1, JSON.stringify({ id: row.id, agg: row.agg, label: String(row.label || '').slice(0, 40) }));
+    check('W1 行容器带 agg:1（默认读层）', (dom.rows[0] || {}).agg === 1, JSON.stringify({ id: (dom.rows[0] || {}).id, agg: (dom.rows[0] || {}).agg, label: String((dom.rows[0] || {}).label || '').slice(0, 40) }));
+    check('W1 行容器带 agg:1（AX 读层）', (ax.rows[0] || {}).agg === 1, JSON.stringify({ id: (ax.rows[0] || {}).id, agg: (ax.rows[0] || {}).agg }));
     check('W1 树里有真链接', links.length > 0, `links=${links.length}`);
     const link = links[0] || {};
     check('W1 链接没有 agg（文字是它自己的）', link.agg === undefined, JSON.stringify({ id: link.id, agg: link.agg }));
