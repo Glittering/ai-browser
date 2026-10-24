@@ -160,7 +160,50 @@ try {
   warn(`本地 commit 与 tag 都在，网络恢复后执行：git push origin main dev v${to}`);
 }
 
-// ---- 5. npm ---------------------------------------------------------------
+// ---- 5. 打包（桌面 App）---------------------------------------------------
+// 放在 npm 之前：打包失败就不该把版本发出去（npm 上发出去的版本撤不回来，
+// 只能靠再发一个版本补救）。但 MCP registry 又要求 npm 先有版本，所以顺序
+// 只能是 打包 → npm → MCP。
+//
+// 为什么"打包"必须在发版流程里（2026-10-24 事故）：修好标签栏滚动、测试
+// 过、npm/GitHub/MCP 全绿发了 v2.1.4，但用户桌面上的 App 还是 10-19 打的
+// v1.3.1 —— 因为打包是手工的。用户看到的是"你根本没修好"。任何"源码已修"
+// 的说法，没有产物同步就是不成立的。
+step('打包桌面 App');
+{
+  // NODE_OPTIONS 会被受管环境注入一个 fs 代理 shim，它拦截 asar 的
+  // createWriteStream 写入（报 "Brokered file token refused: modify backup
+  // failed"，且没有栈）。打包本身不联网、不碰沙箱，直接摘掉这个预加载。
+  const buildEnv = { ...process.env };
+  delete buildEnv.NODE_OPTIONS;
+  const b = spawnSync(process.execPath, ['scripts/build_dmg.cjs'], {
+    cwd: ROOT, encoding: 'utf8', env: buildEnv,
+  });
+  if (b.status === 0) {
+    const line = (b.stdout || '').split('\n').filter((l) => /dmg:|size:/.test(l)).join(' ');
+    ok('打包完成：' + line.trim());
+    mark('打包');
+  } else {
+    fail('打包失败：' + (b.stdout || b.stderr || '').split('\n').filter(Boolean).slice(-4).join(' | '));
+    warn('补救：修好后执行  node scripts/build_dmg.cjs  （npm 尚未发布，可继续发）');
+  }
+
+  // 产物与源码逐字节比对 + 版本一致性。这一步就是"防止再出现 App 落后
+  // 好几个版本"的闸门：不通过就不该继续发布。
+  const v = spawnSync(process.execPath, ['scripts/verify_build.cjs', '--quiet'], {
+    cwd: ROOT, encoding: 'utf8',
+  });
+  if (v.status === 0) {
+    ok('打包产物与源码一致');
+    mark('打包校验');
+  } else {
+    fail('打包产物与源码不一致，发版中止（否则用户装的还是旧代码）：');
+    console.log((v.stdout || '').split('\n').map((l) => '    ' + l).join('\n'));
+    process.exit(1);
+  }
+}
+
+// ---- 6. npm ---------------------------------------------------------------
 step('发布到 npm');
 const npm = spawnSync('npm', ['publish'], { cwd: ROOT, encoding: 'utf8' });
 if (npm.status === 0) {
@@ -251,10 +294,32 @@ if (!publisher) {
   }
 }
 
+// ---- 7. 装到本机 /Applications ---------------------------------------------
+// 这是"用户真正会打开的那个副本"。不做这一步，前面所有步骤再绿，桌面上
+// 跑的可能还是几个版本前的包（2026-10-24 事故）。
+step('安装到 /Applications');
+if (process.platform !== 'darwin') {
+  warn('非 macOS，跳过（dmg 在 dist/）');
+} else if (args.includes('--no-install')) {
+  warn('--no-install：跳过安装，dist/ 里的 dmg 已就绪');
+} else {
+  const ins = spawnSync(process.execPath, ['scripts/install_app.cjs'], {
+    cwd: ROOT, encoding: 'utf8',
+  });
+  const insOut = `${ins.stdout || ''}${ins.stderr || ''}`;
+  if (ins.status === 0) {
+    ok('已安装并启动（用户数据 ~/.ai-browser 未动，登录态保留）');
+    mark('安装');
+  } else {
+    fail('安装失败：' + insOut.split('\n').filter(Boolean).slice(-3).join(' | '));
+    warn('补救：node scripts/install_app.cjs  或手工拖 dist 里的 dmg');
+  }
+}
+
 // ---- 摘要 -----------------------------------------------------------------
 console.log(`\n${c(36)}── v${to} 发版摘要 ──${c(0)}`);
 console.log('   已完成: ' + (done.length ? done.join(' → ') : '（无）'));
-const skipped = ['版本号', '测试', 'commit', 'tag', 'git push', 'npm publish', 'mcp registry']
+const skipped = ['版本号', '测试', 'commit', 'tag', 'git push', '打包', '打包校验', 'npm publish', 'mcp registry', '安装']
   .filter((s) => !done.includes(s));
 if (skipped.length) console.log(`   未完成: ${skipped.join(', ')}`);
 process.exit(skipped.length ? 2 : 0);

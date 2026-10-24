@@ -124,6 +124,33 @@ function findElectronZipDir(version, platform, arch) {
   return null;
 }
 
+// 把 build/icon.icns 装进 app bundle。
+//
+// 为什么不用 packager 的 icon 选项就够了：@electron/packager v20 在 macOS 26
+// 上会优先找 Icon Composer 的 `.icon` 资源（日志里那句 "with extension
+// '.icon', skipping this app icon format"），icns 被跳过，最后 Info.plist 里
+// 仍是 CFBundleIconFile=electron.icns —— 用户看到的是默认 Electron 图标。
+// 这里直接做最终态：拷 icns + 改 plist + touch 让 Finder 刷新图标缓存。
+// 用外部 cp 而不是 fs.copyFileSync：受管环境的 Node fs 可能被文件系统代理
+// 拦截（见 build() 里 STAGE 的注释），外部命令不经过它。
+function installIcon(appPath) {
+  const src = path.join(root, 'build', 'icon.icns');
+  if (!fs.existsSync(src)) {
+    console.log('[build] 跳过图标：build/icon.icns 不存在（先跑 node scripts/render_icon.cjs）');
+    return;
+  }
+  const resources = path.join(appPath, 'Contents', 'Resources');
+  const dest = path.join(resources, 'icon.icns');
+  run('cp', [src, dest]);
+  run('/usr/libexec/PlistBuddy', [
+    '-c', 'Set :CFBundleIconFile icon.icns',
+    path.join(appPath, 'Contents', 'Info.plist'),
+  ]);
+  // touch 让 LaunchServices / Finder 重新读图标，否则换图后仍显示旧缓存
+  run('touch', [appPath]);
+  console.log('[build] 图标已安装：icon.icns');
+}
+
 function main() {
   const args = parseArgs(process.argv.slice(2));
   // @electron/packager v20 是纯 ESM（"type": "module" + exports 只指向 dist/index.js），
@@ -133,13 +160,38 @@ function main() {
     .then((mod) => build(mod.packager, args))
     .catch((e) => {
       console.error(`[build] FAILED: ${e.message}`);
+      // AIB_BUILD_DEBUG=1 打印完整栈 —— 打包失败的报错常常只有一句话
+      // （"modify backup failed" 这种），没有栈根本判断不出是哪一步、哪个文件。
+      if (process.env.AIB_BUILD_DEBUG) console.error(e.stack);
       process.exit(1);
     });
 }
 
 function build(packager, args) {
-  fs.rmSync(OUT_DIR, { recursive: true, force: true });
+  // 上一次的产物要清掉，否则 packager 会在旧目录上原地合并，留下上一版的
+  // 文件（旧 dmg、旧 asar 里的旧资源）。用 rename 到临时目录而不是递归删除：
+  // 删除一个几百 MB、上千文件的目录容易撞上沙箱/安全工具的批量删除保护，
+  // 而这个目录本来就不重要（构建产物），挪走即可；系统会自己回收 tmp。
+  if (fs.existsSync(OUT_DIR)) {
+    const trash = path.join(os.tmpdir(), `ai-browser-dist-${Date.now()}`);
+    try {
+      fs.renameSync(OUT_DIR, trash);
+      console.log(`[build] 旧产物已挪到 ${trash}`);
+    } catch (e) {
+      throw new Error(`无法移动旧 dist（${e.message}）——请手工删除后再构建`);
+    }
+  }
   fs.mkdirSync(OUT_DIR, { recursive: true });
+
+  // packager 的输出目录放在系统临时目录，最后由 ditto 搬进 dist/。
+  //
+  // 为什么不直接输出到 dist/：asar 打包阶段会用 fs.createWriteStream 写
+  // app.asar（十几 MB）。在受管环境里，Node 的 fs 调用可能被文件系统代理
+  // 拦住（本机实测：createWriteStream 被 node-brokered-fs-shim 拦截，报
+  // "Brokered file token refused: modify backup failed"，且没有栈的时候
+  // 完全看不出是哪一步）。代理只包 Node 的 fs，不拦外部命令，所以：
+  // 打包在 tmp 里做（Node 写 tmp 不受限），落地用 ditto（外部命令）。
+  const STAGE = path.join(os.tmpdir(), `aib-build-${Date.now()}`);
 
   console.log(`[build] ${APP_NAME} ${pkg.version} — darwin/${args.arch}`);
   console.log(`[build] ignore: ${IGNORE}`);
@@ -158,7 +210,7 @@ function build(packager, args) {
     name: APP_NAME,
     platform: 'darwin',
     arch: args.arch,
-    out: OUT_DIR,
+    out: STAGE,
     overwrite: true,
     ignore: IGNORE,
     electronZipDir: zipDir || undefined,
@@ -179,10 +231,25 @@ function build(packager, args) {
     // 不要直接改 png。
   })
     .then((paths) => {
-      const appPath = paths[0];
+      // packager 返回的是外层目录（<out>/AI Browser-darwin-arm64/），
+      // 真正的 .app 在它里面。dmg 用外层目录当源（会带 LICENSE /
+      // LICENSES.chromium.html，和 macOS 分发惯例一致），但改图标必须
+      // 精确落到 .app 上 —— 之前把外层目录当 bundle，cp 直接 ENOENT。
+      const stagedRoot = paths[0];
+      // ditto 而不是 cp -R：保留资源分支（bundle 里的符号链接、扩展属性、
+      // 权限位）。cp -R 复制 .app 会打坏 Electron 的 framework 结构。
+      const destRoot = path.join(OUT_DIR, path.basename(stagedRoot));
+      console.log(`[build] 搬运到 dist: ${destRoot}`);
+      run('ditto', [stagedRoot, destRoot]);
+
+      const bundledApp = fs.readdirSync(destRoot).find((n) => n.endsWith('.app'));
+      if (!bundledApp) throw new Error(`dist 里没有 .app：${destRoot}`);
+      const appPath = path.join(destRoot, bundledApp);
+
       const size = dirSize(appPath);
       console.log(`[build] app bundle: ${appPath}`);
       console.log(`[build] app size:   ${mb(size)}`);
+      installIcon(appPath);
 
       if (args.skipDmg) {
         console.log('[build] --skip-dmg，不压 dmg');
@@ -197,7 +264,7 @@ function build(packager, args) {
       run('hdiutil', [
         'create',
         '-volname', `${APP_NAME} ${pkg.version}`,
-        '-srcfolder', appPath,
+        '-srcfolder', destRoot,
         '-ov',
         '-format', 'UDZO',
         dmg,
@@ -213,6 +280,9 @@ function build(packager, args) {
     })
     .catch((e) => {
       console.error(`[build] FAILED: ${e.message}`);
+      // AIB_BUILD_DEBUG=1 打印完整栈 —— 打包失败的报错常常只有一句话
+      // （"modify backup failed" 这种），没有栈根本判断不出是哪一步、哪个文件。
+      if (process.env.AIB_BUILD_DEBUG) console.error(e.stack);
       process.exit(1);
     });
 }

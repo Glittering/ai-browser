@@ -76,7 +76,10 @@
     "e2e:all": "node e2e/run_all.cjs",
     "readcov": "node e2e/readcov_ws.cjs",
     "winopen": "node e2e/window_open_ws.cjs",
-    "coverage": "node tools/coverage_probe.cjs"
+    "coverage": "node tools/coverage_probe.cjs",
+    "build": "node scripts/build_dmg.cjs",
+    "verify:build": "node scripts/verify_build.cjs",
+    "install:app": "node scripts/install_app.cjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
