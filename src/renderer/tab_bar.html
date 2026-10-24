@@ -166,6 +166,9 @@ async function renderTabs() {
         const el = document.createElement('div');
         el.className = 'tab' + (tab.active ? ' active' : '');
         el.dataset.id = tab.id;
+        // 标题在 UI 上被截断到 30 字（标签宽度有限），完整标题 + 地址放 tooltip：
+        // 否则长标题站点的标签永远看不出是哪一篇（"【第 12 章】…"全一样）。
+        el.title = tabTooltip(tab);
         el.innerHTML = '<span class="tab-id">[' + tab.id + ']</span>' +
           '<span class="tab-title">' + escapeHtml((tab.title || tab.url || 'New Tab').slice(0, 30)) + '</span>' +
           '<span class="tab-close" data-id="' + tab.id + '">&times;</span>';
@@ -188,6 +191,8 @@ async function renderTabs() {
         const titleEl = el.querySelector('.tab-title');
         const title = (t.title || t.url || 'New Tab').slice(0, 30);
         if (titleEl && titleEl.textContent !== title) titleEl.textContent = title;
+        const tip = tabTooltip(t);
+        if (el.title !== tip) el.title = tip;
       }
     }
 
@@ -209,6 +214,25 @@ tabsEl.addEventListener('wheel', function (e) {
   tabsEl.scrollLeft += d;
   e.preventDefault();
 }, { passive: false });
+
+// tab 的完整标题 + 地址，用作 tooltip。标签上只显示前 30 字，
+// 长标题站点（论文/连载/同名页面）不靠 tooltip 根本分辨不出。
+// 中键点击关闭标签（浏览器惯例）。用事件委托而不是给每个标签挂：
+// 标签是增量更新的，逐个挂监听会在重建后丢一半。
+tabsEl.addEventListener('auxclick', function (e) {
+  if (e.button !== 1) return;                 // 1 = 中键
+  const el = e.target && e.target.closest ? e.target.closest('.tab') : null;
+  if (!el || !el.dataset.id) return;
+  e.preventDefault();
+  send('tab:close', parseInt(el.dataset.id));
+});
+
+function tabTooltip(t) {
+  const title = String(t.title || '').trim();
+  const url = String(t.url || '').trim();
+  if (title && url && title !== url) return title + '\n' + url;
+  return title || url || 'New Tab';
+}
 
 function escapeHtml(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');

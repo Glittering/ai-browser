@@ -15,6 +15,13 @@ import errorBanner from '../shared/error_banner.cjs';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// 窗口标题用的产品名。
+// 不能靠 Electron 默认值：主窗口自己没有加载任何 document，Electron 会退回
+// `app.getName()`，而它读的是 package.json 的 name —— 用户在标题栏、Mission
+// Control、窗口切换器里看到的是 `@glittering0717/ai-browser`（npm 包名）。
+// 产品名必须是我们自己声明的常量。
+const APP_DISPLAY_NAME = 'AI Browser';
+
 // CRITICAL: set userData BEFORE app.whenReady — session/cookie storage
 // is initialized during ready, so setting it after loses persistence.
 app.setPath('userData', config.userDataDir);
@@ -358,6 +365,9 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
+    // 见文件头 APP_DISPLAY_NAME：不显式给 title 会显示成 npm 包名。
+    // 真实显示值由 updateWindowTitle() 按当前标签页覆盖。
+    title: APP_DISPLAY_NAME,
     // Windows/Linux 的任务栏图标来自这里（macOS 走 app.dock.setIcon，
     // 见 applyAppIcon：Dock 跟的是进程可执行文件，不是窗口选项）。
     icon: appIconPath() || undefined,
@@ -369,6 +379,11 @@ function createWindow() {
       nodeIntegration: false,
     },
   });
+
+  // 窗口标题统一由 updateWindowTitle() 控制（当前标签页标题 + 产品名）。
+  // 主窗口自己的 webContents 不加载页面，但 renderer 重启的瞬间可能出现空
+  // document.title，Electron 会拿它把标题清成空字符串 —— 这里直接掐断。
+  mainWindow.webContents.on('page-title-updated', (e) => { e.preventDefault(); });
 
   // Tab bar — needs nodeIntegration for ipcRenderer
   tabBarView = new BrowserView({
@@ -763,8 +778,33 @@ function activeWebContents() {
   return view.webContents;
 }
 
+/**
+ * 窗口标题 = "当前页标题 — AI Browser"，没有页标题时只显示产品名。
+ *
+ * 为什么要有：多窗口/多桌面环境下，标题栏是用户唯一能识别"这个窗口在哪个页面"
+ * 的地方；原先它是 npm 包名，既不是产品名也不带任何页面信息。
+ * 只做「变了才设」——pushNavState 由事件 + 1.5s 轮询双重驱动，无条件 setTitle
+ * 会让系统在每次轮询时都收到一次标题变更通知。
+ */
+let lastWindowTitle = '';
+function updateWindowTitle() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const wc = activeWebContents();
+  let pageTitle = '';
+  try { pageTitle = wc ? String(wc.getTitle() || '').trim() : ''; } catch (_) { pageTitle = ''; }
+  const next = pageTitle && pageTitle !== APP_DISPLAY_NAME
+    ? `${pageTitle} — ${APP_DISPLAY_NAME}`
+    : APP_DISPLAY_NAME;
+  if (next === lastWindowTitle) return;
+  lastWindowTitle = next;
+  try { mainWindow.setTitle(next); } catch (_) { /* 窗口在关闭竞态里 */ }
+}
+
 /** 把地址栏需要的一切状态推给 tab bar renderer。 */
 function pushNavState() {
+  // 标题先更新：它不依赖 tabBarView 是否存活（横幅/崩溃场景下 tabBarView
+  // 可能已被销毁，但窗口标题仍应反映真实页面）。
+  updateWindowTitle();
   if (!tabBarView || tabBarView.webContents.isDestroyed()) return;
   const wc = activeWebContents();
   const state = wc ? {
