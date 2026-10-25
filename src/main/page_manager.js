@@ -3727,41 +3727,46 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     let stats = null;
     let frameError = null;
     try {
-      // 位图来源优先走 CDP（和 ui.screenshot 同一条路），而不是
-      // webContents.capturePage()。实测（2026-10-25，e2e/paint 与真机）：
-      // capturePage 对**被其它窗口盖住**的窗口返回空图（isEmpty()===true），
-      // 而"窗口被盖住"恰恰是本产品最常见的状态（不抢焦点原则）。用 capturePage
-      // 就等于在最需要观测的场景下失明 —— 判出来是 no-frame，什么都没看见。
-      // CDP 的 Page.captureScreenshot 走渲染器自己的 surface，被遮挡也拿得到。
+      // 位图来源，优先级从"最不容易打扰合成器"往下排：
       //
-      // clip.scale=0.25：判"是不是白的"不需要细节，缩到 1/4 后像素数从 350 万
-      // 降到 22 万，统计从几十毫秒降到几毫秒，而且和用户看到的是同一帧内容。
-      const w = bounds && bounds.width ? Math.max(1, Math.round(bounds.width)) : 0;
-      const h = bounds && bounds.height ? Math.max(1, Math.round(bounds.height)) : 0;
-      let shot = null;
-      if (w && h) {
-        try {
-          this._ensureCdp(tid, view, 'Page');
-          shot = await withDeadline(
-            view.webContents.debugger.sendCommand('Page.captureScreenshot', {
-              format: 'png',
-              fromSurface: true,
-              clip: { x: 0, y: 0, width: w, height: h, scale: 0.25 },
-            }),
-            4000, 'paint_shot'
-          );
-        } catch (_) { /* 落到 capturePage 兜底 */ }
-      }
-      if (shot && shot.data) {
-        const buf = Buffer.from(shot.data, 'base64');
-        const img = nativeImage.createFromBuffer(buf);
-        if (img && !img.isEmpty()) stats = blankPage.statsFromBitmap(img.toBitmap());
-      }
+      // 1) webContents.capturePage() —— 不碰 CDP 的 Page 域、没有 capture 模式，
+      //    只是把视图自己的 surface 拷一份。窗口被别的窗口盖住时会返回空图
+      //    （isEmpty()），这时跳过、交给下一档，绝不据此判"页面是白的"。
+      // 2) CDP Page.captureScreenshot，**不带 clip / scale**。
+      //
+      // ⚠️ 2026-10-25 血泪：这里原本是
+      //     clip: {x:0,y:0,width:w,height:h, scale:0.25}
+      // 图省事把统计用的图直接缩到 1/4。带 clip.scale 的截图会让 Chromium
+      // **按该比例临时重建 surface**；自检又恰好在 did-finish-load+450ms 跑，
+      // 那几十毫秒里窗口往往正在重新合成，于是把这张 1/4 的图贴上去 1–3 帧，
+      // 用户看到的就是"每次加载先小一下再恢复"。实测抓到的那一帧内容宽度
+      // 正好是 25%，与 clip.scale 一致。
+      // 结论：**缩放只许在我们自己这边做**（nativeImage.resize），不许交给合成器。
+      try {
+        const img0 = await withDeadline(wc.capturePage(), 3000, 'capturePage');
+        if (img0 && typeof img0.isEmpty === 'function' && !img0.isEmpty()) {
+          const small0 = img0.resize({ width: 240 });
+          stats = blankPage.statsFromBitmap(small0.toBitmap());
+        }
+      } catch (_) { /* 视图被遮挡/正在销毁：交给 CDP 档 */ }
       if (!stats) {
-        const img = await withDeadline(wc.capturePage(), 4000, 'capturePage');
-        if (img && typeof img.isEmpty === 'function' && !img.isEmpty()) {
-          const small = img.resize({ width: 240 });
-          stats = blankPage.statsFromBitmap(small.toBitmap());
+        const shot = await withDeadline(
+          (() => {
+            this._ensureCdp(tid, view, 'Page');
+            return view.webContents.debugger.sendCommand('Page.captureScreenshot', {
+              format: 'jpeg',
+              quality: 70,
+              fromSurface: true,
+            });
+          })(),
+          5000, 'paint_shot'
+        ).catch(() => null);
+        if (shot && shot.data) {
+          const img = nativeImage.createFromBuffer(Buffer.from(shot.data, 'base64'));
+          if (img && !img.isEmpty()) {
+            const small = img.resize({ width: 240 });
+            stats = blankPage.statsFromBitmap(small.toBitmap());
+          }
         }
       }
     } catch (e) {
@@ -3869,6 +3874,43 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
       || actual.x !== expected.x
       || actual.y !== expected.y;
     if (!bad) return { ok: true, expected, actual };
+    // 不一致时先复核一次再动手：窗口刚变化的那一两百毫秒里，getContentBounds 与
+    // 视图 bounds 会短暂对不上，此刻"纠正"等于把视图改成中间尺寸 —— 那正是
+    // "页面缩成左上角一小块"的成因之一。宁可晚 120ms 修，也不要修错。
+    return this._confirmAndFixLayout(tabId, expected, actual);
+  }
+
+  _confirmAndFixLayout(tabId, expected, actual) {
+    const view = this._getView(tabId);
+    if (!view) return { ok: false, expected, actual, fixed: false };
+    const t = setTimeout(() => {
+      try {
+        const v = this._getView(tabId);
+        if (!v || !v.webContents || v.webContents.isDestroyed()) return;
+        let cb;
+        try { cb = this.window.getContentBounds(); } catch (_) { return; }
+        const exp = {
+          x: 0,
+          y: config.tabBarHeight,
+          width: cb.width,
+          height: Math.max(0, cb.height - config.tabBarHeight - (this._bottomInset || 0)),
+        };
+        let act;
+        try { act = v.getBounds(); } catch (_) { return; }
+        const stillBad = act.width < exp.width - 2
+          || Math.abs(act.height - exp.height) > 2
+          || act.x !== exp.x || act.y !== exp.y;
+        if (!stillBad) return;   // 只是中间态，已经自己好了
+        try {
+          this._layoutView(v);
+          v.webContents.invalidate();
+        } catch (_) { /* 视图正在销毁 */ }
+        recordError('layout_mismatch', { tab: tabId, expected: exp, actual: act });
+        this._broadcast('layout_mismatch', { tab: tabId, expected: exp, actual: act });
+      } catch (_) { /* 忽略 */ }
+    }, 120);
+    if (t.unref) t.unref();
+    return { ok: false, expected, actual, fixed: 'deferred' };
     try {
       this._layoutView(view);
       view.webContents.invalidate();
