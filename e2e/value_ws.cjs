@@ -72,7 +72,17 @@ let PASS = 0, FAIL = 0;
 const check = (name, cond, detail) => { cond ? PASS++ : FAIL++; console.log(`  ${cond ? "PASS" : "FAIL"} | ${name}${detail !== undefined ? " — " + detail : ""}`); };
 const note = (t) => console.log(`  NOTE | ${t}`);
 let spawnedChild = null;
-function killChild() { if (spawnedChild) { try { process.kill(-spawnedChild.pid, "SIGKILL"); } catch {} spawnedChild = null; } }
+function killChild() {
+  if (!spawnedChild) return;
+  try {
+    if (process.platform === "win32") {
+      require("node:child_process").spawnSync("taskkill", ["/F", "/T", "/PID", String(spawnedChild.pid)], { stdio: "ignore" });
+    } else {
+      process.kill(-spawnedChild.pid, "SIGKILL");
+    }
+  } catch {}
+  spawnedChild = null;
+}
 
 function findNode(node, id) {
   if (!node) return null;
@@ -97,7 +107,7 @@ async function main() {
 const guard = require('./_spawn_guard.cjs');
   const childEnv = { ...process.env, AI_BROWSER_PORT: String(WS_PORT) };
   delete childEnv.ELECTRON_RUN_AS_NODE;
-  if (!childEnv.AI_BROWSER_USER_DATA) childEnv.AI_BROWSER_USER_DATA = `/tmp/ai-browser-e2e-${WS_PORT}`;
+  if (!childEnv.AI_BROWSER_USER_DATA) childEnv.AI_BROWSER_USER_DATA = require('node:path').join(require('node:os').tmpdir(), `ai-browser-e2e-${WS_PORT}`);
   console.log("spawn electron port", WS_PORT, "userData", childEnv.AI_BROWSER_USER_DATA);
   const child = spawn(electronPath, ["."], { cwd: ROOT, stdio: "ignore", detached: true, env: childEnv });
 guard.track(child);
@@ -117,7 +127,7 @@ guard.track(child);
   const nodeOf = async (tab, id) => findNode(await treeOf(tab), id);
 
   const tab = (await b.call("ui.new_tab", { url: HOST + "/value" })).result?.tab;
-  await sleep(1800);
+  await sleep(5000); // Windows: value fixture must be fully loaded before reading its textarea
 
   // 直接给 DOM 赋值（本 e2e 验的是 value 契约，不是输入链路；1837 字符逐字符
   // 受信键入要几十秒，且不是这里的关注点）。
@@ -200,8 +210,7 @@ guard.track(child);
   console.log("\n==== value PASS=" + PASS + " FAIL=" + FAIL + " ====");
   b.close();
   try { server.close(); } catch {}
-  try { process.kill(-child.pid, "SIGTERM"); } catch {}
-  setTimeout(() => { try { process.kill(-child.pid, "SIGKILL"); } catch {} }, 3000);
+  guard.killChild(child);
   process.exit(FAIL ? 1 : 0);
 }
 

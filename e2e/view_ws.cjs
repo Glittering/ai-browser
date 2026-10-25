@@ -121,7 +121,7 @@ async function spawnElectron(port) {
   const electronPath = require("electron");
   const childEnv = { ...process.env, AI_BROWSER_PORT: String(port), AI_BROWSER_WATCHDOG: "0" };
   delete childEnv.ELECTRON_RUN_AS_NODE;
-  if (!childEnv.AI_BROWSER_USER_DATA) childEnv.AI_BROWSER_USER_DATA = `/tmp/ai-browser-e2e-view-${port}`;
+  if (!childEnv.AI_BROWSER_USER_DATA) childEnv.AI_BROWSER_USER_DATA = require('node:path').join(require('node:os').tmpdir(), `ai-browser-e2e-view-${port}`);
   const child = spawn(electronPath, ["."], { cwd: ROOT, stdio: "ignore", detached: true, env: childEnv });
   guard.track(child);
   await waitForPort(port, 30000);
@@ -148,7 +148,7 @@ async function main() {
   await b.ready();
   await harness.assertIdentity(b, child, "view");
   const tab = unwrap(await b.call("ui.new_tab", { url: HOST + "/" })).tab;
-  await sleep(2500);
+  await sleep(5000); // Windows: the watch fixture needs more time to load before change-detection assertions
 
   const ev = async (js) => {
     const r = await b.call("ui.evaluate", { tab, js });
@@ -174,6 +174,9 @@ async function main() {
     JSON.stringify({ hash: stA.hash, hud: stA.hud }));
 
   // R-03: 阴性对照 —— 静置时不得自激，否则会不停闪烁耗电
+  // 先把上一步 SPA 切换的重绘尾巴等干净再取基线：Windows 合成/重绘比开发机慢，
+  // 基线取早了会把"上一步的尾巴"记成"静置自激"（假红），而不是真的自激。
+  await sleep(1500);
   const r2 = await repaintCount();
   await sleep(1500);
   const r3 = await repaintCount();

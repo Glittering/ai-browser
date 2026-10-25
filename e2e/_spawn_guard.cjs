@@ -12,6 +12,28 @@
 
 const spawned = new Set();
 let installed = false;
+const { spawnSync } = require('node:child_process');
+
+// Cross-platform kill of an Electron child + its whole process tree.
+//
+// On Unix, Electron's helper processes (renderer / GPU) live in the same
+// process group, so a single `kill(-pid, SIGKILL)` reaps them all. Windows has
+// no process groups and rejects both negative-pid kills and SIGKILL — the only
+// reliable way to take down the tree there is `taskkill /T /F`. Without this,
+// every e2e run would leak a live Electron window that keeps the WS port and
+// the single-instance lock busy, breaking the next suite ("port busy" / "another
+// instance already running").
+function killTree(pid) {
+  if (!pid) return;
+  if (process.platform === 'win32') {
+    try {
+      spawnSync('taskkill', ['/F', '/T', '/PID', String(pid)], { stdio: 'ignore' });
+    } catch {}
+    return;
+  }
+  try { process.kill(-pid, 'SIGKILL'); }
+  catch { try { process.kill(pid, 'SIGKILL'); } catch {} }
+}
 
 // 为什么是 SIGKILL 而不是 SIGTERM（2026-10-20 实测）：
 //
@@ -28,14 +50,8 @@ let installed = false;
 // 代价是可以忽略的，收益是"跑完测试电脑上不会多出一堆白窗口"。
 function killOne(c) {
   if (!c || !c.pid) return;
-  // 优先按进程组收割（含 renderer / GPU 助手进程）
-  try {
-    process.kill(-c.pid, 'SIGKILL');
-  } catch {
-    try {
-      process.kill(c.pid, 'SIGKILL');
-    } catch {}
-  }
+  // 按进程树收割（含 renderer / GPU 助手进程）。Windows 用 taskkill，Unix 用进程组 kill。
+  killTree(c.pid);
 }
 
 function killAll() {

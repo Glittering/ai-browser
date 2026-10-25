@@ -133,7 +133,7 @@ const guard = require('./_spawn_guard.cjs');
   // 默认用独立 profile。不只是为了避免单实例锁打架：~/.ai-browser 是用户的
 // 真实 profile（存着登录态），测试不该看见、更不该动到它。
 if (!childEnv.AI_BROWSER_USER_DATA) {
-  childEnv.AI_BROWSER_USER_DATA = `/tmp/ai-browser-e2e-${WS_PORT}`;
+  childEnv.AI_BROWSER_USER_DATA = require('node:path').join(require('node:os').tmpdir(), `ai-browser-e2e-${WS_PORT}`);
 }
 console.log("userData:", childEnv.AI_BROWSER_USER_DATA);
   const child = spawn(electronPath, ["."], {
@@ -184,7 +184,7 @@ const setContentInto = (tab, id, text) => b.call("ui.act", { action: "setContent
   // =======================================================================
   console.log("\n[A. 文本框操作]");
   const capTab = (await b.call("ui.new_tab", { url: HOST + "/caps" })).result?.tab;
-  await sleep(1600);
+  await sleep(5000); // Windows: the caps fixture needs more time to load before typing assertions
   await b.call("ui.get_tree", { tab: capTab }); // write data-ai-id into the live DOM
 
   const EN = "Hello-Agent-42";
@@ -376,7 +376,7 @@ const setContentInto = (tab, id, text) => b.call("ui.act", { action: "setContent
   // =======================================================================
   console.log("\n[D. 抓包分析 — 按 URL 模式拉响应 body]");
   const netTab = (await b.call("ui.new_tab", { url: HOST + "/net" })).result?.tab;
-  await sleep(1500);
+  await sleep(4000); // Windows: net fixture needs more time to load
   const netEvents = [];
   b.on("network_response", (d) => { if (d) netEvents.push(d); });
   await b.call("ui.subscribe", { events: ["network_response"] });
@@ -433,8 +433,7 @@ const setContentInto = (tab, id, text) => b.call("ui.act", { action: "setContent
   console.log("\n==== capabilities PASS=" + PASS + " FAIL=" + FAIL + " ====");
   b.close();
   try { server.close(); } catch {}
-  try { process.kill(-child.pid, "SIGTERM"); } catch {}
-  setTimeout(() => { try { process.kill(-child.pid, "SIGKILL"); } catch {} }, 3000);
+  guard.killChild(child);
   process.exit(FAIL ? 1 : 0);
 }
 

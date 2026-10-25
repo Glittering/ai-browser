@@ -126,7 +126,7 @@ const guard = require('./_spawn_guard.cjs');
   // 默认用独立 profile。不只是为了避免单实例锁打架：~/.ai-browser 是用户的
   // 真实 profile（存着登录态），测试不该看见、更不该动到它。
   if (!childEnv.AI_BROWSER_USER_DATA) {
-    childEnv.AI_BROWSER_USER_DATA = `/tmp/ai-browser-e2e-${WS_PORT}`;
+    childEnv.AI_BROWSER_USER_DATA = require('node:path').join(require('node:os').tmpdir(), `ai-browser-e2e-${WS_PORT}`);
   }
   console.log("userData:", childEnv.AI_BROWSER_USER_DATA);
   const child = spawn(electronPath, ["."], {
@@ -136,7 +136,7 @@ const guard = require('./_spawn_guard.cjs');
     env: childEnv,
   });
 guard.track(child);
-  await waitForPort(WS_PORT, 30000);
+  await waitForPort(WS_PORT, 60000);
   console.log("WS ready on", WS_PORT);
 
   // lazily require the WS helper only after spawn checks
@@ -148,7 +148,10 @@ guard.track(child);
 
   console.log("\n[get_tree on CSP page]");
   await b.call("ui.new_tab", { url: PAGE_URL });
-  await sleep(1500);
+  // Windows note: the first page navigation (about:blank → shim inject → real
+  // URL) is noticeably slower on this win32 box; 1500ms left the tree empty.
+  // Bump so the CSP page is actually committed before we read its tree.
+  await sleep(5000);
   let raw = await b.call("ui.get_tree", {});
   let root = (raw && raw.result && (raw.result.tree || raw.result.root)) || raw;
   const ids = () => {
@@ -193,7 +196,8 @@ guard.track(child);
   // viewport — events hit body/空白处, the input never focused, yet act reported
   // success. The fix scrolls the target into view first and verifies the hit.
   const offTab = (await b.call("ui.new_tab", { url: `http://127.0.0.1:${server.address().port}/offscreen` })).result?.tab;
-  await sleep(1500);
+  // Windows: same slower-navigation reason as the button page above.
+  await sleep(5000);
   await b.call("ui.get_tree", { tab: offTab });
   const farAct = await b.call("ui.act", { action: "click", target: "inFar", tab: offTab });
   await sleep(400);
@@ -218,7 +222,7 @@ guard.track(child);
   const HOST = `http://127.0.0.1:${server.address().port}`;
   await b.call("ui.new_tab", { url: HOST + "/a" });
   await b.call("ui.new_tab", { url: HOST + "/b" });
-  await sleep(1400); // let local nav URLs commit
+  await sleep(4000); // Windows: local nav URLs need more time to commit
   const tabs = await listCount();
   check("adding 2 tabs grew list to " + (T0 + 2), tabs.length === T0 + 2, tabs.length);
   const target = Array.isArray(tabs) && tabs.find((t) => (t.url || "").includes("/a"));
@@ -246,7 +250,7 @@ guard.track(child);
   const B = new Browser(WS_PORT);
   await Promise.all([A.ready(), B.ready()]);
   const netTab = (await b.call("ui.new_tab", { url: HOST })).result?.tab;
-  await sleep(1300); // let the CSP page load so in-page fetch works
+  await sleep(4000); // Windows: the CSP page needs more time before in-page fetch works
 
   const eventsOf = (c) => { const out = []; c.on("network_response", (d) => { if (d && String(d.url).includes("/net")) out.push(d); }); return out; };
   const aEv = eventsOf(A), bEv = eventsOf(B);
@@ -288,7 +292,7 @@ guard.track(child);
 
   console.log("\n[rich editors — setContent paths (P1)]");
   const richTab = (await b.call("ui.new_tab", { url: HOST + "/rich" })).result?.tab;
-  await sleep(1500);
+  await sleep(4000); // Windows: rich page needs more time to load before setContent
   const richTree = await b.call("ui.get_tree", { tab: richTab });
   const richStr = JSON.stringify(((richTree && richTree.result) || "").tree || "");
   const reHas = (id) => richStr.includes('"' + id + '"');
@@ -314,7 +318,7 @@ guard.track(child);
   obs.on("js_error", (d) => obsEvents.err.push(d));
   await obs.call("ui.subscribe", { events: ["captcha_appeared", "message_appeared", "js_error"] });
   const obsTab = (await b.call("ui.new_tab", { url: HOST + "/observe" })).result?.tab;
-  await sleep(2500); // scanCaptcha/scanMessages runs at ~1s + 5s interval
+  await sleep(6500); // scanCaptcha/scanMessages runs at ~1s + 5s interval; must outlast the 5s pass
   check("OB-1 captcha_appeared detected (DOM scan)", obsEvents.cap.length > 0, "cap=" + obsEvents.cap.length);
   check("OB-2 message_appeared detected (DOM scan)", obsEvents.msg.length > 0, "msg=" + obsEvents.msg.length);
   // js_error now flows via CDP Runtime.exceptionThrown (main process) — the
@@ -339,7 +343,7 @@ guard.track(child);
 
   console.log("\n[submit + toggle action branches (P1)]");
   const cTab = (await b.call("ui.new_tab", { url: HOST + "/ctrls" })).result?.tab;
-  await sleep(1500);
+  await sleep(5000); // Windows: ctrls page needs more time before submit/toggle assertions
   const rv = (r) => (r && r.result && r.result.value);
   // get_tree writes data-ai-id into the live DOM; act targets resolve against it.
   await b.call("ui.get_tree", { tab: cTab });
@@ -356,10 +360,9 @@ guard.track(child);
   console.log("\n==== smoke PASS=" + PASS + " FAIL=" + FAIL + " ====");
   b.close();
   try { server.close(); } catch {}
-  try { process.kill(-child.pid, "SIGTERM"); } catch {}
-  setTimeout(() => { try { process.kill(-child.pid, "SIGKILL"); } catch {} }, 3000);
+  guard.killChild(child); // cross-platform kill (taskkill on win32, SIGKILL on *nix)
   process.exit(FAIL ? 1 : 0);
 }
 
 main().catch((e) => { console.error("smoke error:", e.message); process.exit(2); });
-setTimeout(() => { console.error("smoke TIMEOUT"); process.exit(2); }, 60000);
+setTimeout(() => { console.error("smoke TIMEOUT"); process.exit(2); }, 120000);

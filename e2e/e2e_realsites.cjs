@@ -62,9 +62,9 @@ guard.track(child);
 // 失败时降级用 lsof 找监听者收割（可选回退）。
 function cleanupSpawned(child) {
   if (!child) return;
-  try { process.kill(-child.pid, 'SIGTERM'); }
-  catch { try { process.kill(child.pid, 'SIGTERM'); } catch {} }
-  // 兜底：仍监听则按 lsof 检索清理（跨环境可选路径）
+  // 跨平台收尾：Windows 用 taskkill /T /F，Unix 用进程组 kill（见 _spawn_guard.cjs）。
+  guard.killChild(child);
+  // 兜底：仍监听端口则按平台检索监听者再收割（可选路径）。
   setTimeout(() => {
     pidof(WS_PORT).forEach((p) => { try { process.kill(p, 'SIGTERM'); } catch {} });
   }, 300);
@@ -72,6 +72,17 @@ function cleanupSpawned(child) {
 function pidof(port) {
   try {
     const { execSync } = require('node:child_process');
+    if (process.platform === 'win32') {
+      // netstat -ano 的 LISTENING 行最后一列是 PID
+      const out = execSync(`netstat -ano | findstr :${port}`, { encoding: 'utf8' });
+      const pids = new Set();
+      for (const line of out.split('\n')) {
+        if (!/LISTENING/i.test(line)) continue;
+        const m = line.trim().match(/(\d+)\s*$/);
+        if (m) pids.add(Number(m[1]));
+      }
+      return [...pids].filter((n) => Number.isInteger(n) && n > 0);
+    }
     const out = execSync(`lsof -tiTCP:${port} -sTCP:LISTEN`, { encoding: 'utf8' }).trim();
     return out ? out.split('\n').map((s) => Number(s)).filter((n) => Number.isInteger(n)) : [];
   } catch { return []; }

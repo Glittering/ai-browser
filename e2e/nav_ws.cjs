@@ -111,7 +111,7 @@ async function spawnElectron(port) {
   const electronPath = require("electron");
   const childEnv = { ...process.env, AI_BROWSER_PORT: String(port) };
   delete childEnv.ELECTRON_RUN_AS_NODE;
-  if (!childEnv.AI_BROWSER_USER_DATA) childEnv.AI_BROWSER_USER_DATA = `/tmp/ai-browser-e2e-nav-${port}`;
+  if (!childEnv.AI_BROWSER_USER_DATA) childEnv.AI_BROWSER_USER_DATA = require('node:path').join(require('node:os').tmpdir(), `ai-browser-e2e-nav-${port}`);
   const child = spawn(electronPath, ["."], {
     cwd: ROOT, stdio: "ignore", detached: true, env: childEnv,
   });
@@ -359,8 +359,7 @@ async function main() {
   } finally {
     try { b.close(); } catch {}
     try { server.close(); } catch {}
-    try { process.kill(-child.pid, "SIGTERM"); } catch {}
-    setTimeout(() => { try { process.kill(-child.pid, "SIGKILL"); } catch {} }, 3000);
+    guard.killChild(child);
   }
   process.exit(FAIL ? 1 : 0);
 }

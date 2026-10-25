@@ -117,7 +117,14 @@ let PASS = 0, FAIL = 0;
 let spawnedChild = null;
 function killChild() {
   if (!spawnedChild) return;
-  try { process.kill(-spawnedChild.pid, "SIGKILL"); } catch {}
+  // Windows 没有进程组 / SIGKILL：用 taskkill /T 收整棵进程树；Unix 用进程组 kill。
+  try {
+    if (process.platform === "win32") {
+      require("node:child_process").spawnSync("taskkill", ["/F", "/T", "/PID", String(spawnedChild.pid)], { stdio: "ignore" });
+    } else {
+      process.kill(-spawnedChild.pid, "SIGKILL");
+    }
+  } catch {}
   spawnedChild = null;
 }
 const check = (name, cond, detail) => { cond ? PASS++ : FAIL++; console.log(`  ${cond ? "PASS" : "FAIL"} | ${name}${detail !== undefined ? " — " + detail : ""}`); };
@@ -142,7 +149,7 @@ const guard = require('./_spawn_guard.cjs');
   // 不监听 WS，测试永远等不到端口。
   delete childEnv.ELECTRON_RUN_AS_NODE;
   // 铁律 4：默认独立 profile，别动用户真实 profile（存着登录态）。
-  if (!childEnv.AI_BROWSER_USER_DATA) childEnv.AI_BROWSER_USER_DATA = `/tmp/ai-browser-e2e-${WS_PORT}`;
+  if (!childEnv.AI_BROWSER_USER_DATA) childEnv.AI_BROWSER_USER_DATA = require('node:path').join(require('node:os').tmpdir(), `ai-browser-e2e-${WS_PORT}`);
   console.log("userData:", childEnv.AI_BROWSER_USER_DATA, "limits:", JSON.stringify(CHILD_ENV_LIMITS));
 
   const child = spawn(electronPath, ["."], { cwd: ROOT, stdio: "ignore", detached: true, env: childEnv });
@@ -167,7 +174,15 @@ guard.track(child);
   // =======================================================================
   console.log("\n[A. 抓包：GET / POST(JSON) / POST(form) / 大 body]");
   const tab = (await call("ui.new_tab", { url: HOST + "/net" })).result?.tab;
-  await sleep(1800);
+  // 等文档真的切到 fixture 页再发请求。Windows 冷启动的首个导航偶尔慢于固定 sleep：
+  // 若此时文档仍是初始 file:// 页，fetch('/api/get') 会被解析成 file:///…/api/get
+  // 并失败，N-12 随后就匹配到那条失败记录（假红）。轮询 location 比死等更稳。
+  for (let i = 0; i < 50; i++) {
+    const href = String((await ev("(function(){return location.href;})()", tab)) || "");
+    if (href.indexOf("/net") >= 0) break;
+    await sleep(200);
+  }
+  await sleep(400);
   // 启动时应用会开一个 tab 导航到主页，那个 tab 的请求同样占用【全局】保留
   // 配额。清一次内存日志，让后面的保留上限断言只反映本测试自己发的请求。
   await call("ui.network_clear", {});
@@ -436,8 +451,7 @@ guard.track(child);
   console.log("\n==== network PASS=" + PASS + " FAIL=" + FAIL + " ====");
   b.close();
   try { server.close(); } catch {}
-  try { process.kill(-child.pid, "SIGTERM"); } catch {}
-  setTimeout(() => { try { process.kill(-child.pid, "SIGKILL"); } catch {} }, 3000);
+  guard.killChild(child);
   process.exit(FAIL ? 1 : 0);
 }
 

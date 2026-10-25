@@ -521,7 +521,7 @@ const guard = require('./_spawn_guard.cjs');
   // 默认用独立 profile。不只是为了避免单实例锁打架：~/.ai-browser 是用户的
   // 真实 profile（存着登录态），测试不该看见、更不该动到它。
   if (!childEnv.AI_BROWSER_USER_DATA) {
-    childEnv.AI_BROWSER_USER_DATA = `/tmp/ai-browser-e2e-${WS_PORT}`;
+    childEnv.AI_BROWSER_USER_DATA = require('node:path').join(require('node:os').tmpdir(), `ai-browser-e2e-${WS_PORT}`);
   }
   console.log("userData:", childEnv.AI_BROWSER_USER_DATA);
   const child = spawn(electronPath, ["."], {
@@ -1454,8 +1454,7 @@ guard.track(child);
   b.close();
   try { server.close(); } catch {}
   try { fs.unlinkSync(tmpFile); } catch {}
-  try { process.kill(-child.pid, "SIGTERM"); } catch {}
-  setTimeout(() => { try { process.kill(-child.pid, "SIGKILL"); } catch {} }, 3000);
+  guard.killChild(child);
   process.exit(FAIL ? 1 : 0);
 }
 
