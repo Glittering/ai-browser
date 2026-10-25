@@ -181,7 +181,9 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
             // the DOM tree / evaluate already report the NEW page while the
             // screen shows the OLD one. So the agent's only handle on it is an
             // explicit "this window looks wrong, redraw it".
-            const r = pageManager.repaint(tabId);
+            // hard:true 才做 1px 微调（会让页面重排两次，肉眼可见）。
+            // 默认 soft：只 invalidate —— 高频调用不会把窗口刷成幻灯片。
+            const r = pageManager.repaint(tabId, { hard: params && params.hard === true });
             send({ jsonrpc: '2.0', id, result: r });
             break;
           }

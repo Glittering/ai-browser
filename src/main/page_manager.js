@@ -216,6 +216,10 @@ class PageManager {
     this._openDialogs = new Map();
     this._axDiffCache = new Map();  // tabId -> lite interactive snapshot (get_tree {mode:'diff'})
     this._repaintTimers = new Map();// tabId -> 正在排队/已调度的重绘（合并同一批导航事件）
+    // 重绘计数：soft = 只 invalidate；hard = 额外 1px 微调（会重排两次，肉眼可见）。
+    // 高频路径（导航完成/窗口焦点）只许走 soft —— 这条要被回归钉住。
+    this._repaintCount = 0;
+    this._hardRepaintCount = 0;
     // === 白屏自检（paint audit）===
     // tabId -> {verdict, blank, white_ratio, unique, action, at, url}：最近一次自检的结论。
     // 为什么必须有它：白屏是唯一一种"所有事件都成功、DOM 也正常、但用户看到的是空"的
@@ -3571,43 +3575,83 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
    * (only the active view is normally attached, so re-adding an inactive one
    * would show it — guard by re-asserting the active view afterwards).
    */
-  _forceRepaint(view) {
-    const tabId = this._tabIdOfView(view);
-    const wasActive = tabId === this.activeTab;
-    try {
-      this.window.removeBrowserView(view);
-      this.window.addBrowserView(view);
-      this._layoutView(view);
-      // remove+add 只改变合成树里的位置，**不保证 surface 重新栅格化**：
-      // 如果 surface 还是旧尺寸（窗口从大到小之后很常见），合成器会把那张大图
-      // 缩小/裁到新 bounds 里 —— 用户看到的就是"内容缩成左上角一小块、其余全白"。
-      // 真正的重栅格化要靠 invalidate()；再叠一次 1px 微调，是因为
-      // setBounds 尺寸没变时 Chromium 会直接忽略（不会重算 surface）。
-      try { view.webContents.invalidate(); } catch (_) {}
-      const b = view.getBounds();
+  /**
+   * 窗口几何变过之后调一次：重排 → 软重绘 → 160ms 后确认渲染视口真的跟上了。
+   *
+   * 为什么不能只 setBounds：实测（e2e/layout_ws 的 G2，2026-10-25）窗口从
+   * 1280 缩到 800 之后，视图 bounds 已经是 800，但页面 `innerWidth` 还是 1280 ——
+   * 也就是渲染器没接到/没应用这次尺寸变化。此时合成器会把 1280 宽的内容画进
+   * 800 的框里，内容整体缩小或错位；等它某一刻突然追上，就是用户说的
+   * "一闪一闪、大一下小一下"。
+   * 确认的方式和判定口径一致：innerWidth 必须等于视图宽度。不等就做一次 hard
+   * 重绘（1px 微调会强制 Chromium 重算 surface 与布局）—— 这时代价是值得的，
+   * 因为画面本来就是错的。
+   */
+  afterGeometryChange() {
+    const tid = this.activeTab;
+    const view = this._getView(tid);
+    if (!view || !view.webContents || view.webContents.isDestroyed()) return;
+    try { this._layoutView(view); } catch (_) { return; }
+    this._forceRepaint(view);           // soft：不可见
+    const timer = setTimeout(async () => {
       try {
-        view.setBounds({ ...b, width: b.width + 1 });
-        view.setBounds(b);
-      } catch (_) {}
-    } catch(e) { return false; }
-    // Cumulative counter, reported by ui.repaint. Not just a debug aid: it is
-    // the only externally observable proof that a repaint actually happened.
-    // "The window looks stale" has no other symptom to check, and a caller
-    // cannot poll for it — polling calls repaint itself, which *consumes* the
-    // queued debounce timer and destroys the very evidence being looked for.
-    this._repaintCount = (this._repaintCount || 0) + 1;
-    // If we just re-added an inactive view it is now on top of the stack —
-    // put the real active view back so the user sees the tab they selected.
-    if (!wasActive) {
-      const active = this._getView(this.activeTab);
-      if (active) {
-        try {
-          this.window.removeBrowserView(view);
-          this.window.addBrowserView(active);
-          this._layoutView(active);
-        } catch(e) {}
-      }
+        const v = this._getView(tid);
+        if (!v || !v.webContents || v.webContents.isDestroyed()) return;
+        const b = v.getBounds();
+        const raw = await withDeadline(this.evaluate('(function(){return String(window.innerWidth);})()', tid), 1500, 'geom_iw');
+        const iw = Number((raw && typeof raw === 'object' && 'value' in raw) ? raw.value : raw) || 0;
+        if (iw > 0 && b.width > 0 && Math.abs(iw - b.width) > 2) {
+          recordError('layout_mismatch', {
+            tab: tid, phase: 'after-resize',
+            expected: { width: b.width }, actual: { innerWidth: iw },
+          });
+          this._forceRepaint(v, { hard: true });
+        }
+      } catch (_) { /* renderer 正在忙/已销毁：下一次 resize 会再来一次 */ }
+    }, 160);
+    if (timer.unref) timer.unref();
+  }
+
+  /**
+   * 让合成器重新画一次，分两档。
+   *
+   * soft（默认）：只 webContents.invalidate() —— 不改几何、不重排、不可见。
+   * hard：额外做 1px 微调（width+1 再 width），因为**只有尺寸变化才会让 surface
+   *       重新栅格化**（尺寸不变时 setBounds 被 Chromium 直接忽略）。
+   *
+   * 为什么要分档（2026-10-25 用户报"一闪一闪、大一下小一下"）：
+   * 1px 微调必然触发两次重排，文字会肉眼可见地跳一下；再叠 removeBrowserView /
+   * addBrowserView 还会闪一帧白。把这套放在"每次导航完成 / 每次窗口焦点变化"
+   * 这种高频路径上，就变成了用户看到的抽搐。
+   * 所以高频路径一律 soft；只有"确认 surface 尺寸脱节"（scale-mismatch、白屏阶梯）
+   * 才付 hard 的代价。
+   *
+   * 也不再 remove/add：那是过去没有 invalidate 时的唯一手段，代价是闪一帧白，
+   * 而现在 invalidate 覆盖了它的作用。
+   */
+  _forceRepaint(view, opts = {}) {
+    const hard = opts && opts.hard === true;
+    const tabId = this._tabIdOfView(view);
+    if (tabId === null) return false;
+    const wc = view.webContents;
+    if (!wc || (typeof wc.isDestroyed === 'function' && wc.isDestroyed())) return false;
+    try {
+      wc.invalidate();
+    } catch (e) {
+      return false;
     }
+    // Cumulative counter, reported by ui.repaint / ui.window_bounds. Not just a
+    // debug aid: it is the only externally observable proof that a repaint
+    // actually happened, and (for hard) that no geometry nudge leaked into a
+    // hot path.
+    this._repaintCount = (this._repaintCount || 0) + 1;
+    if (!hard) return true;
+    try {
+      const b = view.getBounds();
+      view.setBounds({ ...b, width: b.width + 1 });
+      view.setBounds(b);
+      this._hardRepaintCount = (this._hardRepaintCount || 0) + 1;
+    } catch (e2) { /* 视图正在销毁 */ }
     return true;
   }
 
@@ -3741,9 +3785,28 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     // 用 zoomFactor 把两者分开：页面缩放有明确的 zoom 值，surface 脱节时 zoom 仍是 1。
     let zoom = null;
     try { zoom = typeof wc.getZoomFactor === 'function' ? wc.getZoomFactor() : null; } catch (_) {}
-    const iw = Number(dom && dom.iw) || 0;
-    if (bounds && bounds.width > 0 && iw > 0 && Math.abs(iw - bounds.width) > 2
-        && (zoom === null || Math.abs(zoom - 1) < 0.01)) {
+    let iw = Number(dom && dom.iw) || 0;
+    let mismatched = bounds && bounds.width > 0 && iw > 0 && Math.abs(iw - bounds.width) > 2
+      && (zoom === null || Math.abs(zoom - 1) < 0.01);
+    if (mismatched) {
+      // 刚 resize 完的那一两帧里 innerWidth 会短暂滞后（布局还没跟上新尺寸），
+      // 直接判 scale-mismatch 就会误触发 hard 重绘 —— 而 hard 会重排两次，
+      // 用户看到的就是"大一下小一下"（2026-10-25 真机就这么抖的）。
+      // 所以等 120ms 再读一次：还是不一致才算 surface 真的脱节。
+      await new Promise((r) => { const t = setTimeout(r, 120); if (t.unref) t.unref(); });
+      let iw2 = 0;
+      try {
+        const raw2 = await withDeadline(this.evaluate(PageManager.PAINT_DOM_JS, tid), 2000, 'paint_dom2');
+        const s2 = (raw2 && typeof raw2 === 'object' && 'value' in raw2) ? raw2.value : raw2;
+        const parsed2 = typeof s2 === 'string' ? JSON.parse(s2) : null;
+        iw2 = Number(parsed2 && parsed2.iw) || 0;
+      } catch (_) { /* 读不到就按原判断 */ }
+      if (iw2 > 0) {
+        if (Math.abs(iw2 - bounds.width) <= 2) mismatched = false;
+        else iw = iw2;
+      }
+    }
+    if (mismatched) {
       cls = {
         verdict: 'scale-mismatch',
         blank: cls.blank,
@@ -3889,7 +3952,9 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
       if (!view || !view.webContents || view.webContents.isDestroyed()) return rec;
       if (action === 'repaint') {
         this._paintSteps.set(tabId, steps + 1);
-        this._forceRepaint(view);
+        // 这里必须 hard：被判成白屏/scale-mismatch 时，surface 很可能就是旧尺寸，
+        // 只 invalidate 不会重新栅格化。用户已经看到坏画面了，1px 重排的代价无所谓。
+        this._forceRepaint(view, { hard: true });
         await new Promise((r) => { const t = setTimeout(r, 320); if (t.unref) t.unref(); });
         return this._auditPaintNow(tabId);
       }
@@ -4007,7 +4072,7 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
    * explicit "I know this window looks wrong, redraw it" call rather than a
    * heuristic.
    */
-  repaint(tabId) {
+  repaint(tabId, opts = {}) {
     const tid = tabId !== undefined && tabId !== null ? tabId : this.activeTab;
     const view = this._getView(tid);
     if (!view) return { ok: false, error: 'no-such-tab', tab: tid };
@@ -4019,7 +4084,7 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     // to ask, the browser already scheduled one" — i.e. the window was stale
     // for ~120ms and has since caught up on its own.
     if (pending) { clearTimeout(pending); this._repaintTimers.delete(tid); }
-    const ok = this._forceRepaint(view);
+    const ok = this._forceRepaint(view, { hard: opts && opts.hard === true });
     return { ok, tab: tid, was_active: tid === this.activeTab, was_pending: !!pending, repaint_count: this._repaintCount || 0 };
   }
 
@@ -4216,6 +4281,7 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
       const out = { ok: true };
       try { out.bounds = this.window.getBounds(); } catch (_) { /* 窗口已销毁 */ }
       try { out.content = this.window.getContentBounds(); } catch (_) { /* 窗口已销毁 */ }
+      out.repaints = { soft: this._repaintCount || 0, hard: this._hardRepaintCount || 0 };
       const views = {};
       for (const [id, view] of this.tabs) {
         try { views[id] = view.getBounds(); } catch (_) { /* 视图已销毁 */ }

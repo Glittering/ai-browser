@@ -524,17 +524,25 @@ function createWindow() {
   // 触发点选这几个：窗口缩放、进出全屏（macOS 全屏会换 display）、显示器参数变化
   // （分辨率/缩放/插拔外接屏）、系统从睡眠唤醒 —— 这四类都会让"窗口几何"和
   // "合成器手里的 surface 尺寸"脱节，是最常见的来源。
-  mainWindow.on('resize', () => repaintActiveSoon(150));
-  mainWindow.on('enter-full-screen', () => { layoutWithBanner(); repaintActiveSoon(120); });
-  mainWindow.on('leave-full-screen', () => { layoutWithBanner(); repaintActiveSoon(120); });
-  const onDisplayChange = () => { try { layoutWithBanner(); } catch (e) {} repaintActiveSoon(60); };
+  // 几何变化后不能只重画：还要确认"渲染视口真的跟上了新尺寸"（见 afterGeometryChange
+  // 的注释 —— 视图 800 而页面还按 1280 排版，就是用户看到的"大一下小一下"）。
+  const afterGeometry = () => { try { pageManager.afterGeometryChange(); } catch (e) {} };
+  let geomTimer = null;
+  const afterGeometrySoon = (ms = 150) => {
+    if (geomTimer) clearTimeout(geomTimer);
+    geomTimer = setTimeout(afterGeometry, ms);
+  };
+  mainWindow.on('resize', () => afterGeometrySoon(150));
+  mainWindow.on('enter-full-screen', () => { layoutWithBanner(); afterGeometrySoon(120); });
+  mainWindow.on('leave-full-screen', () => { layoutWithBanner(); afterGeometrySoon(120); });
+  const onDisplayChange = () => { try { layoutWithBanner(); } catch (e) {} afterGeometrySoon(80); };
   try {
     screen.on('display-metrics-changed', onDisplayChange);
     screen.on('display-added', onDisplayChange);
     screen.on('display-removed', onDisplayChange);
   } catch (e) { /* 无 screen 模块（极老版本） */ }
   try {
-    powerMonitor.on('resume', () => { onDisplayChange(); repaintActiveSoon(400); });
+    powerMonitor.on('resume', () => { onDisplayChange(); afterGeometrySoon(400); });
   } catch (e) { /* 无 powerMonitor */ }
   mainWindow.on('app-command-added', (_e, cmd) => {
     // macOS window-management commands (zoom / minimize / fullscreen).

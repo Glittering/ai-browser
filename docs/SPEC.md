@@ -199,6 +199,31 @@ input"这类位置猜测** —— 猜出来的对应关系比没有更糟。
 `show` / `restore` / `focus` 时重绘当前标签；`ui.repaint` 供 agent 显式兜底，
 回执带累计 `repaint_count` —— 这是"重绘真的发生了"的唯一可证伪判据。
 
+### 两档重绘：soft / hard（2026-10-25 用户的"一闪一闪"教的）
+
+| 档 | 做什么 | 用在哪 | 可见性 |
+|---|---|---|---|
+| `soft`（默认） | 只 `webContents.invalidate()` | 导航事件、焦点、show/restore、resize | 不可见 |
+| `hard` | 额外 1px 微调（`width+1` → `width`） | 白屏阶梯、`scale-mismatch`、resize 收敛失败 | **会重排两次** |
+
+背景：1px 微调是唯一能让 **surface 重新栅格化**的手段（尺寸不变时 `setBounds`
+被 Chromium 直接忽略），但它必然触发两次重排。把 hard 放在"每次导航完成"这种高频
+路径上，就是 v2.1.14 用户看到的抽搐。所以高频路径一律 soft，hard 只在"确认 surface
+真的脱节"时付代价。
+
+也不再 `removeBrowserView + addBrowserView`：那是没有 invalidate 时代唯一的手段，
+代价是闪一帧白。
+
+`ui.window_bounds` 回执带 `repaints:{soft,hard}`；`npm run layout` 的 G4 断言
+"导航期间几何恒定 + hard 增量为 0"——hard 一旦漏进高频路径，回归先红。
+
+### resize 收敛（afterGeometryChange）
+
+窗口缩放后实测会出现 **视图 800 而页面 `innerWidth` 还是 1280**（渲染器没应用尺寸变化），
+合成器于是把 1280 宽的内容画进 800 的框 —— 内容整体缩小，等它追上又是一次跳变，
+即"大一下小一下"。所以几何变化后不止重排：160ms 后回读 `innerWidth` 与视图宽度比对，
+不等就记 `layout_mismatch` 并 hard 重绘一次。
+
 ## 白屏自检（加载成功但屏幕是白的）
 
 上一节的重绘解决"画面old"，这一节解决"画面空的"。两者都没有事件可听，但性质不同：

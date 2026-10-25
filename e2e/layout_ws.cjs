@@ -121,11 +121,19 @@ async function main() {
   console.log('\n[G2] 窗口缩放后：三条等式仍然成立（这是"内容缩成一小块"的高发路径）');
   for (const size of [{ width: 800, height: 600 }, { width: 1100, height: 900 }, { width: 900, height: 700 }]) {
     unwrap(await b.call('ui.window_bounds', { set: size }));
-    await sleep(500);
-    const g = unwrap(await b.call('ui.window_bounds', {}));
+    // 收敛式等待：产品在几何变化后 160ms 会做一次"渲染视口是否跟上"的确认，
+    // 跟不上就 hard 重绘一次。这里允许它在 1.5s 内收敛，但**必须收敛**。
+    let g = null;
+    let m = null;
+    for (let i = 0; i < 15; i++) {
+      await sleep(100);
+      g = unwrap(await b.call('ui.window_bounds', {}));
+      m = await metrics(b, tab);
+      const v = (g.views || {})[tab] || {};
+      if (m && v.width && Math.abs(m.iw - v.width) <= 2) break;
+    }
     const view = (g.views || {})[tab] || {};
     const content = g.content || {};
-    const m = await metrics(b, tab);
     check(`G2 ${size.width}x${size.height} 视图跟随窗口`,
       view.width === content.width && Math.abs(view.height - (content.height - TAB_BAR_HEIGHT)) <= 2,
       `view=${view.width}x${view.height} content=${content.width}x${content.height}`);
@@ -142,6 +150,57 @@ async function main() {
     check('G3 自检的 iw 与视图宽度一致（这条能抓住 surface 尺寸脱节）',
       Math.abs((p.dom && p.dom.iw) - view.width) <= 2,
       `iw=${p.dom && p.dom.iw} view=${view.width}`);
+  }
+
+  console.log('\n[G4] 不抽搐：导航期间视图几何一次都不许变，高频路径不许用 hard 重绘');
+  {
+    const hardBefore = ((unwrap(await b.call('ui.window_bounds', {})).repaints) || {}).hard || 0;
+    // 直接量"大一下小一下"：导航过程中每 25ms 采一次视图宽度，必须是同一个数。
+    const samples = [];
+    let stop = false;
+    const sampler = (async () => {
+      while (!stop) {
+        try {
+          const g = unwrap(await b.call('ui.window_bounds', {}));
+          const v = (g.views || {})[tab] || {};
+          if (v.width) samples.push(v.width + 'x' + v.height);
+        } catch (_) { /* 采集中导航可能短暂不可读 */ }
+        await sleep(25);
+      }
+    })();
+    unwrap(await b.call('ui.navigate', { tab, url: URL + '?again=1' }));
+    await sleep(1200);
+    stop = true;
+    await sampler;
+    const uniq = [...new Set(samples)];
+    check('G4 导航期间视图尺寸保持恒定（变了就是肉眼可见的"大一下小一下"）',
+      uniq.length === 1, `samples=${samples.length} distinct=${JSON.stringify(uniq)}`);
+
+    const g = unwrap(await b.call('ui.window_bounds', {}));
+    const rp = g.repaints || {};
+    check('G4 这次导航没有触发 hard 重绘（1px 微调会重排两次）',
+      (rp.hard || 0) - hardBefore === 0, `hard before=${hardBefore} after=${JSON.stringify(rp)}`);
+
+    // soft 重绘：不许改几何（这是它和 hard 的唯一区别）
+    const before = ((unwrap(await b.call('ui.window_bounds', {})).views || {})[tab]) || {};
+    const r = unwrap(await b.call('ui.repaint', { tab }));
+    await sleep(200);
+    const after = ((unwrap(await b.call('ui.window_bounds', {})).views || {})[tab]) || {};
+    check('G4 ui.repaint 默认不改几何（soft）',
+      before.width === after.width && before.height === after.height,
+      `${JSON.stringify(before)} -> ${JSON.stringify(after)}`);
+    check('G4 ui.repaint 报告 ok', r && r.ok === true, JSON.stringify(r && r.error));
+
+    // hard 才是"允许重排两次"的那一档，且必须回到原尺寸
+    const r2 = unwrap(await b.call('ui.repaint', { tab, hard: true }));
+    await sleep(250);
+    const after2 = ((unwrap(await b.call('ui.window_bounds', {})).views || {})[tab]) || {};
+    const rp2 = unwrap(await b.call('ui.window_bounds', {})).repaints || {};
+    check('G4 hard 重绘后几何回到原值（1px 微调是临时的）',
+      after2.width === before.width && after2.height === before.height,
+      `${JSON.stringify(before)} -> ${JSON.stringify(after2)}`);
+    check('G4 hard 重绘被计数（可被回归/诊断观察）', (rp2.hard || 0) >= 1, JSON.stringify(rp2));
+    check('G4 hard 重绘回执 ok', r2 && r2.ok === true, JSON.stringify(r2 && r2.error));
   }
 
   console.log(`\n==== PASS=${PASS} FAIL=${FAIL} ====`);
