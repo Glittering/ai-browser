@@ -24,6 +24,11 @@ const CHILD_ENV_LIMITS = {
   AI_BROWSER_NETWORK_MAX_RECORDS: "150",
   AI_BROWSER_NETWORK_MAX_BODY_BYTES: "65536",
   AI_BROWSER_NETWORK_SENSITIVE: "1",
+  // 启动页设空白：默认启动页是 https://www.baidu.com，它也在**全局** body 配额内，
+  // 且窗口显示后的一次重排会触发百度做响应式/懒加载重载——这些 body 在
+  // ui.network_clear 之后才到达，会把本套件的小 POST body 挤成 evicted（假红）。
+  // 空白启动页让本套件自成闭环、不依赖联网。
+  AI_BROWSER_START_URL: "",
 };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
