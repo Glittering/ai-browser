@@ -188,10 +188,18 @@ async function main() {
   console.log('\n[S3] confirm：点删除不超时，回执说明发生了什么');
   {
     const tab = unwrap(await b.call('ui.new_tab', { url: `${HOST}/confirm.html` })).tab;
-    await sleep(1200);
-    const tree = unwrap(await b.call('ui.get_tree', { tab, subset: 'interactive' }));
-    const id = findClickable(tree && tree.tree, '删除评论');
-    check('S3 找到「删除评论」按钮', !!id, 'no clickable');
+    // 轮询而不是"睡 1.2s 然后赌一次"：发布流程里这一步跑在"刚装完、App 刚起来"
+    // 的时刻，机器忙、页面还没渲染完就会查不到按钮（2026-10-25 连续两次发版在这里
+    // 红）。断言应该是"按钮最终出现且可点"，不是"1.2s 内出现"。
+    let id = null;
+    const deadline = Date.now() + 8000;
+    while (Date.now() < deadline) {
+      const tree = unwrap(await b.call('ui.get_tree', { tab, subset: 'interactive' }).catch(() => null));
+      id = findClickable(tree && tree.tree, '删除评论');
+      if (id) break;
+      await sleep(250);
+    }
+    check('S3 找到「删除评论」按钮', !!id, 'no clickable after 8s');
 
     const t0 = Date.now();
     const r = unwrap(await b.call('ui.act', { tab, action: 'click', target: id }));
