@@ -266,8 +266,13 @@ blank-with-dom / no-frame`；只有两个 `blank-*` 算缺陷，`no-frame`（我
 历史注记：早期用 `capturePage()` 会因遮挡失明，于是换成 CDP + `clip.scale` ——
 方向对了，参数错了。单次自检 20–160ms。
 
-自救阶梯**有上限**：`repaint`（remove+add，不丢状态）→ `reload`（丢页面临时状态，
+`ui.screenshot` 同理：`clip.scale < 1` 现在按 `scale=1` 抓、本地 `nativeImage.resize()`
+缩，输出尺寸与语义不变。**`clip.scale > 1` 仍交给 Chromium** —— 本地放大得不到像素，
+糊掉的放大图比"偶尔一帧"更糟；且它只在调用方显式要放大值时发生，不在任何自动路径上。
+
+自救阶梯**有上限**：`repaint`（soft：只 `invalidate()`）→ `reload`（丢页面临时状态，
 所以排第二）→ `give-up`（落 `error.jsonl` 的 `paint_blank` + 广播，不再折腾）。
+到了最后一步才允许 `hard` 重绘（1px 微调，见「三条重绘铁律」）。
 上限是硬要求：CSS 把文字刷成白的页面 reload 一万次也还是白，无上限重试会变成一个
 看不见的死循环。自己发起的 reload 不清零步数（否则又是无限重载）。
 
@@ -298,7 +303,7 @@ bounds。`setBounds` 只改几何、不改 surface；`removeBrowserView + addBro
 同样不保证重栅格化。真正的重栅格化只有 `webContents.invalidate()`（再叠一次 1px
 微调，因为尺寸没变时 `setBounds` 会被直接忽略，不会重算 surface）。
 
-三条可判定等式（`e2e/layout_ws.cjs`，`npm run layout`，15 断言）：
+三条可判定等式（`e2e/layout_ws.cjs`，`npm run layout`，25 断言）：
 
 ```
 view.bounds            == 窗口内容区 - 标签栏
@@ -336,6 +341,40 @@ window.devicePixelRatio ∈ {1,2}
 - `AI_BROWSER_GPU=on|off` 可强制；
 - `ui.server_info` 回执带 `render_path: {gpu, reason}`（`default` / `env` / `fallback`）——
   排查绘制类问题时，第一件事就是确认跑在哪条路上。
+
+## 帧级回归（`npm run flicker`）
+
+白屏有判据、几何有等式，但"闪一下"这两类**只有在窗口像素里才存在**：DOM 正常、
+`evaluate` 正常、CDP 截图正常，人眼却看得见。所以需要一个真正看屏幕的套件。
+
+`e2e/flicker_ws.cjs` + `e2e/_win_capture.py`：起 App → 加载一个**铺满视口、上下各一条
+每次换颜色的通栏色带**的 fixture → 触发 `location.reload()` → 用 macOS `avfoundation`
+**固定 60fps** 录内容区 → 逐帧判定。
+
+两道断言：
+
+1. **采集有效**：帧间差异峰值 > 1.0。整段画面一帧没变 = 根本没拍到目标窗口，
+   此时的"通过"是假的（这条比结果本身更重要 —— 假绿比红危险）。
+2. **零缩小帧**：任意一帧的内容宽度 ≥ 60%（正常约 97–100%，故障约 24–25%）。
+
+### 五个坑，每个都制造过假阴性
+
+| 坑 | 真相 |
+|---|---|
+| `screencapture -v` 录 | **变帧率**（实测 ~28.7fps），50ms 的闪现被整段丢掉 —— 连续四轮"录不到" |
+| 裁切坐标写死 | 窗口一动就拍到隔壁窗口，得到静态画面 = 假阴性 |
+| `CGDisplayPixelsWide` 当 backing scale | 它返回**逻辑点**（1470），avfoundation 实际录 2940×1912。按 1 倍算，裁切偏到左上角 1/4 |
+| 只等固定时长就 reload | ffmpeg 起播抖动几百毫秒，reload 可能落在开录之前 → 整段恒定，看起来像"没拍到" |
+| 量"非白像素 bbox" | 编码器在裁剪边缘留暗线、窗口圆角透出桌面，最后一行撒几十个暗点，一量就是 100% —— 缩到 24% 的帧照样"通过" |
+
+最终做法：裁切区域由 App 自己的 `ui.window_bounds`（`view.getBounds()` +
+`contentBounds.y - bounds.y`）给出，不猜标题栏高度；坐标按**录制文件的真实尺寸**换算
+（`ffprobe` 出来的宽度 ÷ 屏幕逻辑宽）；reload 等到**录制文件真的在增长**后再触发；
+宽度取 `lum<200` 掩码在切掉外圈 8px 后 x 坐标的 0.5%–99.5% 分位。
+
+负向验证（把 `clip.scale: 0.25` 加回去）实测：3 轮全部 FAIL，`tiny` 命中 24.3%，
+帧号连续 3–4 帧；恢复后 3/3 全绿且每轮恰好 1 帧可见变化（色带换色）。
+**没有通过这一步的回归不算回归** —— 一个永远绿的套件只是心理安慰。
 
 ## 错误日志（崩溃了要查得到）
 

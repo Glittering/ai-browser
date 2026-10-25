@@ -1040,13 +1040,39 @@ class PageManager {
         captureBeyondViewport: o.fullPage,
       };
       if (o.quality !== undefined) params.quality = o.quality;
-      if (o.clip) params.clip = o.clip;
+      // clip.scale < 1（"给我一张缩略概览"）**绝不交给合成器**：带 clip.scale 的
+      // 截图会让 Chromium 按该比例临时重建 surface，窗口恰好在合成时就会贴上那张
+      // 缩小的图 1–3 帧（见 SPEC「取帧两条铁律」，2026-10-25 实锤）。
+      // 现在按 scale=1 抓、用 nativeImage 在我们自己这边缩 —— 输出尺寸一致，
+      // 但不再碰合成器。scale>1（放大取值）仍交给 Chromium：本地放大得不到像素。
+      let localScale = 1;
+      if (o.clip && typeof o.clip.scale === 'number' && o.clip.scale > 0 && o.clip.scale < 1) {
+        localScale = o.clip.scale;
+        params.clip = { ...o.clip, scale: 1 };
+      } else if (o.clip) {
+        params.clip = o.clip;
+      }
       const shot = await withDeadline(
         dbg.sendCommand('Page.captureScreenshot', params),
         20000, 'captureScreenshot'
       );
       if (!shot || typeof shot.data !== 'string') {
         return { ok: false, error: 'empty screenshot result', tab: tid };
+      }
+      // 需要缩小就自己做（见上：不把缩放交给合成器）。
+      let imgData = shot.data;
+      if (localScale !== 1) {
+        try {
+          const img0 = nativeImage.createFromBuffer(Buffer.from(shot.data, 'base64'));
+          if (!img0.isEmpty()) {
+            const sz = img0.getSize();
+            const w = Math.max(1, Math.round(sz.width * localScale));
+            const resized = img0.resize({ width: w });
+            imgData = o.format === 'jpeg'
+              ? resized.toJPEG(typeof o.quality === 'number' ? o.quality : 80).toString('base64')
+              : resized.toPNG().toString('base64');
+          }
+        } catch (_) { /* 缩失败就用原图（宁可图大，不要空图） */ }
       }
 
       const mime = 'image/' + (o.format === 'jpeg' ? 'jpeg' : o.format);
@@ -1070,7 +1096,7 @@ class PageManager {
       const summary = screenshotOpts.describeShot({
         format: o.format,
         mime,
-        bytes: Buffer.byteLength(shot.data, 'base64'),
+        bytes: Buffer.byteLength(imgData, 'base64'),
         width: meta.width,
         height: meta.height,
         url: (this._getView(tid) && this._getView(tid).webContents.getURL()) || undefined,
@@ -1082,7 +1108,7 @@ class PageManager {
       if (o.path) {
         try {
           fs.mkdirSync(path.dirname(o.path), { recursive: true });
-          fs.writeFileSync(o.path, Buffer.from(shot.data, 'base64'));
+          fs.writeFileSync(o.path, Buffer.from(imgData, 'base64'));
           filePath = o.path;
         } catch (e) {
           return { ok: false, tab: tid, error: 'screenshot captured but writing to ' + o.path + ' failed: ' + ((e && e.message) || e), ...summary };
@@ -1095,7 +1121,7 @@ class PageManager {
         ok: true,
         tab: tid,
         // data 是 base64 裸数据（不带 data: 前缀）—— 调用方按需自己拼。
-        data: shot.data,
+        data: imgData,
         mime,
         ...(filePath ? { path: filePath } : {}),
         ...(ignored.length ? { ignored_params: ignored } : {}),

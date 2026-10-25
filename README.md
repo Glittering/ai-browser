@@ -724,7 +724,7 @@ not bugs. The full write-up, including why the first measurement of this was wro
 ## Test & dev
 
 ```bash
-npm test             # vitest — 411 tests across 27 files
+npm test             # vitest — 970 tests across 69 files
 npm run smoke        # Electron contract layer, offline fixture      — 31 checks
 npm run capabilities # text fields, canvas, page source, network, DOM editing — 54 checks
 npm run richtext     # rich-text editors, nested menus, forms, errors, tags, upload — 117 checks
@@ -736,8 +736,14 @@ npm run audit        # every advertised action must exist; wait/downloads/permis
 npm run nav          # address bar + load-failure error page (the "white screen" report) — 19 checks
 npm run focus        # no focus stealing + full capability while backgrounded — 32 checks
 npm run interact     # trusted drag / key press / wheel (pointer gestures) — 31 checks
-npm run view         # viewport repaint + snapshot/diff verification — 28 checks
-npm run e2e:all      # 一次跑完上面全部套件（每个独立端口）+ 可信汇总 — 428 checks
+npm run view         # viewport repaint budget + snapshot/diff verification — 29 checks
+npm run dialog       # browser-level dialogs (native sheet blocks the renderer) — 15 checks
+npm run wrapper      # "in the tree but won't click" = matched a container, not a link — 13 checks
+npm run paint        # blank-page self-check: verdicts, bounded ladder, no false alarms — 23 checks
+npm run layout       # geometry invariants + "no twitching" (zero extra repaints on nav) — 25 checks
+npm run flicker      # frame-level: no frame may render the page shrunk (needs screen recording) — 6 checks
+npm run e2e:all      # 一次跑完上面全部 19 个套件（每个独立端口）+ 可信汇总 — 636 checks
+npm run verify:app   # boot the packaged /Applications app and assert on it — 22 checks
 npm run realsites    # navigate/read/act against a matrix of real sites
 ```
 

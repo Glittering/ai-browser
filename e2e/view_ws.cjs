@@ -4,10 +4,13 @@
 //
 // 1) **"页面已经变了但窗口不刷新"**（用户实测：已经切到无限画布/ComfyUI 了，
 //    视图却不动，来回点几次标签才更新）。
-//    根因不是"没触发"，而是**只有标签切换会强制合成器重绘** —— setActive /
-//    closeTab 里那句 removeBrowserView + addBrowserView + setBounds 是唯一的
-//    重绘手段，导航路径上一处都没有。history.pushState 的 SPA 路由切换
-//    连 load 事件都不发，于是永远等不到。
+//    最初的判断是"导航事件没挂钩子"，于是在 5 个加载事件 + navigate() 结尾各加了
+//    一次 repaint。挂钩子确实治好了"不刷新"，但**制造了更糟的东西**：每次加载都强制
+//    整页重新栅格化，而那一刻图层尺寸还是初始值 —— 用户看到"先缩成左上角一小块、
+//    闪一下、然后正常"（2026-10-25，连续四轮才定位到）。
+//    最终结论见 SPEC「三条重绘铁律」第 3 条：**导航/输入这类"动作"路径上什么都不挂**，
+//    画面更新交给合成器，重绘只作定向兜底（白屏阶梯 / scale-mismatch / 显式 ui.repaint）。
+//    所以 R-01 / R-04 现在断言的是**反面**：导航事件不许让计数动。
 //    判据用 `repaint_count`（累计值），而不是"看截图"：截图要人眼，计数能证伪。
 //    ⚠️ 计数查询本身会 +1，所有差值都扣掉这一次。
 //
@@ -159,7 +162,7 @@ async function main() {
   const repaintCount = async () => (unwrap(await b.call("ui.repaint", { tab })) || {}).repaint_count || 0;
 
   // ===================== R. 视图刷新 =====================
-  console.log("\n[R. 视图刷新：页面变了窗口必须跟着重绘]");
+  console.log("\n[R. 视图刷新：画面更新交给合成器，导航路径不许强制重绘]");
   await sleep(700);
   const r0 = await repaintCount();
 
@@ -168,8 +171,8 @@ async function main() {
   await sleep(800);
   const r1 = await repaintCount();
   const stA = await probe();
-  check("R-01 did-navigate-in-page 触发重绘（净增 = 差值-1，1 是本次查询自身）",
-    (r1 - r0 - 1) >= 1, `count ${r0}→${r1} (净增 ${r1 - r0 - 1})`);
+  check("R-01 导航（did-navigate-in-page）**不许**触发重绘（动作路径不挂重绘，见 SPEC 铁律 3）",
+    (r1 - r0 - 1) === 0, `count ${r0}→${r1} (净增 ${r1 - r0 - 1})`);
   check("R-02 页面确实切到了 view=B", stA.hash === "#view-b" && stA.hud === "view=B",
     JSON.stringify({ hash: stA.hash, hud: stA.hud }));
 
@@ -190,8 +193,8 @@ async function main() {
   }
   await sleep(500);
   const f1 = await repaintCount();
-  check("R-04 did-frame-finish-load 触发重绘", (f1 - f0 - 1) >= 1,
-    `count ${f0}→${f1} (净增 ${f1 - f0 - 1})`);
+  check("R-04 子帧加载完成（did-frame-finish-load）**不许**触发重绘",
+    (f1 - f0 - 1) === 0, `count ${f0}→${f1} (净增 ${f1 - f0 - 1})`);
   check("R-05 iframe 内容确实加载完成", frameReady);
 
   // R-06: ui.repaint 幂等 + 对不存在的 tab 明确报错（不静默假成功）
