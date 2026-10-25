@@ -34,6 +34,25 @@ describe('version single-source consistency', () => {
     ).toBe(true);
   });
 
+  it('package-lock.json 的版本号与 package.json 一致', () => {
+    // 锁文件的 "version" 字段 npm 自己不校验，但它**会被 npm install 改**：
+    // 发版时只改 package.json、忘了锁文件，下一次任何人 install 就把工作区弄脏，
+    // 发版脚本的前置检查（工作区必须干净）随即卡住 —— 2026-10-25 真的卡了一轮。
+    // 锁文件里有两处（顶层 + packages[""]），两处都得对。
+    const lock = JSON.parse(readFileSync(path.join(root, 'package-lock.json'), 'utf8'));
+    const bad = [];
+    if (lock.version !== pkgVersion) bad.push(`顶层 version=${lock.version}`);
+    const rootPkg = (lock.packages || {})[''] || {};
+    if (rootPkg.version !== pkgVersion) bad.push(`packages[""].version=${rootPkg.version}`);
+    expect(
+      bad.length === 0,
+      [
+        `package-lock.json 与 package.json 版本号不一致（package.json=${pkgVersion}）：${bad.join('，')}。`,
+        '恢复方式：把锁文件里这两处改成与 package.json 相同的值（或跑一次 `npm install --package-lock-only`）。',
+      ].join('\n')
+    ).toBe(true);
+  });
+
   it('major 版本 ≥ 2 时必须同时存在迁移文档', () => {
     // 首个公开发布是 v1.2.0。2026-10-19 起进入 v2（标签页工具合并为 browse_tabs），
     // 这是一次有意的破坏性变更 —— 所以这条断言从"必须留在 1.x"改成

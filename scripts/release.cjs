@@ -3,8 +3,8 @@
 // push(GitHub) → npm publish → MCP registry publish。
 //
 // 为什么要这个脚本（而不是每次手工敲 8 条命令）：
-//   发版最容易漏的不是编译，是**同步**。版本号有 4 处（package.json、
-//   server.json 两处、src/shared/version.js），GitHub 有 2 条分支 + 1 个 tag，
+//   发版最容易漏的不是编译，是**同步**。版本号有 5 处（package.json、
+//   package-lock 两处、server.json 两处、src/shared/version.js），GitHub 有 2 条分支 + 1 个 tag，
 //   发布有 2 个仓库（npm、MCP registry）。漏一处不会报错，只会让用户在
 //   issue 里报一个不存在的版本、或者让 npx 拉到的还是旧版 —— 而且要到
 //   下一次有人装的时候才发现。机器不会漏，人会。
@@ -108,7 +108,16 @@ rewrite('package.json', (s) => s.replace(`"version": "${from}"`, `"version": "${
 // registry 认为"清单说 2.1.3、实际包是 2.1.2"，校验直接不通过。
 rewrite('server.json', (s) => s.split(`"version": "${from}"`).join(`"version": "${to}"`));
 rewrite('src/shared/version.js', (s) => s.replace(`VERSION = '${from}'`, `VERSION = '${to}'`));
-ok('4 处版本号已同步（package.json / server.json×2 / version.js）');
+// package-lock 里的 version 字段（顶层 + packages[""]）也得改。npm 自己不校验它，
+// 但任何人 `npm install` 一次就会把它刷成新值 —— 于是工作区变脏、下一次发版的
+// 「前置检查」直接卡住（2026-10-25 就在这上面卡过一轮）。锁文件的两个 version
+// 都替换；少了任何一处，下次 install 又会漂回去。
+try {
+  rewrite('package-lock.json', (s) => s.split(`"version": "${from}"`).join(`"version": "${to}"`));
+} catch (e) {
+  warn('package-lock.json 版本号未同步（可能本来就漂着）：' + String(e.message).split('\n')[0]);
+}
+ok('5 处版本号已同步（package.json / package-lock×2 / server.json×2 / version.js）');
 mark('版本号');
 
 // ---- 2. 测试 --------------------------------------------------------------
@@ -132,7 +141,7 @@ step('提交并打 tag');
 const notes = notesFile
   ? fs.readFileSync(notesFile, 'utf8').trim()
   : `v${to}`;
-git('add', 'package.json', 'server.json', 'src/shared/version.js');
+git('add', 'package.json', 'package-lock.json', 'server.json', 'src/shared/version.js');
 git('commit', '-m', `chore(release): v${to}`);
 ok(`commit chore(release): v${to}`);
 mark('commit');
