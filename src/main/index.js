@@ -1,6 +1,6 @@
 // main/index.js — Electron entry v5 (multi-tab, real UI)
 // One process, one WS server, multiple tabs with real tab bar.
-import { app, BrowserWindow, BrowserView, ipcMain, net, session, dialog } from 'electron';
+import { app, BrowserWindow, BrowserView, ipcMain, net, session, dialog, screen, powerMonitor } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -488,6 +488,8 @@ function createWindow() {
   mainWindow.on('resize', () => {
     layoutWithBanner();
   });
+  // 注：resize 的重绘（repaintActiveSoon）在下面"几何变化"一段里统一绑定 ——
+  // 那里能看到 repaintActive 的定义。
 
   // === Window becoming visible again → force a compositor repaint ===
   //
@@ -503,9 +505,37 @@ function createWindow() {
   // looking at a stale frame. Repainting on show/restore/focus means the view
   // catches up the moment it becomes visible — no clicking tabs required.
   const repaintActive = () => { try { pageManager.repaint(pageManager.activeTab); } catch (e) {} };
+  // 拖动窗口边缘时会连发几十个 resize；逐个重绘会抖成幻灯片。150ms 去抖：松手就补一帧。
+  let repaintTimer = null;
+  const repaintActiveSoon = (ms = 150) => {
+    if (repaintTimer) clearTimeout(repaintTimer);
+    repaintTimer = setTimeout(repaintActive, ms);
+  };
   mainWindow.on('show', repaintActive);
   mainWindow.on('restore', repaintActive);
   mainWindow.on('focus', repaintActive);
+
+  // === 几何变化 → 必须让 surface 重新栅格化 ===
+  //
+  // 只重排（setBounds）不够：如果 surface 还是旧尺寸，合成器会把那张大图缩进新的
+  // bounds —— 用户看到"页面缩成左上角一小块、其余全白"，而 DOM、evaluate、截图
+  // 全都正常（2026-10-25 用户截图就是这个形态）。所以要连 invalidate 一起做。
+  //
+  // 触发点选这几个：窗口缩放、进出全屏（macOS 全屏会换 display）、显示器参数变化
+  // （分辨率/缩放/插拔外接屏）、系统从睡眠唤醒 —— 这四类都会让"窗口几何"和
+  // "合成器手里的 surface 尺寸"脱节，是最常见的来源。
+  mainWindow.on('resize', () => repaintActiveSoon(150));
+  mainWindow.on('enter-full-screen', () => { layoutWithBanner(); repaintActiveSoon(120); });
+  mainWindow.on('leave-full-screen', () => { layoutWithBanner(); repaintActiveSoon(120); });
+  const onDisplayChange = () => { try { layoutWithBanner(); } catch (e) {} repaintActiveSoon(60); };
+  try {
+    screen.on('display-metrics-changed', onDisplayChange);
+    screen.on('display-added', onDisplayChange);
+    screen.on('display-removed', onDisplayChange);
+  } catch (e) { /* 无 screen 模块（极老版本） */ }
+  try {
+    powerMonitor.on('resume', () => { onDisplayChange(); repaintActiveSoon(400); });
+  } catch (e) { /* 无 powerMonitor */ }
   mainWindow.on('app-command-added', (_e, cmd) => {
     // macOS window-management commands (zoom / minimize / fullscreen).
     if (cmd === 'togglefullscreen' || cmd === 'zoom' || cmd === 'minimize') repaintActive();

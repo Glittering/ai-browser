@@ -248,6 +248,37 @@ Promise（不返回 null）。`ui.paint_check {tab, heal?}` 供调用方按需�
 
 `AI_BROWSER_PAINT_AUDIT=0` 可关闭自检（唯一用途：精确测量导航时延）。
 
+## 几何脱节（内容缩成左上角一小块）
+
+窗口约 1300×807，页面却只画进左上角约 325×260 的一块，其余全白、标签栏整条空白
+（2026-10-25 用户截图）。DOM、`evaluate`、CDP 截图**全都正常** —— 只有窗口像素是错的。
+
+成因：**窗口几何变了，合成器手里的 surface 还是旧尺寸**，于是它把那张大图缩进新的
+bounds。`setBounds` 只改几何、不改 surface；`removeBrowserView + addBrowserView`
+同样不保证重栅格化。真正的重栅格化只有 `webContents.invalidate()`（再叠一次 1px
+微调，因为尺寸没变时 `setBounds` 会被直接忽略，不会重算 surface）。
+
+三条可判定等式（`e2e/layout_ws.cjs`，`npm run layout`，15 断言）：
+
+```
+view.bounds            == 窗口内容区 - 标签栏
+window.innerWidth      == view.bounds.width      ← 这条一红就是被缩放渲染了
+window.devicePixelRatio ∈ {1,2}
+```
+
+`innerWidth ≠ view.width` 有两种来源，用 `webContents.getZoomFactor()` 分开：
+页面缩放（合法，zoom≠1）vs surface 脱节（zoom=1）。后者判 `scale-mismatch`，
+进自检的同一套阶梯（repaint → reload → give-up）。
+
+触发点全部挂了重绘（去抖）：窗口 `resize`、`enter/leave-full-screen`、
+`screen.display-metrics-changed / display-added / display-removed`、
+`powerMonitor.resume`（睡眠唤醒后 DSF 失效是已知问题）、以及 `show / restore / focus`。
+另外每次自检都跑一遍**布局看门狗** `_auditLayout`：视图几何不等于内容区就当场纠正，
+并落一条 `layout_mismatch`（带 expected / actual 两个数字）—— 下次再出现有据可查。
+
+`ui.window_bounds`：读窗口 bounds / content bounds / 每个视图实际 bounds；
+带 `set` 可改尺寸（布局类缺陷此前无法复现也无法回归，就是因为没有这个入口）。
+
 ## 错误日志（崩溃了要查得到）
 
 **曾经的坑**：主进程一处错误处理都没有。任何未捕获异常都走 Electron 默认路径 ——

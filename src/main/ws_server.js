@@ -201,6 +201,15 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
             send({ jsonrpc: '2.0', id, result: r });
             break;
           }
+          case 'ui.window_bounds': {
+            // 读：窗口 bounds / content bounds / 每个视图实际 bounds（一眼看出视图有没有
+            // 跟上窗口）。写：setBounds + 立刻重排 + invalidate，然后回读实际结果。
+            // 存在的理由：布局类缺陷（窗口缩放/全屏后内容缩成左上角一小块）此前无法
+            // 复现也无法回归 —— 没有任何入口能改窗口尺寸。
+            const r = pageManager.windowBounds(params && params.set ? params.set : null);
+            send({ jsonrpc: '2.0', id, result: r });
+            break;
+          }
           case 'ui.snapshot': {
             const r = await pageManager.snapshot({ js: params.js, label: params.label, tab: tabId });
             send({ jsonrpc: '2.0', id, result: r });

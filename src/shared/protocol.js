@@ -69,6 +69,8 @@ export const VALID_METHODS = [
   // 与 ui.repaint 的区别：repaint 是"外面的人说窗口不对，重画一次"；
   // paint_check 是"工具自己看一眼，白的话按阶梯救，救不动就如实上报"。
   'ui.paint_check',
+  // 窗口/视图几何（读 + 改）。布局类缺陷需要它才能复现与回归。
+  'ui.window_bounds',
   'ui.snapshot',
   'ui.diff',
   'ui.capabilities',

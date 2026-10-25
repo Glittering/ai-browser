@@ -133,6 +133,13 @@ describe('decidePaintAction', () => {
     expect(decidePaintAction({ verdict: 'collapsed', steps: 0 })).toBe('repaint');
   });
 
+
+  it('scale-mismatch 也走同一阶梯（先重画、再重载、然后放弃）', () => {
+    expect(decidePaintAction({ verdict: 'scale-mismatch', steps: 0 })).toBe('repaint');
+    expect(decidePaintAction({ verdict: 'scale-mismatch', steps: 1 })).toBe('reload');
+    expect(decidePaintAction({ verdict: 'scale-mismatch', steps: 2 })).toBe('give-up');
+  });
+
   it('正常页/空页/未就绪一律不动（reload 会丢用户正在填的东西）', () => {
     for (const v of ['ok', 'empty-legit', 'not-ready', 'no-frame']) {
       expect(decidePaintAction({ verdict: v, steps: 0 })).toBe('none');

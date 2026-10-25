@@ -88,6 +88,8 @@ function statsFromBitmap(bitmap) {
  *   collapsed        视图本身被压成 0 高/0 宽 —— 不是没画，是没地方画
  *   blank-with-text  DOM 里有文字，但屏幕上纯白 —— **真白屏**
  *   blank-with-dom   DOM 有几十个节点却纯白 —— **真白屏**（内容层失败）
+ *   scale-mismatch   页面按 A 宽排版、视图只有 B 宽（合成器画了一张陈旧尺寸的
+ *                    surface）—— 表现为"内容缩在左上角，其余全白"
  *   no-frame         拿不到位图（视图不可见/被销毁），无法判定
  */
 function classifyPaint({ stats, dom, bounds } = {}) {
@@ -137,6 +139,7 @@ function decidePaintAction({ verdict, steps = 0 } = {}) {
   if (verdict === 'ok' || verdict === 'empty-legit' || verdict === 'not-ready' || verdict === 'no-frame') {
     return 'none';
   }
+  // scale-mismatch 和 blank-* 走同一个阶梯：先重画，再重载，最后如实上报。
   if (steps <= 0) return 'repaint';   // 第一步：remove+add 逼合成器重画（代价最小、不丢状态）
   if (steps === 1) return 'reload';   // 第二步：重载（会丢页面临时状态，所以排在重画之后）
   return 'give-up';                   // 第三步：如实上报，不再折腾

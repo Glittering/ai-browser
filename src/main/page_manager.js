@@ -3578,6 +3578,17 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
       this.window.removeBrowserView(view);
       this.window.addBrowserView(view);
       this._layoutView(view);
+      // remove+add 只改变合成树里的位置，**不保证 surface 重新栅格化**：
+      // 如果 surface 还是旧尺寸（窗口从大到小之后很常见），合成器会把那张大图
+      // 缩小/裁到新 bounds 里 —— 用户看到的就是"内容缩成左上角一小块、其余全白"。
+      // 真正的重栅格化要靠 invalidate()；再叠一次 1px 微调，是因为
+      // setBounds 尺寸没变时 Chromium 会直接忽略（不会重算 surface）。
+      try { view.webContents.invalidate(); } catch (_) {}
+      const b = view.getBounds();
+      try {
+        view.setBounds({ ...b, width: b.width + 1 });
+        view.setBounds(b);
+      } catch (_) {}
     } catch(e) { return false; }
     // Cumulative counter, reported by ui.repaint. Not just a debug aid: it is
     // the only externally observable proof that a repaint actually happened.
@@ -3624,6 +3635,10 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     'text_len:t.replace(/\\s+/g," ").trim().length,' +
     'nodes:document.querySelectorAll("*").length,' +
     'ready_state:document.readyState,' +
+    // 渲染口径的三个数：布局视口宽高 + 设备像素比。它们是"窗口几何 vs 实际渲染"
+    // 对不上的唯一证据 —— 视图 bounds 1300 而 innerWidth 325，说明页面被按 1/4
+    // 缩放渲染（2026-10-25 用户截图那种"内容缩在左上角"就属于这一类）。
+    'iw:window.innerWidth,ih:window.innerHeight,dpr:window.devicePixelRatio,' +
     'url:location.href});})()';
 
   /**
@@ -3720,7 +3735,22 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
       frameError = e && e.message ? e.message : String(e);
     }
 
-    const cls = blankPage.classifyPaint({ stats, dom, bounds });
+    let cls = blankPage.classifyPaint({ stats, dom, bounds });
+    // 渲染口径与视图几何必须相等。不等只有两种原因：用户主动缩放（合法）或
+    // **合成器把旧尺寸的 surface 缩进了新 bounds**（就是"内容缩成左上角一小块"）。
+    // 用 zoomFactor 把两者分开：页面缩放有明确的 zoom 值，surface 脱节时 zoom 仍是 1。
+    let zoom = null;
+    try { zoom = typeof wc.getZoomFactor === 'function' ? wc.getZoomFactor() : null; } catch (_) {}
+    const iw = Number(dom && dom.iw) || 0;
+    if (bounds && bounds.width > 0 && iw > 0 && Math.abs(iw - bounds.width) > 2
+        && (zoom === null || Math.abs(zoom - 1) < 0.01)) {
+      cls = {
+        verdict: 'scale-mismatch',
+        blank: cls.blank,
+        reason: `page lays out at ${iw}px but the view is ${bounds.width}px wide (zoom=${zoom})`
+          + ' — the compositor is drawing a stale surface',
+      };
+    }
     // 还在"正在打开…"占位页（file:///…/loading.html?url=…）上：真实导航排在建
     // 垫片之后，还没开始。这时既不是白屏也不是就绪 —— 报 not-ready 才会让调用方
     // "等一会儿"而不是"这页坏了"。这个状态在 new_tab 回执后约 100–200ms 内可见。
@@ -3754,6 +3784,47 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
       ...(frameError ? { frame_error: frameError } : {}),
       ms: Date.now() - startedAt,
     };
+  }
+
+  /**
+   * 布局看门狗：活动视图的几何必须等于"内容区"。
+   *
+   * 为什么需要它：窗口尺寸变了而视图没跟上，是**没有任何事件会报**的一类失败 ——
+   * 事件只告诉你"窗口 resize 了"，不告诉你"视图还是旧尺寸"。视图比窗口大时，
+   * 合成器会把那张大 surface 缩进新 bounds，表现就是"页面缩成左上角一小块、
+   * 其余全白"（2026-10-25 用户截图）。此时 DOM/截图全都正常，只有窗口像素不对。
+   *
+   * 所以：每次自检顺手量一下几何，错了就当场纠正并落一条 layout_mismatch ——
+   * 这样下次再出现，error.jsonl 里会有窗口尺寸和视图尺寸的实际数字。
+   */
+  _auditLayout(tabId) {
+    const view = this._getView(tabId);
+    if (!view || !view.webContents || view.webContents.isDestroyed()) return null;
+    let expected;
+    try {
+      const cb = this.window.getContentBounds();
+      expected = {
+        x: 0,
+        y: config.tabBarHeight,
+        width: cb.width,
+        height: Math.max(0, cb.height - config.tabBarHeight - (this._bottomInset || 0)),
+      };
+    } catch (_) { return null; }
+    let actual;
+    try { actual = view.getBounds(); } catch (_) { return null; }
+    const bad = actual.width < expected.width - 2
+      || Math.abs(actual.height - expected.height) > 2
+      || actual.x !== expected.x
+      || actual.y !== expected.y;
+    if (!bad) return { ok: true, expected, actual };
+    try {
+      this._layoutView(view);
+      view.webContents.invalidate();
+    } catch (_) { /* 视图正在销毁 */ }
+    const info = { tab: tabId, expected, actual };
+    recordError('layout_mismatch', info);
+    this._broadcast('layout_mismatch', info);
+    return { ok: false, expected, actual, fixed: true };
   }
 
   /**
@@ -3802,6 +3873,9 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
    */
   async _auditPaintNow(tabId) {
     {
+      // 先量几何再量画面：视图没跟上窗口时，像素判定的意义有限（看到的是一张
+      // 被缩放的旧 surface），而且这个错误必须先修，否则后面的重画都白做。
+      this._auditLayout(tabId);
       const res = await this.paintCheck(tabId);
       if (!res.ok) return res;
       const steps = this._paintSteps.get(tabId) || 0;
@@ -4125,6 +4199,50 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
       );
       if (p && typeof p.catch === 'function') p.catch(() => {});
     } catch (e) { /* debugger 未 attach / 页面已销毁 —— 忽略 */ }
+  }
+
+  /**
+   * 窗口尺寸诊断 / 复现入口（ui.window_bounds）。
+   *
+   * 存在的理由：**布局类缺陷此前无法复现也无法回归** —— 没有入口能把窗口改成
+   * 另一个尺寸，于是"窗口放大/缩小/全屏之后视图错位、内容缩成一小块"这类问题
+   * 只能靠人手拖窗口碰运气。读的时候返回窗口 bounds / content bounds / 各视图
+   * 实际 bounds，一眼就能看出"视图没跟上窗口"。
+   *
+   * 不传尺寸时纯读；传了就 setBounds + 立刻重排，再回读实际结果（不做乐观报告）。
+   */
+  windowBounds(next) {
+    const snapshot = () => {
+      const out = { ok: true };
+      try { out.bounds = this.window.getBounds(); } catch (_) { /* 窗口已销毁 */ }
+      try { out.content = this.window.getContentBounds(); } catch (_) { /* 窗口已销毁 */ }
+      const views = {};
+      for (const [id, view] of this.tabs) {
+        try { views[id] = view.getBounds(); } catch (_) { /* 视图已销毁 */ }
+      }
+      out.views = views;
+      return out;
+    };
+    if (!next || typeof next !== 'object') return snapshot();
+    let cur;
+    try { cur = this.window.getBounds(); } catch (e) { return { ok: false, error: 'no-window' }; }
+    const nb = { x: cur.x, y: cur.y, width: cur.width, height: cur.height };
+    for (const k of ['x', 'y', 'width', 'height']) {
+      if (typeof next[k] === 'number' && isFinite(next[k]) && next[k] > 0) nb[k] = Math.round(next[k]);
+    }
+    try {
+      this.window.setBounds(nb);
+    } catch (e) {
+      return { ok: false, error: 'setBounds failed: ' + (e && e.message), ...snapshot() };
+    }
+    // 尺寸变了就必须让每个视图重新栅格化：setBounds 只改几何，surface 可能还是
+    // 旧尺寸的 —— 那正是"内容缩成左上角一小块、其余全白"的成因（见 SPEC 白屏一节）。
+    const view = this._getView(this.activeTab);
+    if (view) {
+      this._layoutView(view);
+      try { view.webContents.invalidate(); } catch (_) { /* 已销毁 */ }
+    }
+    return snapshot();
   }
 
   _layoutView(view) {
