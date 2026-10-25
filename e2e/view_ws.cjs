@@ -159,7 +159,11 @@ async function main() {
   const repaintCount = async () => (unwrap(await b.call("ui.repaint", { tab })) || {}).repaint_count || 0;
 
   // ===================== R. 视图刷新 =====================
-  console.log("\n[R. 视图刷新：页面变了窗口必须跟着重绘]");
+  // 2.1.18 起（commit 985d929「导航路径不再重绘 —— 修掉刷新时先缩成一小块再恢复」），
+  // 导航（SPA 路由 / 子帧完成）**不再主动重绘**：以前用 invalidate 强制整页重绘，反而在
+  // 导航瞬间画出小尺寸图层，用户看到"一闪一闪"。新契约是"导航不主动重绘、也不能留旧画面"，
+  // 画面正确性由 layout 的 G5（ui.paint_check）守卫；这里只钉住"导航不主动重绘"。
+  console.log("\n[R. 视图刷新：导航不主动重绘（避免闪屏），画面正确性由 layout G5 守卫]");
   await sleep(700);
   const r0 = await repaintCount();
 
@@ -168,8 +172,8 @@ async function main() {
   await sleep(800);
   const r1 = await repaintCount();
   const stA = await probe();
-  check("R-01 did-navigate-in-page 触发重绘（净增 = 差值-1，1 是本次查询自身）",
-    (r1 - r0 - 1) >= 1, `count ${r0}→${r1} (净增 ${r1 - r0 - 1})`);
+  check("R-01 导航不主动重绘（净增 ≤ 0；主动重绘会闪）",
+    (r1 - r0 - 1) <= 0, `count ${r0}→${r1} (净增 ${r1 - r0 - 1})`);
   check("R-02 页面确实切到了 view=B", stA.hash === "#view-b" && stA.hud === "view=B",
     JSON.stringify({ hash: stA.hash, hud: stA.hud }));
 
@@ -193,7 +197,7 @@ async function main() {
   }
   await sleep(500);
   const f1 = await repaintCount();
-  check("R-04 did-frame-finish-load 触发重绘", (f1 - f0 - 1) >= 1,
+  check("R-04 子帧完成同样不主动重绘（净增 ≤ 0）", (f1 - f0 - 1) <= 0,
     `count ${f0}→${f1} (净增 ${f1 - f0 - 1})`);
   check("R-05 iframe 内容确实加载完成", frameReady);
 
