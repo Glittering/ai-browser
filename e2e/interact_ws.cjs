@@ -186,7 +186,7 @@ async function main() {
   delete childEnv.ELECTRON_RUN_AS_NODE;
   // 默认独立 profile：~/.ai-browser 是用户的真实 profile（带登录态），测试不该碰。
   if (!childEnv.AI_BROWSER_USER_DATA) {
-    childEnv.AI_BROWSER_USER_DATA = `/tmp/ai-browser-e2e-${WS_PORT}`;
+    childEnv.AI_BROWSER_USER_DATA = require('node:path').join(require('node:os').tmpdir(), `ai-browser-e2e-${WS_PORT}`);
   }
   const child = spawn(electronPath, ["."], { cwd: ROOT, stdio: "ignore", detached: true, env: childEnv });
   guard.track(child);
@@ -208,7 +208,7 @@ async function main() {
   const logOf = async (tab) => JSON.parse((await ev("JSON.stringify(window.__log)", tab)) || "{}");
 
   const tab = (await b.call("ui.new_tab", { url: HOST + "/" })).result.tab;
-  await sleep(1500);
+  await sleep(5000); // Windows: drag-drop fixture needs more time to load before its ids enter the tree
   // get_tree 负责写入 data-ai-id —— 没有它 ui.act 找不到元素。
   await b.call("ui.get_tree", { tab });
   const aiId = async (domId) => ev(

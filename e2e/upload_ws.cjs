@@ -131,7 +131,17 @@ let PASS = 0, FAIL = 0;
 const check = (name, cond, detail) => { cond ? PASS++ : FAIL++; console.log(`  ${cond ? "PASS" : "FAIL"} | ${name}${detail !== undefined ? " — " + detail : ""}`); };
 const note = (t) => console.log(`  NOTE | ${t}`);
 let spawnedChild = null;
-function killChild() { if (spawnedChild) { try { process.kill(-spawnedChild.pid, "SIGKILL"); } catch {} spawnedChild = null; } }
+function killChild() {
+  if (!spawnedChild) return;
+  try {
+    if (process.platform === "win32") {
+      require("node:child_process").spawnSync("taskkill", ["/F", "/T", "/PID", String(spawnedChild.pid)], { stdio: "ignore" });
+    } else {
+      process.kill(-spawnedChild.pid, "SIGKILL");
+    }
+  } catch {}
+  spawnedChild = null;
+}
 
 async function main() {
   const server = await startServer();
@@ -151,7 +161,7 @@ async function main() {
   const guard = require("./_spawn_guard.cjs");
   const childEnv = { ...process.env, AI_BROWSER_PORT: String(WS_PORT) };
   delete childEnv.ELECTRON_RUN_AS_NODE;
-  if (!childEnv.AI_BROWSER_USER_DATA) childEnv.AI_BROWSER_USER_DATA = `/tmp/ai-browser-e2e-${WS_PORT}`;
+  if (!childEnv.AI_BROWSER_USER_DATA) childEnv.AI_BROWSER_USER_DATA = require('node:path').join(require('node:os').tmpdir(), `ai-browser-e2e-${WS_PORT}`);
   console.log("spawn electron port", WS_PORT, "userData", childEnv.AI_BROWSER_USER_DATA);
   const child = spawn(electronPath, ["."], { cwd: ROOT, stdio: "ignore", detached: true, env: childEnv });
   guard.track(child);
@@ -194,7 +204,9 @@ async function main() {
   // ---- B. 跨站 iframe（OOPIF）+ 由容器内的按钮触发 ----------------------
   console.log("\n[B. 跨站 iframe（OOPIF）+ 点击容器内的按钮才挂载]");
   const tB = (await b.call("ui.new_tab", { url: HOST + "/outer" })).result?.tab;
-  await sleep(3000);
+  // 跨站 iframe 走的是独立进程（OOPIF），冷启动 + 全量跑时机器较忙，3s 可能还没就绪，
+  // 上传会因帧内目标没挂载而失败（假红）。这里给足 8s；单跑时远用不到。
+  await sleep(8000);
   const rB = await act({ action: "upload", target: "body #box .the-input", params: { file: FILE } }, tB);
   check("U-08 帧内上传成功且 in_frame=true（CDP 的 setFileInputFiles 进不去 OOPIF）",
     rB.success === true && rB.in_frame === true, JSON.stringify({ ok: rB.success, in: rB.in_frame }));
@@ -248,8 +260,7 @@ async function main() {
   b.close();
   try { server.close(); } catch {}
   try { fs.unlinkSync(FILE); } catch {}
-  try { process.kill(-child.pid, "SIGTERM"); } catch {}
-  setTimeout(() => { try { process.kill(-child.pid, "SIGKILL"); } catch {} }, 3000);
+  guard.killChild(child);
   process.exit(FAIL ? 1 : 0);
 }
 

@@ -10,6 +10,7 @@
 // 并且**明确打印**为什么跳过 —— 不再有静默降级。
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import net from 'node:net';
+import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -48,13 +49,30 @@ async function freePort() {
 // 在模块加载期完成"找到或拉起一个实例"，因为 it.skipIf 需要在注册时就拿到结论。
 let spawned = null;
 let skipReason = null;
+
+// 跨平台回收 Electron 进程树：Windows 用 taskkill /T /F（renderer/GPU 助手不在主进程树里，
+// 只 child.kill() 会漏掉它们），Unix 用进程组 -pid 收割。
+function killTree(child) {
+  if (!child) return;
+  try {
+    if (process.platform === 'win32') {
+      spawn('taskkill', ['/F', '/T', '/PID', String(child.pid)], { stdio: 'ignore' });
+    } else {
+      process.kill(-child.pid, 'SIGTERM');
+    }
+  } catch { try { child.kill(); } catch { /* ignore */ } }
+}
+
 try {
   if (await probePort(EXTERNAL_PORT)) {
     PORT = EXTERNAL_PORT;
     console.log(`[ws-protocol] 复用 ${EXTERNAL_PORT} 上已有的 ai-browser 实例`);
   } else {
     const p = await freePort();
-    const env = { ...process.env, AI_BROWSER_PORT: String(p), AI_BROWSER_USER_DATA: `/tmp/ai-browser-unit-${p}` };
+    // ⚠️ userData 必须用 os.tmpdir()，不能写死 POSIX 的 /tmp/... —— 原生 Windows
+    // Electron 解析不了 /tmp 路径，profile 目录建不出来，WS 端口就永远不开，
+    // 结果整个套件被静默 skip（看起来"绿"，其实一条都没跑）。
+    const env = { ...process.env, AI_BROWSER_PORT: String(p), AI_BROWSER_USER_DATA: path.join(os.tmpdir(), `ai-browser-unit-${p}`) };
     // ELECTRON_RUN_AS_NODE 会让 Electron 以纯 Node 模式启动 —— 不起窗口、不监听 WS。
     delete env.ELECTRON_RUN_AS_NODE;
     const child = spawn(require('electron'), ['.'], { cwd: ROOT, stdio: 'ignore', detached: true, env });
@@ -70,7 +88,7 @@ try {
       PORT = p;
       console.log(`[ws-protocol] 自起临时实例 @ ${p}（独立 profile，跑完回收）`);
     } else {
-      try { process.kill(-child.pid, 'SIGTERM'); } catch { try { child.kill(); } catch { /* ignore */ } }
+      killTree(child);
       skipReason = '无法拉起 Electron 实例（无图形会话？）';
     }
   }
@@ -121,9 +139,7 @@ describe('WebSocket Protocol', () => {
 
   afterAll(() => {
     if (ws && ws.readyState === WebSocket.OPEN) ws.close();
-    if (spawned) {
-      try { process.kill(-spawned.pid, 'SIGTERM'); } catch { try { spawned.kill(); } catch { /* ignore */ } }
-    }
+    if (spawned) killTree(spawned);
   });
 
   it.skipIf(!wsAvailable)('WS-001: connects successfully', () => {

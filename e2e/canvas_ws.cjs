@@ -95,7 +95,7 @@ async function spawnElectron(port, extraEnv, removeKeys) {
   const electronPath = require("electron");
   const childEnv = { ...process.env, AI_BROWSER_PORT: String(port) };
   delete childEnv.ELECTRON_RUN_AS_NODE;
-  if (!childEnv.AI_BROWSER_USER_DATA) childEnv.AI_BROWSER_USER_DATA = `/tmp/ai-browser-e2e-${port}`;
+  if (!childEnv.AI_BROWSER_USER_DATA) childEnv.AI_BROWSER_USER_DATA = require('node:path').join(require('node:os').tmpdir(), `ai-browser-e2e-${port}`);
   Object.assign(childEnv, extraEnv || {});
   // 显式移除：用于真正测"默认值"，而不是继承当前进程里已设置的开关
   for (const k of removeKeys || []) delete childEnv[k];

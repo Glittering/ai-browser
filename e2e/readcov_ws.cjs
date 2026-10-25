@@ -182,7 +182,7 @@ const EXPECT = [
     axMustContain: ["第 6 行"] },
   { path: "/table.html", band: [0.9, 1], name: "表格每个 cell 都要读到", mustContain: ["课程", "成绩"] },
   { path: "/empty.html", band: null, name: "空页给 null 而不是 0", needNull: true },
-  { path: "/late.html", band: [0.4, 0.95], name: "晚注入的内容等一会儿要读到", waitMs: 4500,
+  { path: "/late.html", band: [0.4, 0.95], name: "晚注入的内容等一会儿要读到", waitMs: 8000,
     mustContain: ["终于来了", "延迟注入"], axMustContain: ["延迟注入"] },
   { path: "/script-text.html", band: [0.5, 1], name: "script 源码不许进 label", forbid: "SECRETMARK" },
 ];
@@ -225,7 +225,7 @@ async function spawnElectron(port) {
   const electronPath = require("electron");
   const childEnv = { ...process.env, AI_BROWSER_PORT: String(port), AI_BROWSER_WATCHDOG: "0" };
   delete childEnv.ELECTRON_RUN_AS_NODE;
-  if (!childEnv.AI_BROWSER_USER_DATA) childEnv.AI_BROWSER_USER_DATA = `/tmp/ai-browser-e2e-readcov-${port}`;
+  if (!childEnv.AI_BROWSER_USER_DATA) childEnv.AI_BROWSER_USER_DATA = require('node:path').join(require('node:os').tmpdir(), `ai-browser-e2e-readcov-${port}`);
   const child = spawn(electronPath, ["."], { cwd: ROOT, stdio: "ignore", detached: true, env: childEnv });
   guard.track(child);
   await harness.waitPortOpen(port, 30000);
@@ -244,7 +244,7 @@ function allLabels(tree) {
 async function readFixture(b, url, waitMs) {
   const tab = unwrap(await b.call("ui.new_tab", { url })).tab;
   // 首帧可能还在解析；等页面稳定再读，否则测的是"渲染速度"不是"读能力"
-  await sleep(waitMs || 1600);
+  await sleep(waitMs || 5000); // Windows: fixtures need more time to load; default raised from 1600
   const dom = unwrap(await b.call("ui.get_tree", { tab }));
   return { tab, dom };
 }

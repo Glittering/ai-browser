@@ -179,7 +179,7 @@ async function runGroup({ label, port, extraEnv, expectStealOnBoot, expectStealO
   delete childEnv.ELECTRON_RUN_AS_NODE;
   // 独立 profile：~/.ai-browser 存着用户真实登录态，测试不该碰。
   delete childEnv.AI_BROWSER_USER_DATA;
-  childEnv.AI_BROWSER_USER_DATA = `/tmp/ai-browser-e2e-${port}`;
+  childEnv.AI_BROWSER_USER_DATA = require('node:path').join(require('node:os').tmpdir(), `ai-browser-e2e-${port}`);
 
   const child = spawn(require("electron"), ["."], {
     cwd: ROOT, env: childEnv, detached: true, stdio: "ignore",

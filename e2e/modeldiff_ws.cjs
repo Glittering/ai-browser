@@ -123,7 +123,7 @@ async function spawnElectron(port) {
   const electronPath = require("electron");
   const childEnv = { ...process.env, AI_BROWSER_PORT: String(port) };
   delete childEnv.ELECTRON_RUN_AS_NODE;
-  if (!childEnv.AI_BROWSER_USER_DATA) childEnv.AI_BROWSER_USER_DATA = `/tmp/ai-browser-e2e-${port}`;
+  if (!childEnv.AI_BROWSER_USER_DATA) childEnv.AI_BROWSER_USER_DATA = require('node:path').join(require('node:os').tmpdir(), `ai-browser-e2e-${port}`);
   const child = spawn(electronPath, ["."], {
     cwd: ROOT, stdio: "ignore", detached: true, env: childEnv,
   });
@@ -157,7 +157,7 @@ async function main() {
 
   try {
     await b.call("ui.new_tab", { url: HOST + "/model" });
-    await sleep(2500);
+    await sleep(5000); // Windows: model/plain fixtures need more time to load before diff assertions
 
     console.log("\n[MD-A 能力探针与指纹必须指向同一个模型]");
     const cap = (await b.call("ui.capabilities", {})).result;
@@ -217,7 +217,7 @@ async function main() {
 
     console.log("\n[MD-F 普通页面：模型机制不许自己造候选]");
     await b.call("ui.new_tab", { url: HOST + "/plain" });
-    await sleep(2500);
+    await sleep(5000); // Windows: model/plain fixtures need more time to load before diff assertions
     const s5 = await snap();
     const d5a = await diff(s5.snapshot);
     check("MD-10 无应用对象的页面 → 自比 unchanged，且不出现 model.* 路径",

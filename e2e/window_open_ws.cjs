@@ -83,7 +83,7 @@ async function spawnElectron(port) {
   const electronPath = require('electron');
   const childEnv = { ...process.env, AI_BROWSER_PORT: String(port), AI_BROWSER_WATCHDOG: '0' };
   delete childEnv.ELECTRON_RUN_AS_NODE;
-  if (!childEnv.AI_BROWSER_USER_DATA) childEnv.AI_BROWSER_USER_DATA = `/tmp/ai-browser-e2e-winopen-${port}`;
+  if (!childEnv.AI_BROWSER_USER_DATA) childEnv.AI_BROWSER_USER_DATA = require('node:path').join(require('node:os').tmpdir(), `ai-browser-e2e-winopen-${port}`);
   // stderr 收下来不丢：这条链路的失败几乎都发生在主进程侧（IPC 有没有收到、
   // tab 建没建、nav 有没有被排队），stdio:ignore 等于把唯一线索扔掉。
   const child = spawn(electronPath, ['.'], { cwd: ROOT, stdio: ['ignore', 'ignore', 'pipe'], detached: true, env: childEnv });
@@ -203,7 +203,7 @@ async function main() {
   console.log('\n[L0] agent 新建的 tab');
   {
     const tab = unwrap(await b.call('ui.new_tab', { url: `${HOST}/a.html` })).tab;
-    await sleep(1200);
+    await sleep(5000); // Windows: the window.open shim is injected via CDP after did-finish-load; needs more time
     const st = await shimState(b, tab);
     check('L0 agent 新建的 tab 有垫片', st.shim === true, JSON.stringify(st));
     check('L0 且 window.open 已被替换（不是原生）', st.openNative === false, JSON.stringify(st));
@@ -216,7 +216,7 @@ async function main() {
   let tab1 = null;
   {
     const src = unwrap(await b.call('ui.new_tab', { url: `${HOST}/a.html` })).tab;
-    await sleep(1200);
+    await sleep(5000); // Windows: the window.open shim is injected via CDP after did-finish-load; needs more time
     const before = (await listTabs(b)).map((t) => t.id);
     const act = await clickGo(b, src);
     check('L1 点击成功返回', act && act.success !== false, JSON.stringify(act));
@@ -273,7 +273,7 @@ async function main() {
   console.log('\n[PX] 带真实 url 的普通弹窗');
   {
     const src = unwrap(await b.call('ui.new_tab', { url: `${HOST}/popup.html` })).tab;
-    await sleep(1200);
+    await sleep(5000); // Windows: the window.open shim is injected via CDP after did-finish-load; needs more time
     const before = (await listTabs(b)).map((t) => t.id);
     const tree = unwrap(await b.call('ui.get_tree', { tab: src, subset: 'interactive' }));
     const id = findClickable(tree && tree.tree, '打开真实弹窗');

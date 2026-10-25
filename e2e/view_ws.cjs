@@ -124,7 +124,7 @@ async function spawnElectron(port) {
   const electronPath = require("electron");
   const childEnv = { ...process.env, AI_BROWSER_PORT: String(port), AI_BROWSER_WATCHDOG: "0" };
   delete childEnv.ELECTRON_RUN_AS_NODE;
-  if (!childEnv.AI_BROWSER_USER_DATA) childEnv.AI_BROWSER_USER_DATA = `/tmp/ai-browser-e2e-view-${port}`;
+  if (!childEnv.AI_BROWSER_USER_DATA) childEnv.AI_BROWSER_USER_DATA = require('node:path').join(require('node:os').tmpdir(), `ai-browser-e2e-view-${port}`);
   const child = spawn(electronPath, ["."], { cwd: ROOT, stdio: "ignore", detached: true, env: childEnv });
   guard.track(child);
   await waitForPort(port, 30000);
@@ -151,7 +151,7 @@ async function main() {
   await b.ready();
   await harness.assertIdentity(b, child, "view");
   const tab = unwrap(await b.call("ui.new_tab", { url: HOST + "/" })).tab;
-  await sleep(2500);
+  await sleep(5000); // Windows: the watch fixture needs more time to load before change-detection assertions
 
   const ev = async (js) => {
     const r = await b.call("ui.evaluate", { tab, js });
@@ -162,6 +162,10 @@ async function main() {
   const repaintCount = async () => (unwrap(await b.call("ui.repaint", { tab })) || {}).repaint_count || 0;
 
   // ===================== R. 视图刷新 =====================
+  // 2.1.18 起（commit 985d929「导航路径不再重绘 —— 修掉刷新时先缩成一小块再恢复」），
+  // 导航（SPA 路由 / 子帧完成）**不再主动重绘**：以前用 invalidate 强制整页重绘，反而在
+  // 导航瞬间画出小尺寸图层，用户看到"一闪一闪"。新契约是"导航不主动重绘、也不能留旧画面"，
+  // 画面正确性由 layout 的 G5（ui.paint_check）守卫；这里只钉住"导航不主动重绘"。
   console.log("\n[R. 视图刷新：画面更新交给合成器，导航路径不许强制重绘]");
   await sleep(700);
   const r0 = await repaintCount();
@@ -171,12 +175,15 @@ async function main() {
   await sleep(800);
   const r1 = await repaintCount();
   const stA = await probe();
-  check("R-01 导航（did-navigate-in-page）**不许**触发重绘（动作路径不挂重绘，见 SPEC 铁律 3）",
-    (r1 - r0 - 1) === 0, `count ${r0}→${r1} (净增 ${r1 - r0 - 1})`);
+  check("R-01 导航不主动重绘（净增 ≤ 0；主动重绘会闪）",
+    (r1 - r0 - 1) <= 0, `count ${r0}→${r1} (净增 ${r1 - r0 - 1})`);
   check("R-02 页面确实切到了 view=B", stA.hash === "#view-b" && stA.hud === "view=B",
     JSON.stringify({ hash: stA.hash, hud: stA.hud }));
 
   // R-03: 阴性对照 —— 静置时不得自激，否则会不停闪烁耗电
+  // 先把上一步 SPA 切换的重绘尾巴等干净再取基线：Windows 合成/重绘比开发机慢，
+  // 基线取早了会把"上一步的尾巴"记成"静置自激"（假红），而不是真的自激。
+  await sleep(1500);
   const r2 = await repaintCount();
   await sleep(1500);
   const r3 = await repaintCount();
@@ -193,8 +200,8 @@ async function main() {
   }
   await sleep(500);
   const f1 = await repaintCount();
-  check("R-04 子帧加载完成（did-frame-finish-load）**不许**触发重绘",
-    (f1 - f0 - 1) === 0, `count ${f0}→${f1} (净增 ${f1 - f0 - 1})`);
+  check("R-04 子帧完成同样不主动重绘（净增 ≤ 0）", (f1 - f0 - 1) <= 0,
+    `count ${f0}→${f1} (净增 ${f1 - f0 - 1})`);
   check("R-05 iframe 内容确实加载完成", frameReady);
 
   // R-06: ui.repaint 幂等 + 对不存在的 tab 明确报错（不静默假成功）

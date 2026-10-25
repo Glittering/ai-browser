@@ -134,7 +134,7 @@ async function spawnElectron(port) {
   const electronPath = require("electron");
   const childEnv = { ...process.env, AI_BROWSER_PORT: String(port) };
   delete childEnv.ELECTRON_RUN_AS_NODE;
-  if (!childEnv.AI_BROWSER_USER_DATA) childEnv.AI_BROWSER_USER_DATA = `/tmp/ai-browser-e2e-${port}`;
+  if (!childEnv.AI_BROWSER_USER_DATA) childEnv.AI_BROWSER_USER_DATA = require('node:path').join(require('node:os').tmpdir(), `ai-browser-e2e-${port}`);
   const child = spawn(electronPath, ["."], {
     cwd: ROOT, stdio: "ignore", detached: true, env: childEnv,
   });
@@ -186,7 +186,9 @@ async function main() {
   try {
     const tab = (await b.call("ui.new_tab", { url: HOST + "/audit" })).result?.tab;
     await b.call("ui.set_active_tab", { tab });
-    await sleep(2000);
+    // Windows 下首个导航（about:blank → shim 注入 → 真实 URL）比开发机慢很多，
+    // 2s 常常在树还没装齐时就读取，导致 dlg 等节点"凭空消失"。给足加载时间。
+    await sleep(4500);
 
     // =====================================================================
     console.log("\n[AU-A 语义树广告的每一个动作都必须真实存在（反虚假广告）]");
@@ -342,10 +344,17 @@ async function main() {
     check("AU-D4 ready 只含 completed 的记录（interrupted 不算可用）",
       Array.isArray(dlAfter.ready) && dlAfter.ready.length === 1 && dlAfter.ready[0].path === rec.path,
       "ready=" + JSON.stringify(dlAfter.ready).slice(0, 200));
-    check("AU-D5 文件名被净化过（不含路径分隔符）且 dir 与 path 同目录",
+    // 下载落盘结构：<userData>/downloads/<tabId>/<文件名>（见 download_monitor.js）。
+    // ui.downloads 返回的 dir 只是 <userData>/downloads 这一层（不含 tabId），
+    // 而真实 path = dir + sep + tabId + sep + 净化后的文件名。原断言用 "/" 字符串
+    // 拼接，在 Windows 上 dir 是反斜杠导致两边永不相等的假红，这里改用 path.join
+    // 并对 Windows 盘符大小写做归一化。
+    check("AU-D5 文件名被净化过（不含路径分隔符）且下载落在 <dir>/<tabId>/ 下",
       rec.filename === path.basename(String(rec.filename)) &&
-      path.dirname(String(rec.path)) === String(dlAfter.dir).replace(/\/$/, "") + "/" + String(tab),
-      "filename=" + rec.filename + " dir=" + dlAfter.dir + " path=" + rec.path);
+      String(rec.tab) === String(tab) &&
+      String(path.dirname(String(rec.path))).toLowerCase() ===
+        String(path.join(String(dlAfter.dir), String(tab))).toLowerCase(),
+      "filename=" + rec.filename + " rec.tab=" + rec.tab + " dir=" + dlAfter.dir + " path=" + rec.path);
     if (!(onDisk && rec.state === "completed")) {
       defect("P0", "ui.downloads",
         "真实下载链路没有走通：点击 <a download> 后 ui.downloads 记录 "
@@ -499,8 +508,8 @@ async function main() {
   } finally {
     try { b.close(); } catch {}
     try { server.close(); } catch {}
-    try { process.kill(-child.pid, "SIGTERM"); } catch {}
-    setTimeout(() => { try { process.kill(-child.pid, "SIGKILL"); } catch {} }, 3000);
+    // 跨平台收尾：Windows 上 process.kill(-pid) 不可用，用 guard.killChild（taskkill /T）。
+    guard.killChild(child);
   }
   process.exit(FAIL ? 1 : 0);
 }

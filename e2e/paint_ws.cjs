@@ -73,7 +73,7 @@ async function spawnElectron(port) {
   // ELECTRON_RUN_AS_NODE 会让二进制降级成 node REPL（只打印 Welcome to Node.js 就退出）
   delete childEnv.ELECTRON_RUN_AS_NODE;
   delete childEnv.NODE_OPTIONS;
-  if (!childEnv.AI_BROWSER_USER_DATA) childEnv.AI_BROWSER_USER_DATA = `/tmp/ai-browser-e2e-paint-${port}`;
+  if (!childEnv.AI_BROWSER_USER_DATA) childEnv.AI_BROWSER_USER_DATA = require('node:path').join(require('node:os').tmpdir(), `ai-browser-e2e-paint-${port}`);
   const child = spawn(electronPath, ['.'], { cwd: ROOT, stdio: ['ignore', 'ignore', 'pipe'], detached: true, env: childEnv });
   const lines = [];
   child.stderr.on('data', (d) => {

@@ -676,6 +676,15 @@ function showInitialWindow() {
     } catch (e) {
       try { mainWindow.show(); } catch (e2) { /* 窗口已销毁 */ }
     }
+    // Windows：show() 之后原生标题栏/边框才真正应用，content 高度会比"隐藏时"少
+    // 几十像素（实测 800 外框：隐藏时 content≈761，显示后 735）。但外框尺寸没变 →
+    // **不触发 resize** → 页面视图仍按显示前的 content 高度布局，底部溢出约 26px
+    // （页面最后一截被窗口底边裁掉）。这里在显示后补一次重排，并再延迟兜底两次，
+    // 确保边框真正应用后视图收敛到"视图几何 == 内容区"（layout 套件 G1 断言）。
+    const relayoutAfterShow = () => { try { layoutWithBanner(); } catch (_) { /* 窗口已销毁 */ } };
+    relayoutAfterShow();
+    setTimeout(relayoutAfterShow, 150);
+    setTimeout(relayoutAfterShow, 450);
   };
 
   // 等首屏内容就绪。上限 3s：网络再慢也不该让窗口迟迟不出现（人看不到窗口
