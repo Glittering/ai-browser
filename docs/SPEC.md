@@ -252,9 +252,19 @@ input"这类位置猜测** —— 猜出来的对应关系比没有更糟。
 blank-with-dom / no-frame`；只有两个 `blank-*` 算缺陷，`no-frame`（我们没看到画面）
 明确**不**算 —— 把诊断失败说成页面故障是最坏的一种谎。
 
-取帧走 CDP `Page.captureScreenshot`（`clip.scale=0.25`，和 `ui.screenshot` 同一条路），
-不用 `capturePage()`：后者对被其它窗口遮挡的窗口返回空图，而"窗口被遮挡"是
-本产品最常见状态（不抢焦点），用它等于在最需要观测时失明。缩放后单次自检 5–160ms。
+**取帧两条铁律**（2026-10-25 用肉眼可见的闪烁换来的）：
+
+1. **绝不用 `clip.scale` 让 Chromium 帮你缩小**。带 `clip.scale` 的 captureScreenshot
+   会让 Chromium 按该比例**临时重建 surface**；自检恰好在 `did-finish-load+450ms` 跑，
+   那几十毫秒里窗口往往正在重新合成 —— 于是把那张 1/4 的图贴上 1–3 帧，用户看到
+   "每次加载先小一下再恢复"。实测抓到的那一帧内容宽度正好 25%，与 `clip.scale=0.25`
+   一致。缩放只能自己用 `nativeImage.resize()` 做。
+2. 优先 `webContents.capturePage()`（不碰 CDP Page 域、无 capture 模式），拿不到
+   （窗口被遮挡会返回空图）再用**无 clip** 的 captureScreenshot 兜底；两者都拿不到
+   就是 `no-frame`，**不判**缺陷。
+
+历史注记：早期用 `capturePage()` 会因遮挡失明，于是换成 CDP + `clip.scale` ——
+方向对了，参数错了。单次自检 20–160ms。
 
 自救阶梯**有上限**：`repaint`（remove+add，不丢状态）→ `reload`（丢页面临时状态，
 所以排第二）→ `give-up`（落 `error.jsonl` 的 `paint_blank` + 广播，不再折腾）。
