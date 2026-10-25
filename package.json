@@ -78,6 +78,7 @@
     "winopen": "node e2e/window_open_ws.cjs",
     "coverage": "node tools/coverage_probe.cjs",
     "build": "node scripts/build_dmg.cjs",
+    "build:win": "node scripts/build_win.cjs",
     "verify:build": "node scripts/verify_build.cjs",
     "install:app": "node scripts/install_app.cjs",
     "dialog": "node e2e/dialog_ws.cjs",
