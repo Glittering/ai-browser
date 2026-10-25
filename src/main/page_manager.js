@@ -707,7 +707,10 @@ class PageManager {
     } catch (e) {
       return this._navigateFailure(e, view, tid, waitUntil);
     }
-    this.repaint(tid);
+    // 这里**不做**重绘（2026-10-25 修）。以前每次 navigate 结束都调 repaint()，
+    // 而 repaint() 走 webContents.invalidate() —— 在新页面刚出现的那一刻强制整页
+    // 重栅格化，合成器会先把画面按初始尺寸画一遍再缩放，用户看到的就是
+    // "先缩成一小块、闪一下、然后正常"。导航本身会正常出帧，不需要我们推。
     if (waitUntil === 'load') return { ok: true, waited_for: 'load' };
     // load 还没来是**正常**的（SPA 本来就不 fire load）。如实说明，并给出
     // 下一步：调用方需要等某个具体内容时该用 ui.wait，而不是等 load。
@@ -3434,19 +3437,20 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     //     so did-finish-load has already fired and repainted an empty shell.
     //   did-navigate — any cross-document navigation, including programmatic
     //     location.href assignment the app does on its own.
-    if (url) {
-      const repaint = () => { self._scheduleRepaint(tabId); };
-      view.webContents.on('dom-ready', repaint);
-      view.webContents.on('did-finish-load', repaint);
-      view.webContents.on('did-navigate', repaint);
-      view.webContents.on('did-navigate-in-page', repaint);
-      view.webContents.on('did-frame-finish-load', repaint);
-    } else {
-      // No URL at construction time (new_tab with no url, then navigate):
-      // register the same hooks now, or the later navigate() would never
-      // repaint — which was one of the paths that showed a stale view.
-      this._attachRepaintHooks(tabId, view);
-    }
+    // ⚠️ 导航事件**不挂任何重绘**（2026-10-25 修）。
+    //
+    // 历史：这条钩子是为了对付"页面已导航但窗口还显示旧画面"，手段是
+    // removeBrowserView + addBrowserView（后来换成 invalidate）。但两者都有代价：
+    // remove/add 会闪一帧白；invalidate() 更麻烦 —— 它强制整页重新栅格化，
+    // 而在导航刚开始的那一刻，图层的尺寸还是初始值，于是合成器会先把新页面画进
+    // 一个小尺寸 surface 再缩放显示：用户看到的就是"先缩成左上角一小块，闪一下，
+    // 然后正常"（2026-10-25 用户报"刷新 baidu 总是一闪一闪"）。
+    //
+    // 现代 Chromium 在正常情况下不会留旧画面；真留住了也有兜底：
+    //   - 白屏/缩放自检（_auditPaint）会判 scale-mismatch 并**定向**重绘
+    //   - ui.repaint 显式重绘
+    //   - 几何变化由 afterGeometryChange 负责收敛
+    // 所以这里什么都不挂。回归：npm run layout 的 G5 断言"一次导航不引发任何重绘"。
 
     this._attachLoadFailureHooks(tabId, view);
     // "画出来了没有"只能主动看（没有对应事件），"渲染进程崩了"要自己救
@@ -3536,27 +3540,12 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
    * Idempotent per tab: re-registering would schedule redundant remove/add
    * cycles, so a WeakSet of hooked views guards it.
    */
-  _attachRepaintHooks(tabId, view) {
-    if (!view || !view.webContents || view.webContents.isDestroyed()) return;
-    if (!this._repaintHooked) this._repaintHooked = new WeakSet();
-    if (this._repaintHooked.has(view)) return;
-    this._repaintHooked.add(view);
-    const repaint = () => { this._scheduleRepaint(tabId); };
-    view.webContents.on('dom-ready', repaint);
-    view.webContents.on('did-finish-load', repaint);
-    view.webContents.on('did-navigate', repaint);
-    view.webContents.on('did-navigate-in-page', repaint);
-    view.webContents.on('did-frame-finish-load', repaint);
-  }
-
   /**
-   * Coalesce repaint requests. A single page load fires dom-ready +
-   * did-navigate + did-navigate-in-page + did-frame-finish-load within a few
-   * hundred ms; a load like ComfyUI's fires dozens of did-frame-finish-load.
-   * Without coalescing that is dozens of remove/add cycles — visible flicker
-   * and wasted compositing work. Debounce ~120ms: late enough to collapse the
-   * burst, early enough that the user sees the new view essentially at once.
+   * 已废弃：以前用来给"后来才导航的 tab"补挂重绘钩子。现在导航事件一律不重绘
+   * （原因见 newTab 里的长注释），这里只留一个空实现，避免调用点报错。
    */
+  _attachRepaintHooks() {}
+
   _scheduleRepaint(tabId, delay = 120) {
     const prev = this._repaintTimers.get(tabId);
     if (prev) clearTimeout(prev);

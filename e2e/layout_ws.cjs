@@ -203,6 +203,24 @@ async function main() {
     check('G4 hard 重绘回执 ok', r2 && r2.ok === true, JSON.stringify(r2 && r2.error));
   }
 
+  console.log('\n[G5] 导航本身不触发任何重绘（invalidate 在导航时会画出一帧小尺寸画面）');
+  {
+    const before = (unwrap(await b.call('ui.window_bounds', {})).repaints) || { soft: 0, hard: 0 };
+    for (let i = 0; i < 2; i++) {
+      unwrap(await b.call('ui.navigate', { tab, url: URL + '?n=' + i }));
+      await sleep(1500);
+    }
+    const after = (unwrap(await b.call('ui.window_bounds', {})).repaints) || { soft: 0, hard: 0 };
+    check('G5 两次导航没有增加 soft 重绘（导航路径不挂重绘）',
+      (after.soft || 0) - (before.soft || 0) === 0,
+      `${JSON.stringify(before)} -> ${JSON.stringify(after)}`);
+    check('G5 两次导航没有增加 hard 重绘', (after.hard || 0) - (before.hard || 0) === 0,
+      `${JSON.stringify(before)} -> ${JSON.stringify(after)}`);
+    const p = unwrap(await b.call('ui.paint_check', { tab }));
+    check('G5 导航后画面依然正常（不做重绘也不会留旧画面）',
+      p.verdict === 'ok' && p.layout_ok !== false, `verdict=${p.verdict} layout_ok=${p.layout_ok}`);
+  }
+
   console.log(`\n==== PASS=${PASS} FAIL=${FAIL} ====`);
   if (FAIL) {
     console.log('\n失败明细：');

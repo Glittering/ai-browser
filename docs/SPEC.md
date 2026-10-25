@@ -194,10 +194,15 @@ input"这类位置猜测** —— 猜出来的对应关系比没有更糟。
 ## 页面刷新（窗口显示陈旧）
 
 "窗口显示的是旧画面"**没有可观测状态**：DOM 与 `evaluate` 早就报新页面，只有屏幕是旧的。
-因此：重绘钩子挂在 `dom-ready` / `did-finish-load` / `did-navigate` /
-`did-navigate-in-page` / `did-frame-finish-load`（120ms 去抖合并），并在窗口
-`show` / `restore` / `focus` 时重绘当前标签；`ui.repaint` 供 agent 显式兜底，
-回执带累计 `repaint_count` —— 这是"重绘真的发生了"的唯一可证伪判据。
+**导航路径不重绘**（2026-10-25 改，v2.1.16）。此前 `dom-ready` / `did-finish-load` /
+`did-navigate` / `did-navigate-in-page` / `did-frame-finish-load` 都挂着重绘，`navigate()`
+结束也调一次 —— 结果每次刷新/开页都会强制整页重栅格化，而那一刻图层的尺寸还是初始值，
+合成器先把画面按小尺寸画一遍再缩放：用户看到"先缩成左上角一小块，闪一下，然后正常"。
+
+现在只在窗口 `show` / `restore` / `focus` 时重绘当前标签；`ui.repaint` 供调用方显式兜底，
+回执带累计 `repaint_count`（`soft`/`hard` 分开计）—— 这是"重绘真的发生了"的唯一可证伪判据。
+真出现旧画面时有定向兜底：白屏/缩放自检判 `scale-mismatch` → 定点重绘；几何变化走
+`afterGeometryChange` 收敛。回归：`npm run layout` 的 G5 断言"两次导航 soft/hard 增量都为 0"。
 
 ### 两档重绘：soft / hard（2026-10-25 用户的"一闪一闪"教的）
 
