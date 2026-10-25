@@ -309,6 +309,24 @@ window.devicePixelRatio ∈ {1,2}
 `ui.window_bounds`：读窗口 bounds / content bounds / 每个视图实际 bounds；
 带 `set` 可改尺寸（布局类缺陷此前无法复现也无法回归，就是因为没有这个入口）。
 
+## 渲染路径：硬件合成 vs 软件合成
+
+窗口内容"整体被缩放一帧""缩成左上角一小块""刷新时先小再恢复"这一类异常，几乎都长在
+**软件合成**上：合成器手里的 surface 尺寸和图层几何脱节时，软件路径会把那张图**缩放**着
+贴出来，而 GPU 路径会按图层几何重新栅格化。
+
+历史：2026-10 为了规避 GPU 崩溃（`exit_code=6`）无条件调用了
+`app.disableHardwareAcceleration()`，于是所有页面长期跑在软件合成上。
+
+现在的策略（v2.1.17）：
+
+- 默认**开**硬件加速（Apple Silicon 上更快，也不出这类缩放异常）；
+- 连续两次 GPU 进程崩溃（2 分钟内）→ 写 `~/.ai-browser/.gpu-off` + `app.relaunch()`，
+  之后一直走软件合成（删掉标记可恢复）。一次偶发崩溃不会把所有人降级；
+- `AI_BROWSER_GPU=on|off` 可强制；
+- `ui.server_info` 回执带 `render_path: {gpu, reason}`（`default` / `env` / `fallback`）——
+  排查绘制类问题时，第一件事就是确认跑在哪条路上。
+
 ## 错误日志（崩溃了要查得到）
 
 **曾经的坑**：主进程一处错误处理都没有。任何未捕获异常都走 Electron 默认路径 ——
@@ -400,6 +418,7 @@ sheet**，因此它既不在语义树里，也不受页面点击控制；**而�
 | `AI_BROWSER_CANVAS_HOOK` | 开 | `0` 关闭 canvas 绘制记录注入 |
 | `AI_BROWSER_DIALOG_POLICY` | `auto` | `alert/confirm/beforeunload` 的应答策略：`auto` / `accept` / `dismiss` / `manual`（不自动应答，交给人） |
 | `AI_BROWSER_PAINT_AUDIT` | 开 | `0` 关闭"加载成功但屏幕纯白"的自检与自救（唯一用途：精确测量导航时延） |
+| `AI_BROWSER_GPU` | `auto` | `on`/`off` 强制硬件或软件合成。`auto` = 默认硬件加速；连续两次 GPU 进程崩溃（2 分钟内）写 `~/.ai-browser/.gpu-off` 并自动重启到软件合成 |
 
 **窗口必须显示**（人可随时介入），但 agent 操作不得夺走键盘焦点 —— 这是产品不变量，
 由 `e2e/focus_ws.cjs` 专门验证（含"不应发生"的阳性对照组）。

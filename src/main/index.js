@@ -257,14 +257,44 @@ app.on('child-process-gone', (_event, details) => {
     exit_code: details && details.exitCode,
     service: details && details.serviceName,
   });
+  // GPU 崩溃自动降级（见下面 disableHardwareAcceleration 的说明）。
+  // 只在"开着硬件加速"时计数；已经降级过就不再折腾。
+  const type = details && details.type;
+  const reason = details && details.reason;
+  if (!gpuDisabled && type === 'GPU' && reason && reason !== 'clean-exit') {
+    const now = Date.now();
+    gpuCrashes = gpuCrashes.filter((t) => now - t < 120000).concat(now);
+    if (gpuCrashes.length >= 2) {
+      try { fs.writeFileSync(gpuOffMarker, new Date().toISOString() + ' gpu crash fallback\n'); } catch (e) {}
+      recordError('gpu_fallback', { crashes: gpuCrashes.length, reason });
+      try { app.relaunch(); } catch (e) {}
+      try { app.exit(0); } catch (e) {}
+    }
+  }
 });
+let gpuCrashes = [];
 
-// Disable GPU compositing to avoid a whole class of GPU driver crashes
-// (exit_code=6) that take down the whole app on some systems. This only turns
-// off hardware acceleration — the window itself stays a real, visible window
-// and a human can drive it with mouse/keyboard at any time (login, QR scan,
-// captcha, correcting the agent).
-app.disableHardwareAcceleration();
+// === 硬件加速：默认开，GPU 连续崩溃自动退回软件合成 ===
+//
+// 历史：2026-10 为了让某些机器上的 GPU 崩溃（exit_code=6）别把整个 app 拖死，
+// 这里无条件 disableHardwareAcceleration()。代价是**所有页面都走软件合成**，
+// 而"整窗内容被缩放一帧""刷新时先缩成一小块再恢复""内容缩在左上角"这类绘制异常
+// 几乎都长在软件合成上 —— 合成器手里的 surface 尺寸和图层几何脱节时，软件路径会
+// 把那张图**缩放**着贴出来，GPU 路径则按图层几何重新栅格化。
+//
+// 现在的策略：
+//   - 默认开硬件加速（Apple Silicon 上更快，也不出这类缩放异常）
+//   - 连续两次 GPU 进程崩溃（2 分钟内）→ 写标记 + 自动重启到软件合成，
+//     之后一直用软的（删掉 ~/.ai-browser/.gpu-off 可恢复）。绝不因为一次偶发崩溃
+//     就把所有人降级到软件渲染。
+//   - AI_BROWSER_GPU=on|off 可强制；off 等价于旧行为。
+const gpuOffMarker = path.join(config.userDataDir, '.gpu-off');
+const gpuPref = String(process.env.AI_BROWSER_GPU || 'auto').toLowerCase();
+let gpuDisabled = gpuPref === 'off';
+if (!gpuDisabled && gpuPref !== 'on') {
+  try { gpuDisabled = fs.existsSync(gpuOffMarker); } catch (e) { gpuDisabled = false; }
+}
+if (gpuDisabled) app.disableHardwareAcceleration();
 
 // Disable Chromium sandbox — required when launched from restricted
 // environments (e.g. TRAE IDE shell) where the sandbox helper cannot
@@ -398,6 +428,10 @@ function createWindow() {
 
   // Init PageManager
   pageManager = PageManager.getInstance(mainWindow);
+  // 渲染路径是"硬件合成"还是"软件合成"，直接决定绘制异常的面貌（见
+  // disableHardwareAcceleration 一段）。让外部能查到这一位：ui.server_info 会带出来，
+  // 否则"页面上这一帧的问题"和"这条路的问题"永远分不开。
+  pageManager.renderPath = { gpu: !gpuDisabled, reason: gpuPref === 'off' ? 'env' : (gpuDisabled ? 'fallback' : 'default') };
   pageManager._preloadPath = path.join(__dirname, '../preload/bridge.cjs');
 
   // Create first tab.

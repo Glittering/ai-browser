@@ -317,6 +317,9 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
                 started_at: serverStartedAt,
                 ws_port: port,
                 platform: process.platform,
+                // 渲染路径：{gpu:true|false, reason:'default'|'env'|'fallback'}。
+                // 白屏/缩放类缺陷的复现与"这条路有没有关系"都要靠它。
+                ...(pageManager.renderPath ? { render_path: pageManager.renderPath } : {}),
               },
             });
             break;
