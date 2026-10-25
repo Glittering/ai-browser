@@ -199,6 +199,55 @@ input"这类位置猜测** —— 猜出来的对应关系比没有更糟。
 `show` / `restore` / `focus` 时重绘当前标签；`ui.repaint` 供 agent 显式兜底，
 回执带累计 `repaint_count` —— 这是"重绘真的发生了"的唯一可证伪判据。
 
+## 白屏自检（加载成功但屏幕是白的）
+
+上一节的重绘解决"画面old"，这一节解决"画面空的"。两者都没有事件可听，但性质不同：
+重绘只能靠外面的人喊"窗口不对"；白屏可以**自己看一眼**——这正是本节存在的理由。
+
+"加载成功但屏幕纯白"是唯一一种**所有回调都成功**的失败形态：`did-finish-load` 到了、
+`readyState=complete`、`ui.evaluate` 读得到正文、`capturePage`/截图也有内容，只有用户
+看到的是白的。工具侧在这个场景下集体失明，双方都拿不出证据（2026-10-25 用户报
+"打开了百度有时候是纯白屏"）。
+
+判定（`src/shared/blank_page.cjs`，纯函数）用三个信号一起看，缺一个就会误报：
+
+| 信号 | 作用 | 实测（1280×800 @2x） |
+|---|---|---|
+| 白度 | 像素 ≥250/255 的占比 | 百度首页 90–93% —— **单看它必然误报** |
+| 唯一色数 | 区分"白底有内容"和"真白" | 内容页 3.9k–6.1k；故障帧 3–25；深色加载页 400+ |
+| DOM 事实 | 白得对不对 | 空文档白是正确结果；有 397 字还白才是缺陷 |
+
+阈值：`white ≥ 99% 且 unique ≤ 32` 才算"像素纯白"，再看 DOM 决定是不是故障。
+判据是 `verdict` 七态：`ok / empty-legit / not-ready / collapsed / blank-with-text /
+blank-with-dom / no-frame`；只有两个 `blank-*` 算缺陷，`no-frame`（我们没看到画面）
+明确**不**算 —— 把诊断失败说成页面故障是最坏的一种谎。
+
+取帧走 CDP `Page.captureScreenshot`（`clip.scale=0.25`，和 `ui.screenshot` 同一条路），
+不用 `capturePage()`：后者对被其它窗口遮挡的窗口返回空图，而"窗口被遮挡"是
+本产品最常见状态（不抢焦点），用它等于在最需要观测时失明。缩放后单次自检 5–160ms。
+
+自救阶梯**有上限**：`repaint`（remove+add，不丢状态）→ `reload`（丢页面临时状态，
+所以排第二）→ `give-up`（落 `error.jsonl` 的 `paint_blank` + 广播，不再折腾）。
+上限是硬要求：CSS 把文字刷成白的页面 reload 一万次也还是白，无上限重试会变成一个
+看不见的死循环。自己发起的 reload 不清零步数（否则又是无限重载）。
+
+触发：`did-finish-load` 后 450ms + `dom-ready` 后 900ms，**只对活动 tab**（后台 tab
+不在屏幕上，为它反复取帧只是烧 CPU）；事件按 tab 合并，并发 `paint_check` 共享同一个
+Promise（不返回 null）。`ui.paint_check {tab, heal?}` 供调用方按需观测；`ui.list_tabs`
+只在**有问题**时带 `paint` 字段，正常页不带（不给调用方制造"每次都要判"的噪音）。
+
+顺带补的两处：
+- `ui.navigate` 现在维护 `_tabNavState`（`loading`→`ready`）。此前只有 `new_tab` 的
+  占位流程会写它，于是导航期间 `list_tabs` 一直报 `ready`，agent 看到 ready 就去读树。
+- 地址栏 `nav:go` 改走 `pageManager.navigate`。原先裸 `loadURL` 没有状态机、没有失败
+  错误页、没有完成后重绘 —— 地址栏是最常用的一条路，缺这三样的代价就是"有时白屏"。
+
+`render-process-gone` 也从"只打一行日志"改成**自己重载一次**（15 秒内只救一次）：
+渲染进程崩溃后 Chromium 留一块白 surface，事件不再来，DOM 读不到，用户看到的是
+永久白屏，而日志里只有一行。
+
+`AI_BROWSER_PAINT_AUDIT=0` 可关闭自检（唯一用途：精确测量导航时延）。
+
 ## 错误日志（崩溃了要查得到）
 
 **曾经的坑**：主进程一处错误处理都没有。任何未捕获异常都走 Electron 默认路径 ——
@@ -289,6 +338,7 @@ sheet**，因此它既不在语义树里，也不受页面点击控制；**而�
 | `AI_BROWSER_NETWORK_CAPTURE` | 开 | `0` 关闭默认抓包 |
 | `AI_BROWSER_CANVAS_HOOK` | 开 | `0` 关闭 canvas 绘制记录注入 |
 | `AI_BROWSER_DIALOG_POLICY` | `auto` | `alert/confirm/beforeunload` 的应答策略：`auto` / `accept` / `dismiss` / `manual`（不自动应答，交给人） |
+| `AI_BROWSER_PAINT_AUDIT` | 开 | `0` 关闭"加载成功但屏幕纯白"的自检与自救（唯一用途：精确测量导航时延） |
 
 **窗口必须显示**（人可随时介入），但 agent 操作不得夺走键盘焦点 —— 这是产品不变量，
 由 `e2e/focus_ws.cjs` 专门验证（含"不应发生"的阳性对照组）。

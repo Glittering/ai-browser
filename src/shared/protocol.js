@@ -65,6 +65,10 @@ export const VALID_METHODS = [
   'ui.screenshot',
   'ui.navigate',
   'ui.repaint',
+  // "这一页到底画出来了没有"—— 只读观测，heal:true 才走自救阶梯。
+  // 与 ui.repaint 的区别：repaint 是"外面的人说窗口不对，重画一次"；
+  // paint_check 是"工具自己看一眼，白的话按阶梯救，救不动就如实上报"。
+  'ui.paint_check',
   'ui.snapshot',
   'ui.diff',
   'ui.capabilities',

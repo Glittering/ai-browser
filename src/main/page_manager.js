@@ -1,7 +1,7 @@
 // main/page_manager.js — Multi-tab page lifecycle manager v2
 // One Electron process, one WS server, multiple tabs.
 // Agent routes via tab ID. Tab 0 is default.
-import { ipcMain, BrowserView } from 'electron';
+import { ipcMain, BrowserView, nativeImage } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -29,6 +29,9 @@ import { wrapperHintExpr, wrapperHintText } from '../shared/wrapper_hint.js';
 // normalizeAxTree 里已经自带，这条补的是默认路径 —— 见文件内注释。
 import editorsProbe from '../shared/editors_probe.js';
 import { newTracker, noteTree, diagnoseMissingRef } from '../shared/ref_epoch.js';
+// "这一页到底画出来没有"的判定口径（纯函数）。此前没有任何检测覆盖"加载成功但
+// 屏幕纯白"这一类 —— 见 shared/blank_page.cjs 顶部（2026-10-25 用户报百度白屏）。
+import blankPage from '../shared/blank_page.cjs';
 import { diffValues, previewOf, safeByteLength, DEFAULT_SNAPSHOT_JS, DIFF_MAX_ENTRIES, evictOldest } from './snapshot_diff.js';
 import { withDeadline, actionDeadlineMs } from '../shared/deadline.js';
 import { DownloadMonitor } from './download_monitor.js';
@@ -213,6 +216,26 @@ class PageManager {
     this._openDialogs = new Map();
     this._axDiffCache = new Map();  // tabId -> lite interactive snapshot (get_tree {mode:'diff'})
     this._repaintTimers = new Map();// tabId -> 正在排队/已调度的重绘（合并同一批导航事件）
+    // === 白屏自检（paint audit）===
+    // tabId -> {verdict, blank, white_ratio, unique, action, at, url}：最近一次自检的结论。
+    // 为什么必须有它：白屏是唯一一种"所有事件都成功、DOM 也正常、但用户看到的是空"的
+    // 失败形态，没有观测就只能靠人截图喊"白的"。有了它，list_tabs / paint_check
+    // 能把"这一页画出来了没有"当成一个可查询的事实。
+    this._paintState = new Map();
+    // tabId -> 本轮已经执行过几步补救（0=还没救过）。一有新的导航就清零，
+    // 所以"救不动"不会变成跨页面的永久状态。
+    this._paintSteps = new Map();
+    this._paintTimers = new Map();  // tabId -> 排队中的自检（合并 dom-ready/finish-load 的连发）
+    // tabId -> 正在跑的那一轮自检的 Promise。并发调用共享同一个 Promise，
+    // 而不是"发现有人在跑就返回 null"（那会让调用方拿到一个空结论）。
+    this._paintAuditInflight = new Map();
+    // 白屏自检的总开关。默认开；关掉它的唯一场景是"我要精确测量导航时延"。
+    this._paintAuditEnabled = process.env.AI_BROWSER_PAINT_AUDIT !== '0';
+    // 自己发起的 reload（自救用）。用它区分"这次 did-finish-load 是我们的补救"
+    // 还是"用户/页面自己导航了"—— 前者必须保留补救步数，否则会无限重载。
+    this._paintSelfReload = new Set();
+    // tabId -> 上次因渲染进程崩溃而重载的时刻（见 _attachCrashRecovery 的 15s 上限）
+    this._crashReloadAt = new Map();
     this._snapshots = new Map();    // snapshotId -> { tabId, js, value, at }（ui.snapshot 存基线）
     this._snapshotSeq = 0;
     this.networkMonitor = new NetworkMonitor({}, { captureEnabled: NETWORK_CAPTURE_DEFAULT });
@@ -650,6 +673,16 @@ class PageManager {
     // {ok:false, error:"ERR_ABORTED (-3) loading 'file://.../error_page.html'"}，
     // 它会以为自己的导航请求坏了，而实际上错误页已经接管、信息全在那儿。
     const pending = wc.loadURL(url);
+    // 导航状态机也在这里维护：此前只有 new_tab 的占位流程会写 _tabNavState，
+    // 于是 ui.navigate 期间 list_tabs 一直报 'ready' —— agent 看到 ready 就去
+    // 读树/截图，拿到的是旧页面或半张页面，然后开始"重试"。
+    this._tabNavState.set(tid, 'loading');
+    const markReady = () => {
+      if (this._tabNavState.get(tid) === 'loading') this._tabNavState.set(tid, 'ready');
+    };
+    wc.once('did-finish-load', markReady);
+    wc.once('did-fail-load', markReady);
+    setTimeout(markReady, 20000).unref?.();
     // commit / domcontentloaded 会**提前**返回；之后这个 Promise 仍可能 reject
     // （错误页接管、用户中止）。不接住就是 unhandledRejection，会把整个进程
     // 的日志淹掉。错误本身在返回结果里另行汇报。
@@ -3412,6 +3445,10 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     }
 
     this._attachLoadFailureHooks(tabId, view);
+    // "画出来了没有"只能主动看（没有对应事件），"渲染进程崩了"要自己救
+    // （以前只打一行日志，用户看到的是永久白屏）。
+    this._attachPaintHook(tabId, view);
+    this._attachCrashRecovery(tabId, view);
     return tabId;
   }
 
@@ -3568,6 +3605,327 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     return null;
   }
 
+  // === 白屏自检 ==============================================================
+  //
+  // 为什么这一层以前不存在，而它必须存在：
+  //   "网络失败"有 did-fail-load（→ 错误页），"渲染进程死了"有 render-process-gone，
+  //   但**"页面加载成功、DOM 也有内容、屏幕上却是纯白"**这一类没有任何事件。
+  //   它是唯一一种"所有回调都成功"的失败形态，所以只能靠主动看一眼画面。
+  //   2026-10-25 用户报"打开了百度有时候是纯白屏"就是这一类 —— 当时工具侧
+  //   （evaluate / get_tree / screenshot）全都读得到内容，等于集体失明。
+  //
+  // 观测口径写在 shared/blank_page.cjs：白度 + 唯一色数 + DOM 事实，三者一起判。
+
+  /** 页面自述的事实：有多少字、多少个节点、到哪一步了。 */
+  static PAINT_DOM_JS =
+    '(function(){var b=document.body,d=document.documentElement;' +
+    'var t=b?(b.innerText||b.textContent||""):"";' +
+    'return JSON.stringify({' +
+    'text_len:t.replace(/\\s+/g," ").trim().length,' +
+    'nodes:document.querySelectorAll("*").length,' +
+    'ready_state:document.readyState,' +
+    'url:location.href});})()';
+
+  /**
+   * 看一眼这个 tab 现在到底画出来了没有（只读，不改任何东西）。
+   *
+   * 两个数据源，缺一不可：
+   *   1. 位图 —— webContents.capturePage()，走 view 自己的 surface，和用户截图同源。
+   *      缩到 240px 宽再统计：判"是不是白"不需要细节，缩图把统计开销从 ~3.5M 像素
+   *      降到 ~5 万，单次自检从几十毫秒降到个位数。
+   *   2. DOM 事实 —— 有文字/有节点却纯白，才是缺陷；本来就空的页纯白是正确的。
+   *
+   * @returns {Promise<{ok:boolean, tab:number, blank:boolean, verdict:string,
+   *   reason:string, white_ratio?:number, unique?:number, dom?:object,
+   *   bounds?:object, layout_ok?:boolean, ms?:number, error?:string}>}
+   */
+  async paintCheck(tabId) {
+    const tid = tabId !== undefined ? tabId : this.activeTab;
+    const view = this._getView(tid);
+    if (!view) return { ok: false, error: 'no-such-tab', tab: tid };
+    const wc = view.webContents;
+    if (!wc || wc.isDestroyed()) return { ok: false, error: 'tab-destroyed', tab: tid };
+    const startedAt = Date.now();
+
+    let bounds = null;
+    try { bounds = view.getBounds(); } catch (_) { /* 视图正在销毁 */ }
+
+    // 布局是否占了该占的地方。压在 0 高/0 宽上时页面"白"不是内容问题，
+    // 是没人给它地方画 —— 这两种在截图上长得一样，必须靠几何量分开。
+    let expected = null;
+    let layoutOk = null;
+    try {
+      const cb = this.window.getContentBounds();
+      expected = {
+        width: cb.width,
+        height: Math.max(0, cb.height - config.tabBarHeight - (this._bottomInset || 0)),
+      };
+      if (bounds) {
+        layoutOk = bounds.width >= expected.width - 2 && Math.abs(bounds.height - expected.height) <= 2;
+      }
+    } catch (_) { /* 窗口已销毁 */ }
+
+    let dom = { text_len: 0, nodes: 0, ready_state: '' };
+    try {
+      const raw = await withDeadline(this.evaluate(PageManager.PAINT_DOM_JS, tid), 2000, 'paint_dom');
+      const s = (raw && typeof raw === 'object' && 'value' in raw) ? raw.value : raw;
+      const parsed = typeof s === 'string' ? JSON.parse(s) : null;
+      if (parsed) dom = parsed;
+    } catch (_) {
+      // 读不到 DOM 事实（渲染器卡住/正在崩溃）。继续往下走：宁可只用位图判，
+      // 也不要因为"诊断都失败了"就跳过诊断本身。
+    }
+
+    let stats = null;
+    let frameError = null;
+    try {
+      // 位图来源优先走 CDP（和 ui.screenshot 同一条路），而不是
+      // webContents.capturePage()。实测（2026-10-25，e2e/paint 与真机）：
+      // capturePage 对**被其它窗口盖住**的窗口返回空图（isEmpty()===true），
+      // 而"窗口被盖住"恰恰是本产品最常见的状态（不抢焦点原则）。用 capturePage
+      // 就等于在最需要观测的场景下失明 —— 判出来是 no-frame，什么都没看见。
+      // CDP 的 Page.captureScreenshot 走渲染器自己的 surface，被遮挡也拿得到。
+      //
+      // clip.scale=0.25：判"是不是白的"不需要细节，缩到 1/4 后像素数从 350 万
+      // 降到 22 万，统计从几十毫秒降到几毫秒，而且和用户看到的是同一帧内容。
+      const w = bounds && bounds.width ? Math.max(1, Math.round(bounds.width)) : 0;
+      const h = bounds && bounds.height ? Math.max(1, Math.round(bounds.height)) : 0;
+      let shot = null;
+      if (w && h) {
+        try {
+          this._ensureCdp(tid, view, 'Page');
+          shot = await withDeadline(
+            view.webContents.debugger.sendCommand('Page.captureScreenshot', {
+              format: 'png',
+              fromSurface: true,
+              clip: { x: 0, y: 0, width: w, height: h, scale: 0.25 },
+            }),
+            4000, 'paint_shot'
+          );
+        } catch (_) { /* 落到 capturePage 兜底 */ }
+      }
+      if (shot && shot.data) {
+        const buf = Buffer.from(shot.data, 'base64');
+        const img = nativeImage.createFromBuffer(buf);
+        if (img && !img.isEmpty()) stats = blankPage.statsFromBitmap(img.toBitmap());
+      }
+      if (!stats) {
+        const img = await withDeadline(wc.capturePage(), 4000, 'capturePage');
+        if (img && typeof img.isEmpty === 'function' && !img.isEmpty()) {
+          const small = img.resize({ width: 240 });
+          stats = blankPage.statsFromBitmap(small.toBitmap());
+        }
+      }
+    } catch (e) {
+      frameError = e && e.message ? e.message : String(e);
+    }
+
+    const cls = blankPage.classifyPaint({ stats, dom, bounds });
+    // 还在"正在打开…"占位页（file:///…/loading.html?url=…）上：真实导航排在建
+    // 垫片之后，还没开始。这时既不是白屏也不是就绪 —— 报 not-ready 才会让调用方
+    // "等一会儿"而不是"这页坏了"。这个状态在 new_tab 回执后约 100–200ms 内可见。
+    const onPlaceholder = dom && dom.url && /\/loading\.html(\?|$)/.test(String(dom.url));
+    const verdict = onPlaceholder ? 'not-ready' : cls.verdict;
+    const reason = onPlaceholder
+      ? 'still on the loading placeholder — the real navigation has not started yet'
+      : cls.reason;
+    const blank = cls.blank;
+    // 观测到的就是最新结论，落进 _paintState —— 否则 list_tabs 报的是"上一轮自动
+    // 自检"的旧结论，和调用方刚刚 paint_check 到的结果自相矛盾。
+    // no-frame 不落（那不是对页面的判断，而是我们没看见）。
+    if (verdict !== 'no-frame') {
+      this._paintState.set(tid, { tab: tid, blank, verdict, reason, dom, at: Date.now(), action: 'none' });
+    }
+    return {
+      ok: true,
+      tab: tid,
+      blank,
+      verdict,
+      reason,
+      ...(stats ? {
+        white_ratio: Math.round(stats.white_ratio * 1000) / 1000,
+        unique: stats.unique,
+        ...(stats.unique_pinned ? { unique_pinned: true } : {}),
+      } : {}),
+      dom,
+      ...(bounds ? { bounds: { width: bounds.width, height: bounds.height } } : {}),
+      ...(expected ? { expected } : {}),
+      ...(layoutOk !== null ? { layout_ok: layoutOk } : {}),
+      ...(frameError ? { frame_error: frameError } : {}),
+      ms: Date.now() - startedAt,
+    };
+  }
+
+  /**
+   * 排一次自检。合并连发的导航事件；只对**活动** tab 做 —— 后台 tab 不在屏幕上，
+   * 它"白不白"没有用户可见的后果，为它反复 capturePage 只是白烧 CPU。
+   */
+  _schedulePaintAudit(tabId, delay = 450) {
+    if (!this._paintAuditEnabled) return;
+    if (tabId !== this.activeTab) return;
+    const prev = this._paintTimers.get(tabId);
+    if (prev) clearTimeout(prev);
+    const t = setTimeout(() => {
+      this._paintTimers.delete(tabId);
+      this._auditPaint(tabId).catch(() => {});
+    }, delay);
+    if (t && typeof t.unref === 'function') t.unref();
+    this._paintTimers.set(tabId, t);
+  }
+
+  /**
+   * 自检入口。合并并发调用：**同一 tab 同时只跑一轮**，后来的调用者拿到正在跑的那一轮。
+   *
+   * 为什么不是"发现已在跑就返回 null"：自动自检（did-finish-load 后 450ms）和
+   * 调用方的 ui.paint_check{heal:true} 很容易撞在一起，返回 null 会让调用方
+   * 拿到一个"什么都没有"的结论，然后自己猜。共享同一个 Promise 才是对的。
+   */
+  async _auditPaint(tabId) {
+    if (!this._paintAuditEnabled) return null;
+    const inflight = this._paintAuditInflight.get(tabId);
+    if (inflight) return inflight;
+    let p;
+    p = this._auditPaintNow(tabId).finally(() => {
+      if (this._paintAuditInflight.get(tabId) === p) this._paintAuditInflight.delete(tabId);
+    });
+    this._paintAuditInflight.set(tabId, p);
+    return p;
+  }
+
+  /**
+   * 自检 + 按阶梯自救（真正的执行体，递归时直接调它，避免绕回合并逻辑死等自己）。
+   *
+   * 阶梯（见 blank_page.decidePaintAction）：repaint → reload → give-up。
+   * 有上限是硬要求：CSS 自己把文字刷成白色的页面，reload 一万次也还是白，
+   * 而无限重试会变成一个看不见的死循环（CPU 烧着、页面反复重载、用户看到的仍是白屏，
+   * 而且没有任何地方说过"我试过了、没用"）。
+   */
+  async _auditPaintNow(tabId) {
+    {
+      const res = await this.paintCheck(tabId);
+      if (!res.ok) return res;
+      const steps = this._paintSteps.get(tabId) || 0;
+      const action = blankPage.decidePaintAction({ verdict: res.verdict, steps });
+      const rec = { ...res, action, at: Date.now() };
+      this._paintState.set(tabId, rec);
+
+      if (action === 'none') return rec;
+
+      const view = this._getView(tabId);
+      if (!view || !view.webContents || view.webContents.isDestroyed()) return rec;
+      if (action === 'repaint') {
+        this._paintSteps.set(tabId, steps + 1);
+        this._forceRepaint(view);
+        await new Promise((r) => { const t = setTimeout(r, 320); if (t.unref) t.unref(); });
+        return this._auditPaintNow(tabId);
+      }
+      if (action === 'reload') {
+        this._paintSteps.set(tabId, steps + 1);
+        this._paintSelfReload.add(tabId);
+        try {
+          view.webContents.reload();
+        } catch (e) {
+          this._paintSelfReload.delete(tabId);
+          return rec;
+        }
+        await this._waitFinishLoad(tabId, 10000);
+        await new Promise((r) => { const t = setTimeout(r, 450); if (t.unref) t.unref(); });
+        return this._auditPaintNow(tabId);
+      }
+      // give-up：救不动就如实上报。这是唯一能让人知道"白屏是真的、重试没用"的地方。
+      const info = {
+        tab: tabId,
+        url: res.dom && res.dom.url,
+        verdict: res.verdict,
+        reason: res.reason,
+        white_ratio: res.white_ratio,
+        unique: res.unique,
+        attempts: steps,
+      };
+      recordError('paint_blank', info);
+      this._broadcast('paint_blank', info);
+      return rec;
+    }
+  }
+
+  /** 等到 did-finish-load（或超时）。只用于自救后的确认，不影响导航本身。 */
+  _waitFinishLoad(tabId, timeoutMs) {
+    const view = this._getView(tabId);
+    if (!view || !view.webContents || view.webContents.isDestroyed()) return Promise.resolve(false);
+    const wc = view.webContents;
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (ok) => {
+        if (done) return;
+        done = true;
+        try { wc.removeListener('did-finish-load', onLoad); } catch (_) {}
+        clearTimeout(timer);
+        resolve(ok);
+      };
+      const onLoad = () => finish(true);
+      wc.once('did-finish-load', onLoad);
+      const timer = setTimeout(() => finish(false), timeoutMs);
+      if (timer.unref) timer.unref();
+    });
+  }
+
+  /**
+   * 给一个 tab 挂上自检钩子（幂等）。
+   *
+   * 为什么是 did-finish-load + dom-ready 两条：did-finish-load 在长轮询/SPA 上可能
+   * 迟迟不来（那正是首屏白最久的时候），dom-ready 是更早的第二落点。两次都被
+   * _schedulePaintAudit 按 tab 合并，不会真的跑两遍。
+   */
+  _attachPaintHook(tabId, view) {
+    if (!this._paintAuditEnabled) return;
+    if (!view || !view.webContents || view.webContents.isDestroyed()) return;
+    if (!this._paintAuditHooked) this._paintAuditHooked = new WeakSet();
+    if (this._paintAuditHooked.has(view)) return;
+    this._paintAuditHooked.add(view);
+    const onLoad = () => {
+      // 自己触发的 reload 不清零补救步数 —— 否则 "reload 后还是白" 会重新从
+      // repaint 开始，变成"重载 → 再重载"的无限循环。
+      if (this._paintSelfReload.has(tabId)) {
+        this._paintSelfReload.delete(tabId);
+      } else {
+        this._paintSteps.set(tabId, 0);
+        this._paintState.delete(tabId);
+      }
+      this._schedulePaintAudit(tabId, 450);
+    };
+    view.webContents.on('did-finish-load', onLoad);
+    view.webContents.on('dom-ready', () => this._schedulePaintAudit(tabId, 900));
+  }
+
+  /**
+   * 渲染进程崩了 → 自己重载一次。
+   *
+   * 以前这里只有 console.error：进程崩溃后 Chromium 给窗口留一块**白**的
+   * surface，事件不再来，DOM 读不到，用户看到的是永久白屏，而日志里只有一行。
+   * reload 之后 Chromium 会重新拉一个渲染进程，页面照常回来。
+   * 15 秒内只救一次：崩了又崩说明是死循环，重载只会让人反复看着它闪。
+   */
+  _attachCrashRecovery(tabId, view) {
+    if (!view || !view.webContents || view.webContents.isDestroyed()) return;
+    if (!this._crashHooked) this._crashHooked = new WeakSet();
+    if (this._crashHooked.has(view)) return;
+    this._crashHooked.add(view);
+    view.webContents.on('render-process-gone', (_e, details) => {
+      const reason = (details && details.reason) || 'unknown';
+      let url = null;
+      try { url = view.webContents.getURL(); } catch (_) {}
+      recordError('render_process_gone', { tab: tabId, reason, exit_code: details && details.exitCode, url });
+      if (reason === 'clean-exit') return;
+      const last = this._crashReloadAt.get(tabId) || 0;
+      if (Date.now() - last < 15000) return;
+      this._crashReloadAt.set(tabId, Date.now());
+      try {
+        view.webContents.reload();
+        this._broadcast('tab_recovered', { tab: tabId, reason, action: 'reload', url });
+      } catch (_) { /* 视图已销毁 */ }
+    });
+  }
+
   /**
    * Repaint on demand (ui.repaint). The "page shows stale content" case has
    * no observable state to detect it from — the DOM and evaluate already report
@@ -3657,6 +4015,30 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     // 同理，下载记录只对"这个 tab 还在"有意义。注意**只清记录，不删文件** ——
     // 文件是用户要的东西，删文件是另一个决定，不能藏在关 tab 里。
     this.downloadMonitor.clearTab(tabId);
+    // 白屏自检 / 崩溃自救的 per-tab 状态。不清的话 tabId 会被新 tab 复用，
+    // 新 tab 一开就继承上一任的"已经救过两步"，白屏时直接被判定成 give-up。
+    this._paintState.delete(tabId);
+    this._paintSteps.delete(tabId);
+    this._paintSelfReload.delete(tabId);
+    this._crashReloadAt.delete(tabId);
+    const pt = this._paintTimers.get(tabId);
+    if (pt) { clearTimeout(pt); this._paintTimers.delete(tabId); }
+  }
+
+  /** 白屏相关的"值得报出去的结论"；正常页面返回 null（listTabs 不带这个字段）。 */
+  _paintProblem(tabId) {
+    const p = this._paintState.get(tabId);
+    if (!p) return null;
+    // 这四种都不是"用户可见的白屏"，不该出现在 list_tabs 里：
+    //   ok / empty-legit 是正常，not-ready 是还没加载完，no-frame 是**我们自己
+    //   没看到画面**（视图被销毁等）—— 把诊断失败说成页面故障，是最坏的一种谎。
+    if (p.verdict === 'ok' || p.verdict === 'empty-legit' || p.verdict === 'not-ready' || p.verdict === 'no-frame') return null;
+    return {
+      blank: !!p.blank,
+      verdict: p.verdict,
+      reason: p.reason,
+      action: p.action,
+    };
   }
 
   listTabs() {
@@ -3676,6 +4058,9 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
         // 只有 manual 策略下才会长期存在。auto 模式下对话框在打开的瞬间就被
         // 应答了，所以正常情况这个字段不出现 —— 出现即意味着"有人需要点它"。
         ...(this._openDialogs.has(id) ? { dialog: this._openDialogs.get(id) } : {}),
+        // 白屏只在与众不同时出现：正常页面不带这个字段（省 token，也不给
+        // 调用方制造"每次都要判"的噪音）。出现即"这一页没画出来"。
+        ...(this._paintProblem(id) ? { paint: this._paintProblem(id) } : {}),
       });
     }
     return list;

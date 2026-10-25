@@ -185,6 +185,22 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
             send({ jsonrpc: '2.0', id, result: r });
             break;
           }
+          case 'ui.paint_check': {
+            // "这一页到底画出来了没有"—— 只读，不改任何东西。
+            //
+            // 为什么必须有这个入口：白屏是唯一一种"did-finish-load 到了、
+            // readyState=complete、evaluate 读得到文字、CDP 截图也有内容，
+            // 但屏幕上就是纯白"的失败形态。所有既有观测口在这里集体失明，
+            // 于是用户说"白的"、工具说"好的"，谁也拿不出证据。
+            // 判定口径见 shared/blank_page.cjs。
+            //
+            // heal:true 时才走自救阶梯（repaint → reload → 给结论并上报），
+            // 默认只观测 —— 调用方问"是不是白的"时，不该顺手把页面重载掉。
+            const tid = params.tab !== undefined ? params.tab : pageManager.activeTab;
+            const r = params.heal ? await pageManager._auditPaint(tid) : await pageManager.paintCheck(tid);
+            send({ jsonrpc: '2.0', id, result: r });
+            break;
+          }
           case 'ui.snapshot': {
             const r = await pageManager.snapshot({ js: params.js, label: params.label, tab: tabId });
             send({ jsonrpc: '2.0', id, result: r });

@@ -454,10 +454,12 @@ function createWindow() {
     };
   });
   ipcMain.on('nav:go', (_e, input) => {
-    const wc = activeWebContents();
     const url = normalizeUrlInput(input);
-    if (!wc || !url) return;
-    try { wc.loadURL(url); } catch (e) { console.error('[index] nav:go failed:', e.message); }
+    if (!url) return;
+    // 走 pageManager.navigate 而不是裸 loadURL：裸的这条路上没有导航状态机
+    // （list_tabs 会一直报 ready）、没有失败错误页、也没有导航完成后的重绘。
+    // 地址栏是最常用的一条路，缺这三样的代价就是"有时白屏、说不清在干嘛"。
+    pageManager.navigate(url, pageManager.activeTab).catch(() => {});
   });
   ipcMain.on('nav:back', () => { const wc = activeWebContents(); if (wc && wc.navigationHistory) wc.navigationHistory.goBack(); });
   ipcMain.on('nav:forward', () => { const wc = activeWebContents(); if (wc && wc.navigationHistory) wc.navigationHistory.goForward(); });
