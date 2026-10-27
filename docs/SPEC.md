@@ -376,6 +376,68 @@ window.devicePixelRatio ∈ {1,2}
 帧号连续 3–4 帧；恢复后 3/3 全绿且每轮恰好 1 帧可见变化（色带换色）。
 **没有通过这一步的回归不算回归** —— 一个永远绿的套件只是心理安慰。
 
+## 下载：显示还是存下来（"点证书下载卡在正在打开…"）
+
+事故（2026-10-27）：用户点沧州教师继续教育网的「证书下载」，标签页停在一句
+**「正在打开…」** 加一长串 png 地址上，永远不动。文件其实下载成功了，落在
+`~/.ai-browser/downloads/<tab>/` 里 —— 界面上零回执，人只能判断成"卡住了"。
+
+根因是两个独立的东西叠在一起：
+
+1. 那个地址回的是 `Content-Type: image/png` + `Content-Disposition: attachment`。
+   浏览器的语义是"这是文件，存下来"，而站点用**新标签**打开它 ——
+   **导航永远不会提交**，标签页于是停在 `loading.html` 占位页上。
+2. 整条下载路径只有落盘、没有界面表达（`will-download` 是被 agent 需求加上的，
+   原本的设计里没有"人"）。
+
+### 判据：能不能看，由 Content-Type 决定
+
+`src/shared/media_doc.cjs`（纯函数）+ `src/main/media_inline.js`（接线）。
+
+`session.webRequest.onHeadersReceived`（**只对 `resourceType === 'mainFrame'`**）：
+主框架响应若满足 `可渲染的 Content-Type` **且** 声明了 `attachment`，就把
+`Content-Disposition` 摘掉，让 Chromium 按内容类型正常显示。
+
+- 可渲染白名单只有四类：`image/*`、`video/*`、`audio/*`、`application/pdf`。
+  **刻意不含** `text/plain` / `application/json` / `text/csv` —— 它们技术上能内联，
+  但"点导出"的语义就是"给我文件"，把 CSV 铺满一屏是帮倒忙。
+- **不改 Content-Type**：站点把 png 说成 `application/octet-stream` 时，改类型去
+  强行渲染，坏了就是一片碎图；那种情况让它下载才可靠。
+- 其余一切（zip / dmg / exe / docx / xlsx…）保持浏览器的默认语义：下载。
+
+> 为什么在 `onHeadersReceived` 而不是 `will-download` 里拦：`will-download` 触发的
+> 时候下载**已经决定了**，只能整体取消再自己重取一遍（多一次往返，还要自己兜住
+> Cookie / Referer / 临时签名）。而 Content-Disposition 正是在响应头之后才参与
+> 下载判定的 —— 在这里摘掉，走的是浏览器原本的路径。
+
+### 三个界面出口（缺一个都会回到"看起来卡住了"）
+
+| 场景 | 行为 |
+|---|---|
+| 可显示的类型（图片/视频/PDF） | **直接显示**；工具条出现「↓」按钮，点一下就把当前页存进下载目录（`ui.download` 是同一个实现） |
+| 不可显示的类型，且那个标签页是**为它而开**的 | 标签页换成**下载结果页** `renderer/download.html`：文件名 / 大小 / 类型 / 图片缩略图 / 进度条 /「打开」「在 Finder 中显示」「复制路径」 |
+| 页面里点导出（页面不会被顶掉） | 页面保持不动；工具条出现 **「↓ 已下载 xxx」** 回执（8 秒），点一下在 Finder 中显示 |
+
+判据是"这个标签页还停在占位页吗"（`mediaDoc.isPlaceholderUrl`）：停在占位页说明它
+从没加载成功过，接管它没有任何代价；而页面里点"导出 CSV"时标签页上是真实页面，
+**绝不能**动它。
+
+### `dl:*` 通道的边界
+
+下载结果页要「打开文件」「在 Finder 中显示」，但标签页的 `preload` 挂在**每个**
+页面的 window 上（包括任意站点）。所以：
+
+- `dl:record` / `dl:open` / `dl:reveal` 在 `main/index.js` 里校验 `sender.getURL()`
+  是**我们自己的 renderer 页面**（`mediaDoc.isChromePageUrl`），站点页面调用一律返回
+  `{found:false}`；
+- 路径还必须落在下载目录之内（`insideDownloads`）—— 否则任意站点都能让浏览器
+  "打开/高亮"用户下载过的文件。
+
+回归：`npm run download`（23 断言，自带 fixture）：图片带 attachment 必须显示且不产生
+下载记录、zip 必须下载且标签页变成结果页、就地下载不许顶掉页面、本来就 inline 的
+图片照旧显示、`ui.download` 能把正在显示的图片存成文件。**负向验证做过**：
+`AI_BROWSER_MEDIA_INLINE=0` 跑同一套件，D1 四条全红（`cert.png` 变成下载、导航不提交）。
+
 ## 错误日志（崩溃了要查得到）
 
 **曾经的坑**：主进程一处错误处理都没有。任何未捕获异常都走 Electron 默认路径 ——
@@ -468,16 +530,24 @@ sheet**，因此它既不在语义树里，也不受页面点击控制；**而�
 | `AI_BROWSER_DIALOG_POLICY` | `auto` | `alert/confirm/beforeunload` 的应答策略：`auto` / `accept` / `dismiss` / `manual`（不自动应答，交给人） |
 | `AI_BROWSER_PAINT_AUDIT` | 开 | `0` 关闭"加载成功但屏幕纯白"的自检与自救（唯一用途：精确测量导航时延） |
 | `AI_BROWSER_GPU` | `auto` | `on`/`off` 强制硬件或软件合成。`auto` = 默认硬件加速；连续两次 GPU 进程崩溃（2 分钟内）写 `~/.ai-browser/.gpu-off` 并自动重启到软件合成 |
+| `AI_BROWSER_MEDIA_INLINE` | 开 | `0` 关闭"图片/音视频/PDF 即使带 `Content-Disposition: attachment` 也按内容类型显示"，回到"一律当下载"。用于二分"某站点的显示问题是不是这条钩子造成的" |
+| `AI_BROWSER_DOWNLOAD_DIR` | `<userData>/downloads` | 下载落盘根目录（每 tab 一个子目录） |
 
 **窗口必须显示**（人可随时介入），但 agent 操作不得夺走键盘焦点 —— 这是产品不变量，
 由 `e2e/focus_ws.cjs` 专门验证（含"不应发生"的阳性对照组）。
 
 ## 测试基线
 
-- 单元：`npm test` —— Vitest，27 文件 / 404 条，0 skip。
+- 单元：`npm test` —— Vitest，70 文件 / 988 条，0 skip。
 - 端到端：各 `npm run <suite>` 自起 Electron（隔离 profile）：
   `smoke` / `capabilities` / `richtext` / `network` / `value` / `canvas` / `modeldiff` /
-  `audit` / `focus` / `interact` / `view`。**改动不得破坏任何一项。**
+  `audit` / `focus` / `interact` / `view` / `readcov` / `window_open` /
+  `dialog` / `wrapper` / `paint` / `layout` / `download`。
+  **改动不得破坏任何一项。** 一次跑全部：`npm run e2e:all`（19 套件）。
+  另外两个**不进全量**：`npm run flicker`（要屏幕录制权限 + 窗口真的在屏幕上）、
+  `npm run realsites`（依赖外网）。
+  新建套件必须同时加进 `e2e/run_all.cjs` 的 `SUITES` —— 加了但没进全量等于没加
+  （`dialog`/`wrapper`/`paint`/`layout` 就这样在 v2.1.16–v2.1.19 期间从没被跑过）。
 - `ui.wait` 的 `target` 先按元素 id 精确匹配、再退化为 label 子串匹配；
   新增动作或角色时必须同步核对执行器里真有对应 case（`audit` 套件逐条验）。
 - 测量类断言必须先验前提：锁屏时前台恒为 `loginwindow`，会造成假绿/假红；

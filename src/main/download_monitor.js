@@ -28,6 +28,9 @@ export class DownloadMonitor {
     this._byTab = new Map();
     this._seq = 0;
     this._broadcast = opts.broadcast || (() => {});
+    // 下载**开始**时的钩子（不是 done）：调用方据此判断"这个 tab 是不是就为了
+    // 这次下载而开的"—— 那种 tab 永远等不到导航提交，会一直停在占位页上。
+    this._onStart = opts.onStart || null;
     this._installed = false;
   }
 
@@ -65,6 +68,10 @@ export class DownloadMonitor {
       started_at: new Date().toISOString(),
     };
     this._push(tabId, rec);
+    if (typeof this._onStart === 'function') {
+      // 这个钩子绝不能拖垮下载本身：它只做 UI 接管，出错就当地不存在。
+      try { this._onStart(rec, tabId); } catch (_) { /* ignore */ }
+    }
 
     item.on('updated', (_e, state) => {
       rec.received_bytes = item.getReceivedBytes();

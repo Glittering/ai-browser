@@ -88,6 +88,17 @@
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   #status.busy { color: #e0a33e; }
+  /* 「已下载 xxx」回执：页面里发起的下载（点导出、点附件）完成后出现在这里。
+     没有它的年代，文件悄悄落到下载目录，界面上零回执 —— 人只能认为"没反应"。 */
+  #receipt {
+    display: none; align-items: center; gap: 6px;
+    height: 26px; padding: 0 9px; border-radius: 4px; flex: none;
+    background: #24361f; color: #a8d58c; font-size: 11px;
+    max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    cursor: pointer; -webkit-app-region: no-drag;
+  }
+  #receipt.on { display: flex; }
+  #receipt:hover { background: #2f4629; }
 </style>
 </head>
 <body>
@@ -102,6 +113,9 @@
   <button class="nav-btn" id="reload"  title="刷新">&#8635;</button>
   <button class="nav-btn" id="stop"    title="停止加载" disabled>&times;</button>
   <input id="addr" type="text" placeholder="输入网址，回车打开" spellcheck="false" autocomplete="off">
+  <!-- 当前页是一份"本来会被下载、被救回来显示"的文档（图片/视频/音频/PDF）时才出现 -->
+  <button class="nav-btn" id="dl" title="下载" style="display:none">&#8595;</button>
+  <span id="receipt" title="点击在 Finder 中显示"></span>
   <span id="status"></span>
 </div>
 
@@ -119,6 +133,8 @@ function invoke(ch, payload) {
 const $ = (id) => document.getElementById(id);
 const tabsEl = $('tabs'), addrEl = $('addr'), statusEl = $('status');
 const backBtn = $('back'), fwdBtn = $('forward'), reloadBtn = $('reload'), stopBtn = $('stop');
+const dlBtn = $('dl'), receiptEl = $('receipt');
+const KIND_LABEL = { image: '图片', video: '视频', audio: '音频', pdf: 'PDF', file: '文件' };
 
 // ---- tab 条（原有逻辑，保持可用）----
 // 主进程通过 window.__onNavState 推送地址栏状态（push 模式）。
@@ -136,6 +152,30 @@ function applyNavState(s) {
   statusEl.textContent = s.status || '';
   statusEl.className = s.loading ? 'busy' : '';
   addrEl.style.borderColor = s.loading ? '#e0a33e' : '';
+
+  // 当前页是可显示的图片/视频/PDF → 给一个「下载」入口。
+  // 这类文档本来是"服务端要求下载"的，我们把它按内容类型显示了出来，
+  // 所以必须同时保留"要文件"的那条路，否则等于把功能拿掉了。
+  const media = s.media_doc;
+  dlBtn.style.display = media ? '' : 'none';
+  if (media) dlBtn.title = '下载这个' + (KIND_LABEL[media.kind] || '文件') + '（' + (media.mime || '') + '）';
+
+  // 页面里发起的下载完成的回执（8 秒）。点一下在 Finder 中显示。
+  const dl = s.download;
+  receiptEl.classList.toggle('on', !!dl);
+  if (dl) {
+    receiptEl.textContent = '\u2193 已下载 ' + shortName(dl.name);
+    receiptEl.dataset.path = dl.path || '';
+    receiptEl.title = (dl.path || '') + '\n点击在 Finder 中显示';
+  } else {
+    receiptEl.dataset.path = '';
+  }
+}
+
+/** 证书类下载的文件名常是一长串 uuid，标签位只放得下前 18 个字。 */
+function shortName(name) {
+  const s = String(name || '文件');
+  return s.length > 18 ? s.slice(0, 12) + '…' + s.slice(-5) : s;
 }
 
 let lastIds = '';      // 上次渲染的 tab id 序列 —— 只有它变了才重建 DOM
@@ -250,6 +290,11 @@ backBtn.addEventListener('click', () => send('nav:back'));
 fwdBtn.addEventListener('click', () => send('nav:forward'));
 reloadBtn.addEventListener('click', () => send('nav:reload'));
 stopBtn.addEventListener('click', () => send('nav:stop'));
+dlBtn.addEventListener('click', () => send('nav:download'));
+receiptEl.addEventListener('click', () => {
+  const p = receiptEl.dataset.path;
+  if (p) send('dl:reveal', p);
+});
 
 addrEl.addEventListener('keydown', (e) => {
   if (e.key !== 'Enter') return;

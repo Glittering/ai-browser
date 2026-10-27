@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>下载</title>
+<!--
+  download.html — 「下载结果」页。
+
+  为什么需要它（2026-10-27，沧州教师继续教育网"证书下载"）：
+
+  站点用新标签打开一个 `Content-Disposition: attachment` 的地址（zip/dmg/exe，
+  或者带 download 属性的图片）。这种导航**永远不会提交** —— 那个标签页于是
+  停在 loading.html 上，只剩一句「正在打开…」和一坨 URL，永远不动。
+  下载其实成功了，但落在 ~/.ai-browser/downloads/<tab>/ 里，界面上零回执。
+
+  所以：这个 tab 没有真页面可丢（它从没加载成功过），就把它换成本页 ——
+  文件名、大小、保存位置，以及「打开」「在 Finder 中显示」。
+  下载还在进行时这里显示进度，完成后自动变成按钮（轮询 dl:record）。
+
+  这里调用的 `__ai_browser__.dl` 只在**我们自己的界面页**上被主进程受理，
+  见 main/index.js 的 isChromeSender（站点页面调用会被直接忽略）。
+-->
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    background: #1e1e1e;
+    color: #d4d4d4;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif;
+    font-size: 13px;
+    display: flex; align-items: center; justify-content: center;
+    padding: 40px 24px;
+  }
+  .card {
+    display: flex; gap: 20px; align-items: flex-start;
+    max-width: 760px; width: 100%;
+  }
+  .thumb {
+    flex: none; width: 132px; height: 132px; border-radius: 8px;
+    background: #252526; border: 1px solid #3a3a3a;
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden; position: relative;
+  }
+  .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .thumb .glyph { font-size: 34px; font-weight: 700; color: #6b6b6b; letter-spacing: 0.5px; }
+  .body { flex: 1; min-width: 0; }
+  h1 { font-size: 15px; font-weight: 600; color: #e8e8e8; margin-bottom: 6px; }
+  h1 .state { color: #4ec9b0; font-weight: 500; }
+  .name {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px; color: #9cdcfd; word-break: break-all;
+    margin-bottom: 10px; line-height: 1.5;
+  }
+  .meta { color: #858585; font-size: 12px; line-height: 1.9; margin-bottom: 16px; }
+  .meta code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: #b5b5b5; word-break: break-all;
+  }
+  .bar {
+    height: 4px; background: #333; border-radius: 2px; overflow: hidden;
+    margin-bottom: 14px; display: none;
+  }
+  .bar.on { display: block; }
+  .bar > i { display: block; height: 100%; width: 0; background: #0e639c; transition: width .2s; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  button {
+    background: #0e639c; color: #fff; border: none; border-radius: 4px;
+    padding: 7px 16px; font-size: 12px; cursor: pointer; font-family: inherit;
+  }
+  button:hover { background: #1177bb; }
+  button.ghost { background: #3a3d41; }
+  button.ghost:hover { background: #4a4d51; }
+  .url {
+    margin-top: 16px; color: #6a6a6a; font-size: 11px; line-height: 1.6;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    word-break: break-all; max-height: 34px; overflow: hidden;
+  }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="thumb" id="thumb"><span class="glyph" id="glyph">?</span></div>
+  <div class="body">
+    <h1 id="head">已下载 <span class="state" id="state"></span></h1>
+    <div class="name" id="name">…</div>
+    <div class="meta" id="meta"></div>
+    <div class="bar" id="bar"><i id="barfill"></i></div>
+    <div class="row">
+      <button id="open">打开</button>
+      <button id="reveal" class="ghost">在 Finder 中显示</button>
+      <button id="copy" class="ghost">复制路径</button>
+    </div>
+    <div class="url" id="url"></div>
+  </div>
+</div>
+<script>
+(function () {
+  var q = new URLSearchParams(location.search);
+  var rec = {
+    name: q.get('name') || 'download',
+    path: q.get('path') || '',
+    mime: q.get('mime') || '',
+    total: Number(q.get('size') || 0),
+    received: 0,
+    state: 'progressing'
+  };
+  var KIND_LABEL = { image: '图片', video: '视频', audio: '音频', pdf: 'PDF', file: '文件' };
+  var KIND_GLYPH = { image: 'IMG', video: 'VID', audio: 'AUD', pdf: 'PDF', file: 'FILE' };
+  var EXT_GLYPH = function (name) {
+    var m = String(name || '').match(/\.([a-z0-9]{1,5})$/i);
+    return m ? m[1].toUpperCase() : 'FILE';
+  };
+
+  var $ = function (id) { return document.getElementById(id); };
+  var api = null;
+  try { api = (window.__ai_browser__ && window.__ai_browser__.dl) || null; } catch (e) { api = null; }
+
+  function kindOf(mime) {
+    var m = String(mime || '').toLowerCase();
+    if (m.indexOf('image/') === 0) return 'image';
+    if (m.indexOf('video/') === 0) return 'video';
+    if (m.indexOf('audio/') === 0) return 'audio';
+    if (m === 'application/pdf') return 'pdf';
+    return 'file';
+  }
+  function humanSize(n) {
+    n = Number(n);
+    if (!isFinite(n) || n <= 0) return '大小未知';
+    var u = ['B', 'KB', 'MB', 'GB', 'TB'], v = n, i = 0;
+    while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+    return (i === 0 ? Math.round(v) : (v >= 100 ? v.toFixed(0) : v.toFixed(1))) + u[i];
+  }
+  function ext(mime) {
+    mime = String(mime || '').toLowerCase();
+    if (mime === 'application/pdf') return 'PDF 文档';
+    if (mime.indexOf('image/') === 0) return '图片';
+    if (mime.indexOf('video/') === 0) return '视频';
+    if (mime.indexOf('audio/') === 0) return '音频';
+    if (/zip|compressed/.test(mime)) return '压缩包';
+    if (/dmg|diskimage/.test(mime)) return '磁盘映像';
+    if (/msdownload|octet-stream|exe/.test(mime)) return '安装包 / 二进制';
+    if (/word|document/.test(mime)) return '文档';
+    if (/sheet|excel/.test(mime)) return '表格';
+    return mime ? '文件' : '未知类型';
+  }
+
+  function paint() {
+    var kind = kindOf(rec.mime);
+    $('name').textContent = rec.name;
+    $('url').textContent = q.get('url') || '';
+    var done = rec.state === 'completed';
+    $('head').firstChild.nodeValue = done ? '已下载 ' : (rec.state === 'interrupted' ? '下载中断 ' : '正在下载 ');
+    $('state').textContent = done ? '' : (rec.state === 'interrupted' ? '（可重试）' : '');
+    $('meta').innerHTML =
+      '类型：' + ext(rec.mime) + (rec.mime ? '（' + rec.mime + '）' : '') +
+      ' &nbsp;·&nbsp; 大小：' + humanSize(rec.total || rec.received) +
+      (rec.path ? '<br>位置：<code>' + rec.path.replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</code>' : '');
+    var glyph = $('glyph');
+    if (!glyph.dataset.set) {
+      glyph.textContent = kind === 'file' ? EXT_GLYPH(rec.name) : (KIND_GLYPH[kind] || 'FILE');
+      glyph.dataset.set = '1';
+    }
+    // 进度条：只有"还没完"才显示，完成后不该在结果页上留一条满格绿线
+    var pct = rec.total > 0 ? Math.min(100, Math.round((rec.received / rec.total) * 100)) : 0;
+    $('bar').className = done ? 'bar' : 'bar on';
+    $('barfill').style.width = (rec.total > 0 ? pct : 4) + '%';
+
+    if (rec.thumb) {
+      var img = document.createElement('img');
+      img.src = rec.thumb;
+      $('thumb').innerHTML = '';
+      $('thumb').appendChild(img);
+    }
+  }
+
+  // 轮询：进度、完成、缩略图都从主进程取（页面里没有别的通道）。
+  function poll() {
+    if (!api) { paint(); return; }
+    api.record().then(function (r) {
+      if (r && r.found) {
+        rec.state = r.state || rec.state;
+        rec.received = r.received || 0;
+        if (r.total) rec.total = r.total;
+        if (r.path) rec.path = r.path;
+        if (r.filename) rec.name = r.filename;
+        if (r.mime) rec.mime = r.mime;
+        if (r.thumb) rec.thumb = r.thumb;
+      }
+      paint();
+      if (rec.state === 'progressing') setTimeout(poll, 500);
+    }).catch(function () { paint(); });
+  }
+
+  $('open').addEventListener('click', function () {
+    if (!api || !rec.path) return;
+    if (rec.state !== 'completed') return;
+    api.open(rec.path);
+  });
+  $('reveal').addEventListener('click', function () {
+    if (!api || !rec.path) return;
+    api.reveal(rec.path);
+  });
+  $('copy').addEventListener('click', function () {
+    var t = rec.path || '';
+    var self = this;
+    var flash = function () { self.textContent = '已复制'; setTimeout(function () { self.textContent = '复制路径'; }, 1200); };
+    try {
+      navigator.clipboard.writeText(t).then(flash, function () {});
+    } catch (e) { /* 剪贴板被禁就安静失败，按钮文字不变 */ }
+  });
+
+  paint();
+  poll();
+})();
+</script>
+</body>
+</html>

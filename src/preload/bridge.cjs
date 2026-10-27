@@ -32,6 +32,16 @@ contextBridge.exposeInMainWorld("__ai_browser__", {
     if (op === 'open') ipcRenderer.send('ai:window_open', { token: token, url: url, name: name || '' });
     else if (op === 'nav') ipcRenderer.send('ai:window_open_nav', { token: token, url: url });
     else if (op === 'close') ipcRenderer.send('ai:window_open_close', { token: token });
+  },
+  // 我们自己的界面页（renderer/download.html）用的最小通道：
+  // 查这条下载的进度、打开文件、在 Finder 中显示。
+  // ⚠️ 但它挂在**每个**标签页的 window 上（包括站点页面），所以主进程侧必须
+  // 校验 sender 的 URL 是不是自家 renderer 页面 —— 见 index.js 的 isChromeSender。
+  // 站点页面即使调到这里，也只会拿到 {found:false}。
+  dl: {
+    record: function() { return ipcRenderer.invoke('dl:record'); },
+    open: function(p) { ipcRenderer.send('dl:open', p); },
+    reveal: function(p) { ipcRenderer.send('dl:reveal', p); }
   }
 });
 

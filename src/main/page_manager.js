@@ -1,7 +1,7 @@
 // main/page_manager.js — Multi-tab page lifecycle manager v2
 // One Electron process, one WS server, multiple tabs.
 // Agent routes via tab ID. Tab 0 is default.
-import { ipcMain, BrowserView, nativeImage } from 'electron';
+import { ipcMain, BrowserView, nativeImage, webContents } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -35,6 +35,10 @@ import blankPage from '../shared/blank_page.cjs';
 import { diffValues, previewOf, safeByteLength, DEFAULT_SNAPSHOT_JS, DIFF_MAX_ENTRIES, evictOldest } from './snapshot_diff.js';
 import { withDeadline, actionDeadlineMs } from '../shared/deadline.js';
 import { DownloadMonitor } from './download_monitor.js';
+// 「这条主框架响应该显示还是该下载」的判据与接线（见 shared/media_doc.cjs 顶部：
+// 2026-10-27 用户报"点证书下载 → 卡在正在打开… + 一坨 png URL"）。
+import mediaDoc from '../shared/media_doc.cjs';
+import { MediaInline } from './media_inline.js';
 import { probeCapabilities } from './capability_probe.js';
 import valueContract from '../shared/value_contract.cjs';
 // 输入成功与否的判定口径（纯函数，独立模块便于单测）。详见文件内注释：
@@ -249,8 +253,19 @@ class PageManager {
     // agent 点"导出 CSV"拿到 success，然后什么都没有，连错误都没有。
     this.downloadMonitor = new DownloadMonitor(null, {
       broadcast: (type, data) => this._broadcast(type, data),
+      // 下载一开始就要接手"为它而开的那个标签页"，等 done 再处理的话，
+      // 用户会先盯着「正在打开…」看几秒（大文件是几分钟）—— 那正是要消灭的症状。
+      onStart: (rec, tabId) => this._onDownloadStarted(rec, tabId),
     });
     this.downloadMonitor._resolveTab = (wc) => this._tabIdOfWebContents(wc);
+    // 可渲染的主框架文档（图片/音视频/PDF）即使服务端挂了 attachment，也按内容
+    // 类型显示，而不是丢进下载目录 —— 判据与理由见 shared/media_doc.cjs。
+    this.mediaInline = new MediaInline({
+      resolveTab: (wcId) => {
+        try { return this._tabIdOfWebContents(webContents.fromId(wcId)); } catch (_) { return undefined; }
+      },
+      onMedia: (rec) => this._broadcast('media_doc', rec),
+    });
     this._setupPermissions();
     this._setupIPC();
   }
@@ -302,6 +317,11 @@ class PageManager {
     this._session = session;
     this.downloadMonitor.session = session;
     this.downloadMonitor.install();
+    // 与 will-download / 权限钩子同一条 session（见 config.viewPartition 的注释：
+    // 装错 session 的后果是"什么都没发生"）。
+    // AI_BROWSER_MEDIA_INLINE=0 关掉它 → 回到"图片也被当文件下载"的旧行为，
+    // 用于二分"某站点的显示问题是不是这条钩子造成的"。
+    if (process.env.AI_BROWSER_MEDIA_INLINE !== '0') this.mediaInline.install(session);
     this._installPermissionHandler();
   }
 
@@ -639,6 +659,87 @@ class PageManager {
       ready: (r.downloads || []).filter((d) => d.state === 'completed'),
       note: 'only state=completed entries have a file on disk; check .path',
     };
+  }
+
+  /**
+   * 下载开始了 —— 如果"这个 tab 就是为它而开的"，当场把它换成结果页。
+   *
+   * 事故现场（2026-10-27，沧州教师继续教育网"证书下载"）：站点用新标签打开
+   * `.../xxx.png`，服务端带 `Content-Disposition: attachment`，于是 Electron
+   * 把它当下载 —— **导航永远不会提交**，那个标签页停在 loading.html 上：
+   * 一句「正在打开…」+ 一坨 URL，永远不变。文件其实已经落盘，但界面上
+   * 没有任何回执，人的判断只能是"卡住了"。
+   *
+   * 判据是"这个 tab 还停在占位页"：说明它没有真正的页面可丢，接管它没有任何
+   * 代价。反过来，页面里点"导出 CSV"那种下载，tab 上是真实页面，绝不能动。
+   */
+  _onDownloadStarted(rec, tabId) {
+    try {
+      if (tabId === undefined || tabId === null || !rec) return;
+      const view = this.tabs.get(tabId);
+      if (!view || view.webContents.isDestroyed()) return;
+      const cur = view.webContents.getURL() || '';
+      if (!mediaDoc.isPlaceholderUrl(cur)) return;
+      // 让这条 will-download 先走完，再切页面：避免和刚刚被取消的导航抢加载。
+      setImmediate(() => {
+        try {
+          if (view.webContents.isDestroyed()) return;
+          if (!mediaDoc.isPlaceholderUrl(view.webContents.getURL() || '')) return;
+          this.showDownloadResult(tabId, rec);
+        } catch (_) { /* 结果页只是"有回执"，失败不该影响下载本身 */ }
+      });
+    } catch (_) { /* 同上 */ }
+  }
+
+  /** 把一个 tab 换成"下载结果"页（文件名/大小/缩略图/打开/在 Finder 中显示）。 */
+  showDownloadResult(tabId, rec) {
+    const view = this.tabs.get(tabId);
+    if (!view || view.webContents.isDestroyed()) return false;
+    const q = new URLSearchParams();
+    q.set('id', rec.id || '');
+    q.set('name', rec.filename || 'download');
+    q.set('path', rec.path || '');
+    q.set('mime', rec.mime || '');
+    q.set('size', String(rec.total_bytes || 0));
+    q.set('url', rec.url || '');
+    const pagePath = path.join(__dirname, '../renderer/download.html');
+    const target = 'file://' + pagePath + '?' + q.toString();
+    view.webContents.loadURL(target).catch(() => {});
+    return true;
+  }
+
+  /**
+   * 工具条上的「下载」按钮：把当前页（一份被救回来的图片/视频/PDF）存到下载目录。
+   *
+   * 走 `downloadURL` 而不是自己 fetch：用的是同一个 session，站点的 Cookie /
+   * Referer / 临时签名全部照旧，也就不会出现"浏览器里能看、下载下来是 403 页面"。
+   */
+  downloadCurrent(tabId) {
+    const id = tabId === undefined || tabId === null ? this.activeTab : tabId;
+    const view = this.tabs.get(id);
+    if (!view || view.webContents.isDestroyed()) return { ok: false, error: 'no such tab' };
+    const cur = view.webContents.getURL() || '';
+    const rec = this.mediaInline.recordOf(id, cur);
+    const url = rec ? rec.url : cur;
+    if (!/^https?:/i.test(url)) return { ok: false, error: 'not an http(s) page: ' + url };
+    try {
+      view.webContents.downloadURL(url);
+      return { ok: true, tab: id, url, note: 'check ui.downloads / the toolbar receipt for the path' };
+    } catch (e) {
+      return { ok: false, error: String(e && e.message || e) };
+    }
+  }
+
+  /** 当前页是不是一份"被救回来的"可显示文档（要显示下载按钮）。 */
+  mediaDocOf(tabId) {
+    const id = tabId === undefined || tabId === null ? this.activeTab : tabId;
+    const view = this.tabs.get(id);
+    if (!view || view.webContents.isDestroyed()) return null;
+    try {
+      return this.mediaInline.recordOf(id, view.webContents.getURL() || '');
+    } catch (_) {
+      return null;
+    }
   }
 
   _sendToView(tabId, channel, payload) {
@@ -4211,6 +4312,9 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     // 同理，下载记录只对"这个 tab 还在"有意义。注意**只清记录，不删文件** ——
     // 文件是用户要的东西，删文件是另一个决定，不能藏在关 tab 里。
     this.downloadMonitor.clearTab(tabId);
+    // tabId 会被复用，媒体文档记录跟着一起清 —— 否则新 tab 一打开就带着
+    // 上一个 tab 的「下载」按钮状态（地址对不上时 recordOf 会兜住，但别依赖兜底）。
+    if (this.mediaInline) this.mediaInline.forget(tabId);
     // 白屏自检 / 崩溃自救的 per-tab 状态。不清的话 tabId 会被新 tab 复用，
     // 新 tab 一开就继承上一任的"已经救过两步"，白屏时直接被判定成 give-up。
     this._paintState.delete(tabId);
@@ -5120,6 +5224,7 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     // that are about to stop existing.
     this._snapshots.clear();
     this.downloadMonitor.clearAll();
+    if (this.mediaInline) this.mediaInline.clearAll();
     for (const t of this._repaintTimers.values()) clearTimeout(t);
     this._repaintTimers.clear();
     for (const [id, view] of this.tabs) {

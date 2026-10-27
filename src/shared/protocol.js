@@ -78,6 +78,10 @@ export const VALID_METHODS = [
   'ui.subscribe',
   'ui.unsubscribe',
   'ui.downloads',
+  // "把当前页存下来"。浏览器的显示/下载是两条路：图片、视频、PDF 被显示出来
+  // （见 shared/media_doc.cjs），所以要留下文件时得有一条明确的入口，
+  // 否则等于把"下载"这个能力从这类页面上拿掉了。
+  'ui.download',
   // 主进程错误日志（只读）。界面弹过"js 崩溃"原生框、或某个动作莫名失败时，
   // 这里是唯一能查到 stack 与"出错那一刻在调什么"的地方 —— 此前这类异常只活在
   // 那个框里，点掉即永久丢失。

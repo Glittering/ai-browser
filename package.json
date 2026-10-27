@@ -87,7 +87,8 @@
     "wrapper": "node e2e/wrapper_ws.cjs",
     "paint": "node e2e/paint_ws.cjs",
     "layout": "node e2e/layout_ws.cjs",
-    "flicker": "node e2e/flicker_ws.cjs"
+    "flicker": "node e2e/flicker_ws.cjs",
+    "download": "node e2e/download_ws.cjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

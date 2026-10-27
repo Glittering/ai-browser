@@ -543,6 +543,15 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
             send({ jsonrpc: '2.0', id, result: r });
             break;
           }
+          // === ui.download — 把当前页存进下载目录 ===
+          // 用于"这一页本来就是一张图片/视频/PDF，我想留下文件"：
+          // 浏览器把它显示出来了（见 shared/media_doc.cjs），但"要文件"这条路
+          // 不能因此消失。工具条上那个「下载」按钮走的就是同一个实现。
+          case 'ui.download': {
+            const r = pageManager.downloadCurrent(tabId);
+            send({ jsonrpc: '2.0', id, result: r });
+            break;
+          }
           // === ui.errors — 读主进程错误日志（本次进程的内存记录 + 文件路径）===
           // 存在的理由：界面里弹一个"js 崩溃"的原生框，栈只活在框里，点掉就没了。
           // 让调用方能主动问"刚才报过什么错"，不用靠人复述。

@@ -1,12 +1,13 @@
 // main/index.js — Electron entry v5 (multi-tab, real UI)
 // One process, one WS server, multiple tabs with real tab bar.
-import { app, BrowserWindow, BrowserView, ipcMain, net, session, dialog, screen, powerMonitor } from 'electron';
+import { app, BrowserWindow, BrowserView, ipcMain, net, session, dialog, screen, powerMonitor, shell, nativeImage } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { startWSServer } from './ws_server.js';
 import { PageManager } from './page_manager.js';
 import { config } from '../shared/config.js';
+import mediaDoc from '../shared/media_doc.cjs';
 import { parseWatchdogTargets, isWatchdogEnabled } from '../shared/watchdog.js';
 import { wrapSetActive } from '../shared/tab_hooks.js';
 import { initErrorLog, recordError, markShutdown, getLogPath } from './error_log.js';
@@ -475,18 +476,7 @@ function createWindow() {
   ipcMain.on('error-banner:close', () => { setImmediate(hideErrorBanner); });
 
   // === 地址栏 / 导航按钮 ===
-  ipcMain.handle('nav:state', () => {
-    const wc = activeWebContents();
-    if (!wc) return { tab: null, url: '', canBack: false, canForward: false, loading: false, status: '' };
-    return {
-      tab: pageManager.activeTab,
-      url: wc.getURL(),
-      canBack: wc.navigationHistory ? wc.navigationHistory.canGoBack() : wc.canGoBack(),
-      canForward: wc.navigationHistory ? wc.navigationHistory.canGoForward() : wc.canGoForward(),
-      loading: wc.isLoading(),
-      status: wc.isLoading() ? '加载中…' : '',
-    };
-  });
+  ipcMain.handle('nav:state', () => buildNavState());
   ipcMain.on('nav:go', (_e, input) => {
     const url = normalizeUrlInput(input);
     if (!url) return;
@@ -499,6 +489,59 @@ function createWindow() {
   ipcMain.on('nav:forward', () => { const wc = activeWebContents(); if (wc && wc.navigationHistory) wc.navigationHistory.goForward(); });
   ipcMain.on('nav:reload', () => { const wc = activeWebContents(); if (wc) wc.reload(); });
   ipcMain.on('nav:stop', () => { const wc = activeWebContents(); if (wc) wc.stop(); });
+  // 工具条上的「下载」：当前页是一份被救回来的图片/视频/PDF 时，存进下载目录。
+  // 为什么不在页面里放按钮：站点页面的 DOM 我们不该改（会被 CSS 打架、被 CSP 拦、
+  // 也会让"页面内容"不再可信）；按钮挂在自家 chrome 上，任何站点都一致。
+  ipcMain.on('nav:download', () => {
+    if (!pageManager) return;
+    pageManager.downloadCurrent(pageManager.activeTab);
+  });
+
+  // === 下载结果页（renderer/download.html）===
+  //
+  // ⚠️ `__ai_browser__.dl` 挂在每个标签页的 window 上（含站点页面），所以这里
+  // 必须自己把门：只受理我们自己的界面页，并且路径必须在下载目录之内。
+  // 少了这道门，任意站点都能让浏览器"打开/在 Finder 里高亮"用户下载过的文件。
+  const isChromeSender = (event) => {
+    try { return mediaDoc.isChromePageUrl(event.sender.getURL()); } catch (_) { return false; }
+  };
+  const insideDownloads = (p) => {
+    try {
+      const base = path.resolve(pageManager.downloadMonitor.baseDir);
+      const abs = path.resolve(String(p || ''));
+      return abs === base || abs.startsWith(base + path.sep);
+    } catch (_) { return false; }
+  };
+  ipcMain.handle('dl:record', (event) => {
+    if (!isChromeSender(event)) return { found: false };
+    const tab = pageManager._tabIdOfWebContents(event.sender);
+    if (tab === undefined) return { found: false };
+    const list = pageManager.downloadMonitor.list(tab).downloads || [];
+    const rec = list[list.length - 1];
+    if (!rec) return { found: false };
+    const out = {
+      found: true,
+      state: rec.state,
+      received: rec.received_bytes,
+      total: rec.total_bytes,
+      path: rec.path,
+      filename: rec.filename,
+      mime: rec.mime,
+    };
+    if (rec.state === 'completed' && mediaDoc.kindOf(rec.mime) === 'image') {
+      out.thumb = thumbDataUrl(rec.path);
+    }
+    return out;
+  });
+  ipcMain.on('dl:open', (event, p) => {
+    if (!isChromeSender(event) || !insideDownloads(p)) return;
+    try { if (fs.existsSync(p)) shell.openPath(p).catch(() => {}); } catch (_) { /* ignore */ }
+  });
+  ipcMain.on('dl:reveal', (event, p) => {
+    if (!isChromeSender(event) || !insideDownloads(p)) return;
+    try { shell.showItemInFolder(p); } catch (_) { /* ignore */ }
+  });
+
   // 错误页里的重试 / 返回（错误页是我们自己的 renderer，同样走 ipc）
   ipcMain.on('error-page:navigate', (_e, input) => {
     const wc = activeWebContents();
@@ -883,21 +926,87 @@ function updateWindowTitle() {
   try { mainWindow.setTitle(next); } catch (_) { /* 窗口在关闭竞态里 */ }
 }
 
+/**
+ * 地址栏 + 工具条需要的一切状态。
+ *
+ * 单一实现：`nav:state`（初始化时自取）与 `pushNavState`（事件 + 1.5s 轮询）
+ * 必须是同一份 —— 两处各写一遍的结果是"某些字段只在某条路上有"，表现为
+ * 按钮有时出现有时不出现，而且极难复现。
+ */
+function buildNavState() {
+  const wc = activeWebContents();
+  if (!wc) {
+    return { tab: null, url: '', canBack: false, canForward: false, loading: false, status: '', media_doc: null, download: null };
+  }
+  const tab = pageManager.activeTab;
+  const url = wc.getURL();
+  let media = null;
+  try { media = pageManager.mediaDocOf(tab); } catch (_) { media = null; }
+  return {
+    tab,
+    url,
+    canBack: wc.navigationHistory ? wc.navigationHistory.canGoBack() : wc.canGoBack(),
+    canForward: wc.navigationHistory ? wc.navigationHistory.canGoForward() : wc.canGoForward(),
+    loading: wc.isLoading(),
+    status: wc.isLoading() ? '加载中…' : '',
+    // 当前页是一份"本来会被下载、被救回来显示"的文档（图片/视频/音频/PDF）
+    // → 工具条显示「下载」按钮。
+    media_doc: media ? { url: media.url, mime: media.mime, kind: media.kind } : null,
+    // 页面里发起的下载（导出 CSV、点附件…）完成后的回执。下载结果页本身就在
+    // 展示文件，再弹一条是重复信息，所以那里不显示。
+    download: recentDownloadOf(tab, url),
+  };
+}
+
+/** 8 秒内的"刚下载完"回执；超时就不再提示（不留一个永远挂着的角标）。 */
+const RECENT_DOWNLOAD_MS = 8000;
+function recentDownloadOf(tab, currentUrl) {
+  if (mediaDoc.isChromePageUrl(currentUrl)) return null;
+  try {
+    const list = pageManager.downloadMonitor.list(tab).downloads || [];
+    const last = list[list.length - 1];
+    if (!last || last.state !== 'completed' || !last.finished_at) return null;
+    const at = Date.parse(last.finished_at);
+    if (!isFinite(at) || Date.now() - at > RECENT_DOWNLOAD_MS) return null;
+    return { name: last.filename, path: last.path, size: last.total_bytes };
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * 图片缩略图（只在"这张图已经下载完"时生成）。
+ *
+ * 走 nativeImage 而不是让页面写 `<img src="file://…">`：file:// 页面对 file://
+ * 子资源的访问在 Chromium 里并不保证，做成 data URL 则哪里都能显示。
+ * 按路径缓存 —— 结果页每 500ms 轮询一次，不缓存就会反复解码同一张图。
+ */
+const thumbCache = new Map();
+function thumbDataUrl(p) {
+  if (!p) return null;
+  if (thumbCache.has(p)) return thumbCache.get(p);
+  let url = null;
+  try {
+    const img = nativeImage.createFromPath(p);
+    if (img && !img.isEmpty()) {
+      const size = img.getSize();
+      const small = size.width > 480 ? img.resize({ width: 480, quality: 'good' }) : img;
+      const jpg = small.toJPEG(72);
+      if (jpg && jpg.length) url = 'data:image/jpeg;base64,' + jpg.toString('base64');
+    }
+  } catch (_) { url = null; }
+  if (thumbCache.size > 16) thumbCache.clear();
+  thumbCache.set(p, url);
+  return url;
+}
+
 /** 把地址栏需要的一切状态推给 tab bar renderer。 */
 function pushNavState() {
   // 标题先更新：它不依赖 tabBarView 是否存活（横幅/崩溃场景下 tabBarView
   // 可能已被销毁，但窗口标题仍应反映真实页面）。
   updateWindowTitle();
   if (!tabBarView || tabBarView.webContents.isDestroyed()) return;
-  const wc = activeWebContents();
-  const state = wc ? {
-    tab: pageManager.activeTab,
-    url: wc.getURL(),
-    canBack: wc.navigationHistory ? wc.navigationHistory.canGoBack() : wc.canGoBack(),
-    canForward: wc.navigationHistory ? wc.navigationHistory.canGoForward() : wc.canGoForward(),
-    loading: wc.isLoading(),
-    status: wc.isLoading() ? '加载中…' : '',
-  } : { tab: null, url: '', canBack: false, canForward: false, loading: false, status: '' };
+  const state = buildNavState();
   tabBarView.webContents.executeJavaScript(
     'window.__onNavState && window.__onNavState(' + JSON.stringify(state) + ')'
   ).catch(() => {});
