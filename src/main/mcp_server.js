@@ -190,7 +190,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return { content: [{ type: 'text', text: JSON.stringify(result) }] };
       }
       if (op === 'new') {
-        const result = await wsClient.call('ui.new_tab', { url: args.url || null });
+        // show 不传 = 后台新建：agent 开页面不该把人正在看的那一页顶掉。
+        // 这是"多 agent / 无头式运行"的默认语义，见 shared/tab_route.cjs。
+        const params = { url: args.url || null };
+        if (args.show !== undefined) params.show = args.show === true;
+        const result = await wsClient.call('ui.new_tab', params);
         return { content: [{ type: 'text', text: JSON.stringify(result) }] };
       }
       if (op === 'close') {
@@ -198,11 +202,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return { content: [{ type: 'text', text: JSON.stringify(result) }] };
       }
       if (op === 'switch') {
-        const result = await wsClient.call('ui.set_active_tab', { tab: args.tab });
+        // 只换目标、不抢视野：agent 说"切到这个标签页"通常只是想说
+        // "接下来都在这页上干活"，不该把人的窗口内容换掉。
+        const result = await wsClient.call('ui.set_active_tab', { tab: args.tab, show: false });
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      }
+      if (op === 'window') {
+        const params = args.visible === undefined ? {} : { visible: args.visible === true };
+        const result = await wsClient.call('ui.window', params);
         return { content: [{ type: 'text', text: JSON.stringify(result) }] };
       }
       return {
-        content: [{ type: 'text', text: `Error: unknown op "${op}" — use list / new / close / switch` }],
+        content: [{ type: 'text', text: `Error: unknown op "${op}" — use list / new / close / switch / window` }],
         isError: true
       };
     }

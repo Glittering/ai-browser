@@ -138,10 +138,15 @@ describe('MCP tool list (token-cost guard)', () => {
     }
   });
 
-  it('browse_tabs 的 op 覆盖四种标签页操作', () => {
+  it('browse_tabs 的 op 覆盖五种标签页/窗口操作', () => {
     const t = MCP_TOOLS.find((x) => x.name === 'browse_tabs');
-    expect(t.inputSchema.properties.op.enum).toEqual(['list', 'new', 'close', 'switch']);
+    // window 是 2026-10-28 加的：后台运行（无头式无人值守）的唯一入口。
+    // 没有新增工具 —— schema 预算只剩十几字节，加工具不如加一个 op。
+    expect(t.inputSchema.properties.op.enum).toEqual(['list', 'new', 'close', 'switch', 'window']);
     expect(t.inputSchema.required).toEqual(['op']);
+    // new 的 show 必须存在且**默认不是显示**（否则多 agent 会互相顶掉视野）
+    expect(t.inputSchema.properties.show.type).toBe('boolean');
+    expect(t.inputSchema.properties.visible.type).toBe('boolean');
   });
 
   it('every tool has a non-empty minimal description and an object inputSchema', () => {

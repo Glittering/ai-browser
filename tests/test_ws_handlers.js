@@ -273,10 +273,15 @@ describe('ws_server ui.set_active_tab 回执', () => {
     expect(res.result).toEqual({ ok: true });
   });
 
-  it('TAB-2: tab 不存在回 {ok:false}，不能回空对象也不能报错', async () => {
+  it('TAB-2: tab 不存在回 {ok:false} + 原因，不能回空对象也不能报错', async () => {
     pm.setActive = () => false;
     const res = await rpc(client, 'ui.set_active_tab', { tab: 99 });
-    expect(res.result).toEqual({ ok: false });
+    // 2026-10-28：多了 error 字段。理由：只回 {ok:false} 时调用方分不清
+    // "tab 没了" 和 "切了但没生效"，而这两件事的下一步动作完全不同。
+    // 仍然是**结果**而不是 JSON-RPC error —— 这是"这次没切成"，不是"调用不合法"。
+    expect(res.result.ok).toBe(false);
+    expect(res.result.error).toBe('no-such-tab');
+    expect(res.error).toBeUndefined();
   });
 
   it('TAB-3: 经过 index.js 同款包装后 ok 仍在（本事故的回归点）', async () => {

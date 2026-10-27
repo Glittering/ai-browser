@@ -11,7 +11,7 @@ export const MCP_TOOLS = [
   {
     name: 'browse_navigate',
     title: 'Navigate tab',
-    description: 'Navigate the active/focused tab to a URL. Returns as soon as the requested milestone is reached (default: DOM ready) — it does not wait for the load event, which SPAs often never fire.',
+    description: 'Navigate your tab to a URL. Returns at the requested milestone (default: DOM ready) — it does not wait for load, which SPAs often never fire.',
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     inputSchema: {
       type: 'object',
@@ -90,31 +90,31 @@ export const MCP_TOOLS = [
         },
         drag: {
           type: 'object',
-          description: 'drag only. Give from/to for absolute points, dx/dy for a relative move, or target_to to drop onto another element.',
+          description: 'drag only. from/to = points, dx/dy = relative, target_to = drop onto an element.',
           properties: {
             from: {
               type: 'object',
-              description: 'Start point. Omit to start from target.',
+              description: 'Start point (default: target).',
               properties: {
                 x: { type: 'number' },
                 y: { type: 'number' },
-                anchor: { type: 'string', enum: ['center', 'left', 'right', 'top', 'bottom'], description: 'A side prefers that node\'s connection handle.' }
+                anchor: { type: 'string', enum: ['center', 'left', 'right', 'top', 'bottom'], description: 'A side prefers that handle.' }
               }
             },
             to: {
               type: 'object',
-              description: 'End point in viewport coords.',
+              description: 'End point (viewport).',
               properties: {
                 x: { type: 'number' },
                 y: { type: 'number' },
                 anchor: { type: 'string', enum: ['center', 'left', 'right', 'top', 'bottom'] }
               }
             },
-            dx: { type: 'number', description: 'Horizontal distance instead of to.x.' },
-            dy: { type: 'number', description: 'Vertical distance instead of to.y.' },
-            target_to: { type: 'string', description: 'data-ai-id to drop onto (e.g. connect one node\'s output to another).' },
-            hold: { type: 'array', items: { type: 'string' }, description: 'Modifiers held during the drag, e.g. ["Shift"].' },
-            button: { type: 'string', enum: ['left', 'middle', 'right'], description: 'Canvas apps often pan on middle/right drag.' }
+            dx: { type: 'number', description: 'Instead of to.x.' },
+            dy: { type: 'number', description: 'Instead of to.y.' },
+            target_to: { type: 'string', description: 'data-ai-id to drop onto.' },
+            hold: { type: 'array', items: { type: 'string' }, description: 'Held modifiers, e.g. ["Shift"].' },
+            button: { type: 'string', enum: ['left', 'middle', 'right'], description: 'Canvas apps pan on middle/right drag.' }
           }
         },
         tab: { type: 'integer', description: 'Tab id (default: active tab).' }
@@ -184,7 +184,7 @@ export const MCP_TOOLS = [
   {
     name: 'browse_screenshot',
     title: 'Screenshot the viewport',
-    description: 'Screenshot the viewport (base64 in data). Use FIRST when an action misbehaves: the element tree cannot show overlays, canvas, occlusion or glitches. Warns if a visible password input is on screen.',
+    description: 'Screenshot the viewport (base64). Use FIRST when an action misbehaves: the tree cannot show overlays, canvas, occlusion or glitches. Warns about visible password inputs.',
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     inputSchema: {
       type: 'object',
@@ -210,7 +210,7 @@ export const MCP_TOOLS = [
   {
     name: 'browse_tabs',
     title: 'Tabs',
-    description: 'Tabs: op=list / new / close / switch. switch makes a tab the default target for later calls, so you rarely pass tab explicitly.',
+    description: 'Tabs: list/new/close/switch/window. switch = your default target (then omit tab). new never steals the user\'s view unless show:true. window = hide/show; work continues while hidden.',
     // 合并前是 4 个工具（list / new / close / set_active），每个只承载一个动词。
     // 合并后 destructiveHint 只能是 false —— 否则 op=list 也会被标成破坏性操作；
     // close 的破坏性写在 description 里。这是合并的唯一语义代价，接受。
@@ -218,9 +218,11 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        op: { type: 'string', enum: ['list', 'new', 'close', 'switch'], description: 'list = id/url/title/active for every tab. switch = make `tab` the default target.' },
+        op: { type: 'string', enum: ['list', 'new', 'close', 'switch', 'window'], description: 'list = every tab; switch = set default; window = hide/show.' },
         tab: { type: 'integer', description: 'close / switch: the target tab id.' },
-        url: { type: 'string', description: 'new: open at this URL (default about:blank).' }
+        url: { type: 'string', description: 'new: open at this URL (default about:blank).' },
+        show: { type: 'boolean', description: 'new: bring it to the front (default: background).' },
+        visible: { type: 'boolean', description: 'window: true = show, false = hide.' }
       },
       required: ['op']
     }

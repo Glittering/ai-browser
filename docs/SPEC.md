@@ -376,6 +376,111 @@ window.devicePixelRatio ∈ {1,2}
 帧号连续 3–4 帧；恢复后 3/3 全绿且每轮恰好 1 帧可见变化（色带换色）。
 **没有通过这一步的回归不算回归** —— 一个永远绿的套件只是心理安慰。
 
+## 并发：多 agent 并用，各干各的
+
+事故模型（2026-10-28 用户提出）：默认目标以前是**全局** `activeTab` —— 也就是
+"人眼看的那一页"。单 agent 时它恰好等于"agent 正在干的活"，看不出问题。多个 agent
+同时用时立刻崩：
+
+- A 开一个标签页 → **所有人**的默认目标都变成它；
+- B 只说"点一下提交"，点在了 A 的页面上；
+- 人切一下标签页看热闹 → 把所有 agent 的目标一起切走。
+
+共同点：**动作落在哪个页面，取决于别人做了什么**。回执 `success`、页面真的变了，
+但不是该变的那个 —— 比直接失败难查得多。
+
+### 判据只有一处：`shared/tab_route.cjs`
+
+```
+explicit（调用方点名） > session（这个 WS 连接自己的标签页） > active（人眼看的） > 第一个
+```
+
+两条**不可退让**的约束：
+
+1. **点名了不存在的 tab → 报错**，绝不"就近挑一个"。静默改目标 = 在错的页面上执行成功。
+   （这一层不拦，交给各方法用更准的词汇报：`ui.repaint` 报 `no-such-tab`、
+   `ui.diff` 报 `tab-mismatch`。）
+2. **自己的标签页被**别人**关掉 → 报错**（`-32001`），绝不退回 `active`。
+   自己关自己的（`ui.close_tab` 关的就是绑定那一个）则解绑、按浏览器惯例落回可见页。
+
+绑定发生的时机只有两个：`ui.new_tab` 建出来的、`ui.set_active_tab` 明确指定的。
+**传一次 `tab` 参数不算**（那只是"这一次操作这一页"，不代表"以后都在这页"）——
+否则 agent 随手读一下别人的页面，就把自己的目标粘在那儿了。
+
+`ui.list_tabs` 只在自己那条上带 `mine: true`（省 token，也避免"每条都标"的噪音）。
+
+### 新标签页要不要顶掉人眼前的页面
+
+`shouldShowNewTab`：显式 `show` 优先；否则**不顶**，三种例外：
+
+- 人自己点的「+」（UI 层 `defaultShow`）；
+- 当前没有可见标签页；
+- 可见的还是**没被动过的启动页**（否则用户盯着百度首页看 agent 干活）。
+  一旦发生过导航/动作/切标签页，这个"启动页特权"就一次性用掉。
+
+站点 `window.open` / `target=_blank` 派生的标签页**跟着打开者走**：可见页里弹的
+照旧显示（浏览器惯例），后台页里弹的留在后台 —— agent 流程里登录/预览/下载弹窗极多，
+每弹一个抢一次视野等于人没法用电脑。
+
+**自动跟随**（点链接开新标签）改的是**目标**不是**视野**：`opened_tab` 回执让 ws 层
+把会话目标挪过去，人眼前的页面只有在 opener 就是可见页时才跟着切。
+
+---
+
+## 后台：窗口不显示时照样把活干完
+
+用户的要求：*"跟无头浏览器一样无感知运行，并且随时可以点开，使用它，还不影响 agent
+进行任何任务"*。这以前**做不到**，三处硬伤都在这一节里。
+
+### 1. 隐藏必须是稳定状态
+
+`_focusWindow` 的 `auto` 分支以前会"窗口被最小化/隐藏就 `showInactive` 回来"——
+依据是当时的产品不变量"窗口必须真实可见"。多 agent 之后它反过来咬人：agent 每操作
+一次，隐藏的窗口就自己爬出来一次。
+
+现在可见性只由两件事决定：**人**（Dock 图标 → `app.on('activate')`）和**显式调用**
+（`ui.window`）。`_focusWindow` 在 `auto` 下不碰窗口任何状态（`always` 保留旧行为）。
+
+| 入口 | 作用 |
+|---|---|
+| `AI_BROWSER_START_HIDDEN=1` | 进程起来但不出窗口（无人值守的常态） |
+| `ui.window {visible:true\|false, focus?}` | 读/改可见性。`focus` 不给就走 `showInactive`，不夺键盘焦点 |
+| `ui.window {minimized:true\|false}` | 最小化/恢复（macOS 有动画，回执等 280ms 再读，否则报 false） |
+| Dock 图标 / 二次启动 | `activate` 事件 → 显示窗口（人把浏览器叫回来的唯一约定入口） |
+| `ui.server_info` | 回执里带 `window: {visible, minimized, focused}`，否则"到底是不是隐藏的"只能靠猜 |
+
+### 2. 没有合成表面 = 截不到图（最隐蔽的一条）
+
+没挂进窗口的 `BrowserView` **没有合成表面**：读树 / 点击 / 输入 / 导航全部正常
+（走渲染进程和 CDP 输入），但 `ui.screenshot` 拿 **0 字节**、`ui.paint_check` 直接
+`no-frame`。而截图正是 agent 判断"这一页到底画出什么"的唯一手段 —— 于是"后台标签页"
+会变成一个看不见也拍不到的黑盒。
+
+现在：**所有标签页都挂进窗口，用 z 序决定谁在上面**（`setTopBrowserView`，
+不再 `removeBrowserView` 全部再 add 一个）。代价是每个标签页都占一份合成资源
+（和 Chrome 的多标签一样），换来后台标签页可截图、可自检、可录制 canvas。
+
+另外每个标签页**从出生起** `setBackgroundThrottling(false)`（以前只在 `setActive`
+里设，于是"从没被显示过"的标签页永远带着节流：定时器拉长到 1s、rAF 停摆）。
+
+### 3. 窗口不可见时不做白屏判定
+
+`_schedulePaintAudit` 在窗口隐藏/最小化时直接返回：这时"屏幕上画出来没有"没有观测
+意义，取帧要么空要么陈旧，而阶梯会据此 `reload` —— 后台无人值守时等于自己制造一场
+重载风暴。人把窗口点开时（`ui.window visible:true`）反过来补一次自检（700ms 后），
+兜住"agent 在后台把页面搞白了、人一打开正好看到"。
+
+### 已知边界（写下来，免得被当 bug 修）
+
+- **同一个标签页上的并发动作不协调**：两个 agent 同时往同一个输入框里打字，值校验会
+  如实报 `input not verified`（append 语义 + 并发写本来就互相踩）。不同标签页之间
+  完全并行，这一条有 `npm run multiagent` 钉住。
+- **标签页都是有表面的**：开 50 个标签页的显存/合成开销和 Chrome 同量级，不是"免费"。
+- 窗口隐藏时 `capturePage()` 仍会返回空（遮挡），截图走的是 CDP
+  `captureScreenshot({fromSurface:true})` 那条路 —— 见「取帧两条铁律」。
+
+回归：`npm run multiagent`（32 断言）、`npm run background`（37 断言），两个都在 `e2e:all` 里。
+
 ## 下载：显示还是存下来（"点证书下载卡在正在打开…"）
 
 事故（2026-10-27）：用户点沧州教师继续教育网的「证书下载」，标签页停在一句
@@ -531,6 +636,7 @@ sheet**，因此它既不在语义树里，也不受页面点击控制；**而�
 | `AI_BROWSER_PAINT_AUDIT` | 开 | `0` 关闭"加载成功但屏幕纯白"的自检与自救（唯一用途：精确测量导航时延） |
 | `AI_BROWSER_GPU` | `auto` | `on`/`off` 强制硬件或软件合成。`auto` = 默认硬件加速；连续两次 GPU 进程崩溃（2 分钟内）写 `~/.ai-browser/.gpu-off` 并自动重启到软件合成 |
 | `AI_BROWSER_MEDIA_INLINE` | 开 | `0` 关闭"图片/音视频/PDF 即使带 `Content-Disposition: attachment` 也按内容类型显示"，回到"一律当下载"。用于二分"某站点的显示问题是不是这条钩子造成的" |
+| `AI_BROWSER_START_HIDDEN` | 关 | `1` = 后台模式：进程起来但**不出窗口**（无人值守）。Dock 图标点击或 `ui.window{visible:true}` 随时把窗口叫回来；所有页面能力不受影响 |
 | `AI_BROWSER_DOWNLOAD_DIR` | `<userData>/downloads` | 下载落盘根目录（每 tab 一个子目录） |
 
 **窗口必须显示**（人可随时介入），但 agent 操作不得夺走键盘焦点 —— 这是产品不变量，
@@ -538,12 +644,12 @@ sheet**，因此它既不在语义树里，也不受页面点击控制；**而�
 
 ## 测试基线
 
-- 单元：`npm test` —— Vitest，70 文件 / 988 条，0 skip。
+- 单元：`npm test` —— Vitest，71 文件 / 1001 条，0 skip。
 - 端到端：各 `npm run <suite>` 自起 Electron（隔离 profile）：
   `smoke` / `capabilities` / `richtext` / `network` / `value` / `canvas` / `modeldiff` /
   `audit` / `focus` / `interact` / `view` / `readcov` / `window_open` /
-  `dialog` / `wrapper` / `paint` / `layout` / `download`。
-  **改动不得破坏任何一项。** 一次跑全部：`npm run e2e:all`（19 套件）。
+  `dialog` / `wrapper` / `paint` / `layout` / `download` / `multiagent` / `background`。
+  **改动不得破坏任何一项。** 一次跑全部：`npm run e2e:all`（22 套件 / 700+ 断言）。
   另外两个**不进全量**：`npm run flicker`（要屏幕录制权限 + 窗口真的在屏幕上）、
   `npm run realsites`（依赖外网）。
   新建套件必须同时加进 `e2e/run_all.cjs` 的 `SUITES` —— 加了但没进全量等于没加

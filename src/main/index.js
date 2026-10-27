@@ -355,6 +355,21 @@ if (gotLock) {
       mainWindow.focus();
     }
   });
+  // Dock 图标被点击（macOS 上"再点一次已运行的应用"、或窗口被隐藏后想找回它）。
+  //
+  // 后台模式（AI_BROWSER_START_HIDDEN / ui.window{visible:false}）下窗口默认是隐藏的，
+  // 这是人把它叫回来的**唯一**约定入口 —— 没有它，"随时可以点开使用"就成了空话，
+  // 用户只能去活动监视器里杀进程。
+  app.on('activate', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    try {
+      if (pageManager && pageManager.setWindowVisible) {
+        pageManager.setWindowVisible(true, { focus: true });
+      } else {
+        mainWindow.show();
+      }
+    } catch (_) { /* 窗口正在销毁 */ }
+  });
 } else if (!(process.platform === 'darwin' && app.isPackaged)) {
   // A real second instance would fight the first one over the :9223 WS port.
   // Still tolerant of weird environments (EPERM on sandboxed setups, and
@@ -446,7 +461,7 @@ function createWindow() {
   const START_URL = process.env.AI_BROWSER_START_URL !== undefined
     ? (process.env.AI_BROWSER_START_URL || null)
     : 'https://www.baidu.com';
-  pageManager.newTab(START_URL);
+  pageManager.startupTab = pageManager.newTab(START_URL);
 
   // 启动阶段崩溃排的队到这里兑现：窗口、标签栏、页面视图都已就绪，横幅才挂得上。
   flushPendingBanner();
@@ -705,10 +720,19 @@ function showInitialWindow() {
   if (!mainWindow) return;
   const policy = String(process.env.AI_BROWSER_FOCUS || 'auto').toLowerCase();
   const byAgent = process.env.AI_BROWSER_LAUNCHED_BY_AGENT === '1';
-  // 窗口**一定**要显示出来 —— 这是产品不变量（人可随时手动介入：登录、扫码、过验证码、
-  // 纠正 agent 的操作），任何策略值都不允许把窗口变成看不见的黑盒。
-  // 策略只决定**显示时抢不抢焦点**：只有人手动启动、或显式 always，才显示并激活；
-  // agent 拉起（或 never）走 showInactive —— 窗口出现，但键盘焦点留在用户那边。
+  // 后台模式：进程起来但**不出窗口**。这是"跟无头浏览器一样无感知运行"的入口 ——
+  // agent 无人值守跑任务时，不该在用户桌面上开一个窗口。
+  // 与"人可随时介入"不矛盾：Dock 图标一点（app 'activate'）就显示出来，
+  // 也可以 ui.window{visible:true} 显式打开。
+  if (/^(1|true|yes|on)$/i.test(String(process.env.AI_BROWSER_START_HIDDEN || ''))) {
+    console.log('[window] AI_BROWSER_START_HIDDEN=1 — 后台运行，窗口不显示（Dock 点击可打开）');
+    pageManager.windowShownAt = null;
+    return;
+  }
+  // 默认（非后台模式）：窗口**一定**要显示出来 —— 人可随时手动介入（登录、扫码、
+  // 过验证码、纠正 agent 的操作）。策略只决定**显示时抢不抢焦点**：只有人手动启动、
+  // 或显式 always，才显示并激活；agent 拉起走 showInactive —— 窗口出现，但键盘焦点
+  // 留在用户那边。
   const shouldActivate = policy === 'always' || (policy !== 'never' && !byAgent);
 
   const doShow = () => {

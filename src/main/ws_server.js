@@ -11,6 +11,9 @@ import findRefUtil from '../shared/find_ref.cjs';
 // 错误日志：RPC 层异常必须落盘（此前只回一句 JSON-RPC error，现场永久丢失），
 // 每次调用的摘要进环形缓冲，作为崩溃时的上下文。
 import { recordError, noteCall, recentErrors } from './error_log.js';
+// 默认目标标签页的判据（explicit > session > active > first），理由与两条不可
+// 退让的约束见 shared/tab_route.cjs 顶部（多 agent 并用时"目标被别人改掉"）。
+import tabRoute from '../shared/tab_route.cjs';
 
 // Each startWSServer() owns a private WebSocketServer. Keeping it local (not a
 // module global) means multiple servers can coexist — required by tests that
@@ -44,6 +47,15 @@ function findWaitTarget(tree, target) {
 // 进程启动时刻（秒）。供 ui.server_info 报出去 —— pid 会被复用，只比 pid
 // 不够稳；pid + started_at 两个一起才足以判定"是不是同一个进程"。
 const serverStartedAt = Math.floor(Date.now() / 1000);
+
+// 这些方法**不碰页面**，所以"你的标签页没了"不该拦它们 —— 否则 agent 在标签页
+// 被别人关掉之后，连 ui.new_tab / ui.list_tabs 这种自救动作都会被错误挡回去，
+// 等于把人锁在门外。
+const TABLESS_METHODS = new Set([
+  'ui.new_tab', 'ui.list_tabs', 'ui.close_tab', 'ui.server_info', 'ui.errors',
+  'ui.window', 'ui.window_bounds', 'ui.window_shown', 'ui.quit',
+  'ui.subscribe', 'ui.unsubscribe',
+]);
 
 export function startWSServer(pageManager, port = config.wsPort, onQuit = null) {
   // Bind loopback only — the protocol carries no auth. ws' default (host
@@ -94,13 +106,55 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
       }
 
       const { id, method, params = {} } = msg;
-      const tabId = params.tab;  // optional tab routing
+      // 这次调用操作哪个标签页：调用方点名 > 本连接自己的标签页 > 人眼看的那一个。
+      //
+      // 以前这里是 `const tabId = params.tab`，缺省就落到全局 activeTab —— 单 agent
+      // 时看不出问题，多个 agent 同时用时就是灾难：A 开一个标签页，所有人的默认
+      // 目标都变成它；人切一下标签页，把所有 agent 的目标一起切走。判据集中在
+      // shared/tab_route.cjs，这里只负责把会话维度接上去。
+      //
+      // 全程 try/catch + 能力探测：单测用的是 Mock PageManager（没有 tabs /
+      // sessionTabOf），路由不该因此把每个方法都打成 500。
+      let routed;
+      try {
+        if (typeof pageManager.resolveTargetTab === 'function') {
+          routed = pageManager.resolveTargetTab({ explicit: params.tab, sessionId });
+        } else {
+          const known = (pageManager.tabs && typeof pageManager.tabs.keys === 'function')
+            ? Array.from(pageManager.tabs.keys()) : [];
+          routed = tabRoute.resolveTarget({
+            explicit: params.tab,
+            session: typeof pageManager.sessionTabOf === 'function' ? pageManager.sessionTabOf(sessionId) : null,
+            active: pageManager.activeTab,
+            tabs: known,
+          });
+          // 拿不到标签页清单（单测 mock）→ 不参与路由，按调用方给的来
+          if (!known.length && (params.tab === undefined || params.tab === null)) {
+            routed = { tab: null, source: 'unknown' };
+          }
+        }
+      } catch (_) {
+        routed = { tab: params.tab === undefined ? null : params.tab, source: 'unknown' };
+      }
+      const tabId = routed.tab;
       const send = (payload) => {
         if (ws.readyState === 1) ws.send(JSON.stringify(payload));
+      };
+      // 会话标签页没了 → 必须在这一层拦住（否则会退回到别人的页面继续执行）。
+      //
+      // 但"点名了一个不存在的 tab"**不**在这里报：那是方法自己的校验，而且各方法
+      // 的词汇更准（ui.repaint 报 no-such-tab、ui.diff 报 tab-mismatch，
+      // 后者是语义检查而不是"找不到"）。在这里统一改写成 RPC error 会把
+      // "跨 tab 比对被拒绝"这类可诊断的结论一并抹平。
+      const routingError = () => {
+        if (!routed.error || routed.source === 'gone') return false;
+        send({ jsonrpc: '2.0', id, error: { code: -32001, message: routed.error, data: { source: routed.source } } });
+        return true;
       };
 
       const t0 = Date.now();
       try {
+        if (!TABLESS_METHODS.has(method) && routingError()) return;
         switch (method) {
           case 'ui.get_tree': {
             // P0 probe: params.ax routes to the AX read layer (getFullAXTree);
@@ -138,6 +192,12 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
               // 而不是下次换个客户端又悄悄失效。
               if (hoisted.hoisted.length && result && typeof result === 'object' && !result.params_hoisted) {
                 result.params_hoisted = hoisted.hoisted;
+              }
+              // 这次点击开出了新标签页（target=_blank / window.open）→ 把这个连接的
+              // 工作目标挪过去。注意只是**目标**：人眼前的页面由 page_manager 决定
+              // （opener 可见时才会真的切过去），后台任务不会被这个跟随顶到前台。
+              if (result && result.opened_tab && result.opened_tab.id) {
+                pageManager.bindSessionTab(sessionId, result.opened_tab.id);
               }
               send({ jsonrpc: '2.0', id, result });
             } catch (e) {
@@ -274,17 +334,45 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
           }
           // === Tab management ===
           case 'ui.new_tab': {
-            const newTabId = pageManager.newTab(params.url || null);
-            send({ jsonrpc: '2.0', id, result: { tab: newTabId } });
+            // show 缺省 = **不显示**：人正在看的那一页是人的东西，agent 开一个新
+            // 页面不该把它顶掉（多 agent 时更是如此：谁也说不清该顶掉谁）。
+            // 例外见 shared/tab_route.cjs 的 shouldShowNewTab：显式 show:true、
+            // 或者当前根本没有可见标签页（否则人打开窗口看到一片空白）。
+            const show = tabRoute.shouldShowNewTab({
+              requested: params.show === undefined ? undefined : params.show === true,
+              hasVisible: !!pageManager.activeTab,
+              // 人眼前还是启动页 = 还没有"人的页面"可保护，agent 的第一页直接顶上去
+              visibleIsStartup: pageManager.activeTab !== null &&
+                pageManager.activeTab === pageManager.startupTab,
+            });
+            const newTabId = pageManager.newTab(params.url || null, { show });
+            // 新标签页立刻成为**这个连接的**工作目标（不影响别的连接、也不影响人）。
+            if (typeof pageManager.bindSessionTab === 'function') pageManager.bindSessionTab(sessionId, newTabId);
+            send({ jsonrpc: '2.0', id, result: { tab: newTabId, shown: show } });
             break;
           }
           case 'ui.close_tab': {
-            const ok = pageManager.closeTab(params.tab);
-            send({ jsonrpc: '2.0', id, result: { ok } });
+            const target = params.tab !== undefined && params.tab !== null ? params.tab : tabId;
+            const ok = pageManager.closeTab(target);
+            // **只有自己关掉自己那个页**才解绑：那是一次明确的"我不用它了"，
+            // 之后的调用照浏览器惯例落到当前可见页。
+            // 别人的页被关掉时绑定要留着 —— 下一次调用必须明确报"你的页没了"，
+            // 否则 agent 会在**另一个 agent 的页面**上继续执行，回执还是 success。
+            if (ok && typeof pageManager.sessionTabOf === 'function' &&
+                pageManager.sessionTabOf(sessionId) === target) {
+              pageManager.bindSessionTab(sessionId, null);
+            }
+            send({ jsonrpc: '2.0', id, result: { ok, tab: target } });
             break;
           }
           case 'ui.list_tabs': {
             const tabs = pageManager.listTabs();
+            // mine：只在自己那一条上出现（不加的人拿不到这个字段，省 token）。
+            // 多 agent 时"我在哪个标签页上"必须能问出来，否则 agent 只能靠猜。
+            const mine = typeof pageManager.sessionTabOf === 'function' ? pageManager.sessionTabOf(sessionId) : null;
+            if (mine !== null && mine !== undefined) {
+              for (const t of tabs) if (t.id === mine) t.mine = true;
+            }
             send({ jsonrpc: '2.0', id, result: { tabs } });
             break;
           }
@@ -298,8 +386,49 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
             break;
           }
           case 'ui.set_active_tab': {
-            const ok = pageManager.setActive(params.tab);
-            send({ jsonrpc: '2.0', id, result: { ok } });
+            // 语义：把这个会话的工作目标换成 params.tab，并（默认）把它显示出来。
+            // show:false = "我只想换目标，别动人眼前的页面"。
+            //
+            // tab 不存在时回 `{ok:false, error:'no-such-tab'}`（**不是** JSON-RPC error）：
+            // 这是"这一次切换没成功"，不是"这次调用本身不合法"，调用方要能用同一个
+            // 回执通道区分它和"路由崩了"。契约由 test_ws_handlers 的 TAB-2 钉住。
+            const target = params.tab;
+            const exists = target !== undefined && target !== null &&
+              pageManager.tabs && typeof pageManager.tabs.has === 'function' && pageManager.tabs.has(target);
+            // 回执形状是 2026-10-19 那次事故的回归点（agent 曾收到 `{}`）：
+            // 成功就回 `{ok:true}`，多余字段一个都不加 —— 只有调用方显式要
+            // `show:false`（新语义）时才多一个 `shown`。
+            if (!exists && pageManager.tabs && typeof pageManager.tabs.has === 'function') {
+              send({ jsonrpc: '2.0', id, result: { ok: false, error: 'no-such-tab', tab: target } });
+              break;
+            }
+            if (!exists) {
+              // 没有 tabs 能力的调用方（单测 mock）：按老契约让 setActive 自己回
+              const okMock = typeof pageManager.setActive === 'function' ? pageManager.setActive(target) : false;
+              send({ jsonrpc: '2.0', id, result: okMock
+                ? (params.show === false ? { ok: true, shown: false } : { ok: true })
+                : { ok: false, error: 'no-such-tab' } });
+              break;
+            }
+            if (typeof pageManager.bindSessionTab === 'function') pageManager.bindSessionTab(sessionId, target);
+            const ok = params.show === false ? true : pageManager.setActive(target);
+            send({ jsonrpc: '2.0', id, result: ok
+              ? (params.show === false ? { ok: true, shown: false } : { ok: true })
+              : { ok: false, error: 'no-such-tab', tab: target } });
+            break;
+          }
+          // 窗口可见性 / 最小化。后台运行（无头式无人值守）的唯一开关，
+          // 详见 page_manager.windowState 的注释。
+          case 'ui.window': {
+            if (typeof pageManager.windowState !== 'function') {
+              send({ jsonrpc: '2.0', id, result: { ok: false, error: 'window control not available (no Electron window)' } });
+              break;
+            }
+            let r;
+            if (params.visible !== undefined) r = pageManager.setWindowVisible(params.visible === true, { focus: params.focus === true });
+            else if (params.minimized !== undefined) r = await pageManager.setWindowMinimized(params.minimized === true);
+            else r = pageManager.windowState();
+            send({ jsonrpc: '2.0', id, result: r });
             break;
           }
           // 服务端的进程身份。存在的理由（2026-10-15 实测）：调用方**无法确认
@@ -320,6 +449,11 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
                 // 渲染路径：{gpu:true|false, reason:'default'|'env'|'fallback'}。
                 // 白屏/缩放类缺陷的复现与"这条路有没有关系"都要靠它。
                 ...(pageManager.renderPath ? { render_path: pageManager.renderPath } : {}),
+                // 窗口状态：后台运行时要能问到"现在到底是不是隐藏的"，否则
+                // "我没看到窗口却以为它在显示"这类问题只能靠猜。
+                ...(pageManager.windowState ? { window: pageManager.windowState() } : {}),
+                // 这个连接的工作标签页（多 agent 时用来核对自己绑到了哪一页）
+                ...(pageManager.sessionTabOf ? { session_tab: pageManager.sessionTabOf(sessionId) } : {}),
               },
             });
             break;

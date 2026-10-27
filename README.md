@@ -335,50 +335,68 @@ Notes that save round-trips:
 
 ## Letting a human step in
 
-### It does not steal your focus
+### It does not steal your focus — and it does not need a window at all
 
-The agent works fine while the window is in the **background**. CDP trusted input
-(`Input.dispatchKeyEvent` / `Input.dispatchMouseEvent`) does not need the window to be frontmost, and
-the app already runs with `disable-backgrounding-occluded-windows`, `disable-renderer-backgrounding`
-and `disable-background-timer-throttling`, so a background window is neither throttled nor losing
-events.
+The agent works fine while the window is in the **background**, minimised, or **not shown at all**.
+CDP trusted input (`Input.dispatchKeyEvent` / `Input.dispatchMouseEvent`) does not need the window to
+be frontmost, and the app runs with `disable-backgrounding-occluded-windows`,
+`disable-renderer-backgrounding` and `disable-background-timer-throttling`, so a hidden window is
+neither throttled nor losing events. Every tab also gets `setBackgroundThrottling(false)` from birth.
 
-That was already true for `act` / `get_tree` / `evaluate` / `peek` / `scroll` — but two paths used to
-drag the window to the front on **every** call: `new_tab` and `set_active_tab` (they called
-`webContents.focus()`, which activates the whole window). On top of that the window was shown with
-`show()` at boot even when the *agent* launched it. Both are fixed:
+Three things used to make "run it in the background" impossible, and all three are fixed:
 
-- `new_tab` / `set_active_tab` no longer take window focus. The page still *thinks* it is focused —
+- `new_tab` / `set_active_tab` dragged the window to the front on every call (they called
+  `webContents.focus()`). They no longer do. The page still *thinks* it is focused —
   `Emulation.setFocusEmulationEnabled` keeps `document.hasFocus()` and focus-dependent lazy-loading
-  behaving normally — while the keyboard focus stays wherever you left it.
-- When the agent launches the browser (over MCP), the window appears via `showInactive()`:
-  **visible, but not stealing focus**. When *you* run `npm start`, it comes up in front as usual.
-
-So the window stays visible — that is the whole point — but it is **not** dragged to the front while
-the agent drives. You can keep working.
+  behaving normally — while your keyboard focus stays wherever you left it.
+- Any action **un-hid** a hidden window (`auto` restored it with `showInactive()`), so "hidden" was
+  never a steady state: the window crept back up every time the agent clicked something. Visibility is
+  now driven only by you (Dock icon) or by an explicit `ui.window` call.
+- A tab that was never attached to the window had **no compositor surface**: reading, clicking and
+  typing worked, but `screenshot` returned 0 bytes and `paint_check` reported `no-frame` — a black box.
+  All tabs are now attached and z-ordered (`setTopBrowserView`), so a background tab renders and can be
+  screenshotted.
 
 ```bash
-AI_BROWSER_FOCUS=always npm start   # pre-1.2 behaviour: show + moveTop + focus on every action
-AI_BROWSER_FOCUS=never npm start    # never change focus (the window is still shown)
+AI_BROWSER_START_HIDDEN=1 npm start   # run with no window at all; click the Dock icon to bring it up
+AI_BROWSER_FOCUS=always npm start     # pre-1.2 behaviour: show + moveTop + focus on every action
+AI_BROWSER_FOCUS=never npm start      # same as the default now: never touch window state
 ```
 
-Default is `auto`: keep the window visible (restore it if it was minimised or hidden), but never steal
-focus. Whatever the value, the window is always displayed — that is a product invariant.
+While it is hidden, everything still works — read the tree, click, type, scroll, upload, download,
+answer dialogs, capture network, screenshot, `paint_check`. Click the Dock icon at any moment and the
+window appears showing the tab *you* were looking at; the agents keep working on theirs.
 
-`npm run focus` asserts all of this **from the outside** (macOS `lsappinfo`, no accessibility
-permission needed) and includes a deliberate control group configured to steal focus — so the suite
-would go red if the measurement ever stopped working, instead of passing vacuously.
-
-It also proves the stronger claim — that the window **does not need to be in the foreground at all**.
-With another app holding the foreground, it runs a representative slice of the API and checks the real
-result of each one: typing lands, a click fires exactly once, `get_tree` returns a tree, canvas
-`getImageData` returns real pixels, `network_list` sees the request, `navigate` completes — and after
-sitting in the background for 10 seconds it still does all of the above without ever coming forward.
+`npm run focus` asserts the focus behaviour **from the outside** (macOS `lsappinfo`, no accessibility
+permission needed) with a deliberate control group configured to steal focus, so the suite goes red if
+the measurement ever stops working instead of passing vacuously. `npm run background` covers the
+window-hidden half: it boots with `AI_BROWSER_START_HIDDEN=1` and runs the full capability slice
+against a window that never appeared.
 
 > Note on `document.hasFocus()`: it returns `true` even when the window is in the background, because
 > `Emulation.setFocusEmulationEnabled` is deliberately on — that is what keeps focus-dependent
 > lazy-loading and animations from stalling. So it is **not** a valid way to detect "am I in the
 > foreground"; the test uses the external observer instead.
+
+### Several agents at once
+
+Each WebSocket connection (each MCP process) gets **its own working tab**. When a call omits `tab`,
+the target is resolved as `explicit > your tab > the tab the human is looking at > the first tab`, so:
+
+- `browse_tabs {"op":"new"}` opens a tab **without** taking over the user's view (`show:true` when you
+  want them to look at it). The single exception is the untouched start page — otherwise the user
+  would sit staring at a blank homepage while the agent works.
+- `browse_tabs {"op":"list"}` marks your own tab with `mine: true`.
+- If **someone else** closes your tab, your next call fails with `-32001` instead of silently running
+  on their page. Closing your *own* tab falls back to the visible one, like a normal browser.
+- Tabs opened by a click (`target=_blank`) move your **target** to the new tab; they only move the
+  user's **view** if the tab they were watching is the one that opened them.
+
+Different tabs run fully in parallel. Two agents typing into the *same* field is not coordinated —
+the write-verification will honestly report `input not verified` rather than pretending both landed.
+
+`npm run multiagent` drives two connections against one browser and asserts all of the above,
+including 10 interleaved actions with no cross-contamination.
 
 ---
 
@@ -742,8 +760,10 @@ npm run wrapper      # "in the tree but won't click" = matched a container, not 
 npm run paint        # blank-page self-check: verdicts, bounded ladder, no false alarms — 23 checks
 npm run layout       # geometry invariants + "no twitching" (zero extra repaints on nav) — 25 checks
 npm run download     # "clicked download": viewable media must display, the rest must save — 23 checks
+npm run multiagent   # several agents at once: own tab each, no cross-talk, gone tab errors — 32 checks
+npm run background   # window hidden/minimized: every capability still works (headless-like) — 37 checks
 npm run flicker      # frame-level: no frame may render the page shrunk (needs screen recording) — 6 checks
-npm run e2e:all      # 一次跑完上面全部 20 个套件（每个独立端口）+ 可信汇总 — 659 checks
+npm run e2e:all      # 一次跑完上面全部 22 个套件（每个独立端口）+ 可信汇总 — 728 checks
 npm run verify:app   # boot the packaged /Applications app and assert on it — 22 checks
 npm run realsites    # navigate/read/act against a matrix of real sites
 ```

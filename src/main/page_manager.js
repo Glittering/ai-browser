@@ -39,6 +39,9 @@ import { DownloadMonitor } from './download_monitor.js';
 // 2026-10-27 用户报"点证书下载 → 卡在正在打开… + 一坨 png URL"）。
 import mediaDoc from '../shared/media_doc.cjs';
 import { MediaInline } from './media_inline.js';
+// 默认目标标签页的判据（explicit > session > active > first）与"新标签页要不要
+// 切到人眼前"的策略。见 shared/tab_route.cjs 顶部（多 agent 并用的三条事故）。
+import tabRoute, { shouldShowChildTab } from '../shared/tab_route.cjs';
 import { probeCapabilities } from './capability_probe.js';
 import valueContract from '../shared/value_contract.cjs';
 // 输入成功与否的判定口径（纯函数，独立模块便于单测）。详见文件内注释：
@@ -186,6 +189,10 @@ class PageManager {
     this.window = browserWindow;
     this.tabs = new Map();       // tabId -> BrowserView
     this.activeTab = null;
+    // 启动时那一个标签页。它存在的唯一用途是判断"人眼前这一页是不是还没人动过"：
+    // 是的话，agent 开的第一个标签页可以直接顶上去（否则用户会盯着百度首页，
+    // 以为 agent 什么都没干）。见 shared/tab_route.cjs 的 shouldShowNewTab。
+    this.startupTab = null;
     this.tabCounter = 0;
     // 窗口首次显示时的那一刻状态（tab / body_len / ready_state）。
     // 白屏类缺陷的根因是"窗口显示了但渲染器还没画出第一帧"，而这只能从窗口侧
@@ -196,6 +203,13 @@ class PageManager {
     this._pendingRequests = new Map();
     this._requestId = 0;
     this._wsClients = new Map();
+    // sessionId -> tabId：**这个连接自己的工作标签页**。
+    //
+    // 为什么必须有（2026-10-27 多 agent 并用）：默认目标以前是全局 activeTab，
+    // 也就是"人眼看的那一页"。多个 agent 同时干活时它立刻崩掉 —— A 开一个标签页，
+    // 所有人的默认目标都变成它；B 说"点提交"，点在 A 的页面上。判据与优先级见
+    // shared/tab_route.cjs（explicit > session > active > first）。
+    this._sessionTab = new Map();
     this._openedTabs = new Map();   // sourceTabId -> { id, url } (new tab opened by window.open)
     this._windowOpenTokens = new Map(); // token -> { tabId, sourceTabId } (window.open shim, preload bridge.cjs)
     this._windowOpenShimTabs = new Set(); // 已注入 window.open 垫片的 tabId
@@ -484,9 +498,40 @@ class PageManager {
     this._wsClients.set(sessionId, ws);
   }
 
+  /**
+   * 把这个连接"自己的工作标签页"记下来。
+   * 断开连接时**不关页面**：agent 进程退出后，人可能正想看看它干到哪了。
+   */
+  bindSessionTab(sessionId, tabId) {
+    if (!sessionId) return;
+    if (tabId === undefined || tabId === null) this._sessionTab.delete(sessionId);
+    else this._sessionTab.set(sessionId, tabId);
+  }
+
+  sessionTabOf(sessionId) {
+    if (!sessionId) return null;
+    const t = this._sessionTab.get(sessionId);
+    return t === undefined ? null : t;
+  }
+
+  /**
+   * 这次调用操作哪个标签页。判据只有 shared/tab_route.cjs 一处，这里只把
+   * "当前有哪些标签页"和"人眼看的是哪个"喂给它。
+   * 返回 {tab, source, error?}：error 存在时调用方必须**报错**，不许就近挑一个。
+   */
+  resolveTargetTab({ explicit, sessionId } = {}) {
+    return tabRoute.resolveTarget({
+      explicit,
+      session: this.sessionTabOf(sessionId),
+      active: this.activeTab,
+      tabs: Array.from(this.tabs.keys()),
+    });
+  }
+
   unregisterClient(sessionId) {
     this._wsClients.delete(sessionId);
     this.subscriptions.delete(sessionId);
+    this._sessionTab.delete(sessionId);
   }
 
   _layoutAllViews(bounds) {
@@ -762,6 +807,9 @@ class PageManager {
     const tid = tabId !== undefined ? tabId : this.activeTab;
     const view = this._getView(tid);
     if (!view) return { ok: false, error: 'Tab not found' };
+    // 一旦有人在这一页上导航过，它就不再是"还没人动过的启动页"了 —— 新标签页
+    // 也就不该再顶替它（否则 agent 每开一页都把上一页顶掉，等于一直抢视野）。
+    this._spendStartupPrivilege();
     const w = navWait.normalizeWaitUntil(opts.waitUntil);
     if (w.error) return { ok: false, error: w.error, wait_until_valid: navWait.LEVELS };
     const waitUntil = w.value;
@@ -1631,6 +1679,8 @@ class PageManager {
   async executeAction(action, target, params = {}, tabId) {
     const ms = actionDeadlineMs(action, params);
     const tid = tabId !== undefined ? tabId : this.activeTab;
+    // 见 navigate 里的同一句：动过手的页面不再是"启动页"。
+    this._spendStartupPrivilege();
     // 本次动作的起始时刻：用来判断"有没有对话框是在这一次动作里被应答的"，
     // 并把结果写进回执（否则 agent 不知道点击中间弹过确认框）。
     const startedAt = Date.now();
@@ -1990,7 +2040,13 @@ class PageManager {
     this._openedTabs.delete(tid);
     const mine = pickOpenedTab(entry, startedAt);
     if (!mine) return null;
-    if (keep !== true) this.setActive(mine.id);
+    // 「自动跟随」是**目标**跟过去，不是**视野**跟过去：
+    //   - 人在看这一页（opener 就是可见 tab）→ 照浏览器惯例把新标签切出来；
+    //   - opener 是后台页 → 只把调用方的目标挪过去（ws 层据回执 opened_tab 绑定），
+    //     人眼前的页面一动不动。
+    // 这条以前是无条件 setActive，等于"agent 点任何 target=_blank 的链接，
+    // 用户的视野就被拽走一次"。
+    if (keep !== true && tid === this.activeTab) this.setActive(mine.id);
     // 记录里的 url 是**建标签那一刻**的值。window.open("") 这条路上它永远是
     // 'about:blank' —— 真实地址由随后的 ai:window_open_nav 才载入。直接回
     // 'about:blank' 会让 agent 以为"打开了个空白页"，这恰恰是当初那个 bug 的样子。
@@ -3416,7 +3472,16 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
 
   // === Tab lifecycle ===
 
-  newTab(url = null) {
+  /**
+   * 新建标签页。
+   *
+   * @param {string|null} url
+   * @param {{show?: boolean}} [opts] show=false 时**不把人眼前的页面顶掉**：
+   *   视图保持不挂进窗口，但几何照算、脚本照跑、截图照出（后台标签页的完整能力
+   *   有 `npm run background` 钉住）。默认 true 是给"人自己点的"和内部调用用的，
+   *   agent 侧由 ws_server 显式传 false（见 shared/tab_route.cjs 的说明）。
+   */
+  newTab(url = null, opts = {}) {
     const tabId = ++this.tabCounter;
     const self = this;
     const view = new BrowserView({
@@ -3440,6 +3505,10 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
       },
     });
     this.tabs.set(tabId, view);
+    // 每个标签页、从出生起就关掉后台节流。以前只在 setActive 里设，于是"从没
+    // 被显示过"的标签页永远带着节流：定时器被拉长到 1s、rAF 停摆，站点的轮询/
+    // 动画/自动保存全部变慢，而 agent 看起来只是"这一页有点慢"。
+    try { view.webContents.setBackgroundThrottling(false); } catch (_) { /* 老版本没有这个方法 */ }
 
     // Tabs created after a subscribe should inherit the CDP domains already
     // active, so network_response / js_error keep flowing without re-subscribing.
@@ -3465,15 +3534,39 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
 
     // Intercept window.open / new-window → create new tab instead
     view.webContents.setWindowOpenHandler(({ url: urlToOpen }) => {
-      const childId = self.newTab(urlToOpen);
+      // 派生标签页跟**打开它的那一个**走：可见页里弹出来的照旧弹到人眼前
+      // （浏览器惯例），后台页里弹出来的留在后台 —— agent 流程里登录/预览/
+      // 下载这类弹窗极多，每弹一个就抢一次视野等于人没法用电脑。
+      const childId = self.newTab(urlToOpen, {
+        show: shouldShowChildTab({ openerIsVisible: tabId === self.activeTab }),
+      });
       // Track which source tab opened a new tab so `executeAction` can report the
       // resulting tab and auto-follow it. Generic (any target=_blank / window.open).
       self._openedTabs.set(tabId, { id: childId, at: Date.now(), url: urlToOpen });
       return { action: 'deny' };
     });
 
-    // setActive handles addBrowserView + layout — don't add twice
-    this.setActive(tabId);
+    // 可见与否由调用方决定，但**所有**标签页都挂进窗口、用 z 序决定谁在上面。
+    //
+    // 为什么不"不显示就不挂"（2026-10-28 实测）：没挂进窗口的 BrowserView 根本
+    // 没有合成表面 —— 读树/点击/输入/导航全都正常（那走的是渲染进程和 CDP 输入），
+    // 但 ui.screenshot 拿到 0 字节、ui.paint_check 直接 no-frame。也就是说
+    // "后台标签页"会变成一个**看不见也拍不到**的黑盒，而 agent 恰恰靠截图判断
+    // "这一页到底画出什么了"。
+    // 挂上去、把可见的那个置顶，就同时得到：真实表面（可截图/可自检）+ 人只看到
+    // 他该看的那一页。
+    const show = opts.show !== false;
+    this._attachView(view);
+    if (show || this.activeTab === null) {
+      this.setActive(tabId);
+    } else {
+      this._layoutView(view);
+      try { view.webContents.setBackgroundThrottling(false); } catch (_) { /* 老版本 */ }
+      // 新挂的视图默认在最上层 —— 马上把"人该看的那一页"顶回去，否则后台新建
+      // 的标签页会盖住用户正在看的页面（那就是"抢视野"的另一种形态）。
+      const vis = this._getView(this.activeTab);
+      if (vis) this._raiseView(vis);
+    }
 
     // canvas 绘制记录必须在**首个真实导航之前**装好，否则页面早画完了什么都录不到。
     // 但它又必须在 setActive 之后：BrowserView 还没被加进窗口时，debugger 通道
@@ -4055,6 +4148,11 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
   _schedulePaintAudit(tabId, delay = 450) {
     if (!this._paintAuditEnabled) return;
     if (tabId !== this.activeTab) return;
+    // 窗口不可见（隐藏/最小化/后台运行）时**不做**判定：这时"屏幕上有没有画出来"
+    // 没有观测意义，取帧拿到的要不是空的、要不是陈旧的，而阶梯会据此 reload ——
+    // 那是自己制造的一场重载风暴（后台 agent 每加载一页就刷一次）。
+    // 人把窗口点开时由 ui.window{visible:true} 走 afterShowRelayout + 一次自检。
+    if (!this._windowVisible()) return;
     const prev = this._paintTimers.get(tabId);
     if (prev) clearTimeout(prev);
     const t = setTimeout(() => {
@@ -4366,18 +4464,54 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     return list;
   }
 
+  /**
+   * 把视图挂进窗口（幂等）。所有标签页都挂着，靠 z 序决定谁可见 ——
+   * 原因见 newTab 里的注释（没挂 = 没表面 = 截不到图）。
+   */
+  _attachView(view) {
+    if (!view || !this.window) return;
+    try {
+      const attached = this.window.getBrowserViews ? this.window.getBrowserViews() : [];
+      if (attached.indexOf(view) < 0) this.window.addBrowserView(view);
+    } catch (_) { /* 窗口正在销毁 */ }
+  }
+
+  /** 把某个视图提到最上层（= 人看到它）。老版本没有 setTopBrowserView 时退回 remove+add。 */
+  _raiseView(view) {
+    if (!view || !this.window) return;
+    try {
+      if (typeof this.window.setTopBrowserView === 'function') {
+        this.window.setTopBrowserView(view);
+        return;
+      }
+    } catch (_) { /* 落到下面的兼容路径 */ }
+    try {
+      this.window.removeBrowserView(view);
+      this.window.addBrowserView(view);
+    } catch (_) { /* 已销毁 */ }
+  }
+
+  /** 「人眼前还是启动页」这个判断只对**没被动过**的启动页成立（见 shouldShowNewTab）。 */
+  _spendStartupPrivilege() {
+    this.startupTab = null;
+  }
+
   setActive(tabId) {
     if (!this.tabs.has(tabId)) return false;
-    // Remove all browser views from window, then re-add only the active one
-    for (const [id, view] of this.tabs) {
-      try { this.window.removeBrowserView(view); } catch(e) {}
-    }
+    // 「人眼前还是启动页」这个特权是一次性的：一旦有人（人点了标签页、或 agent 显式
+    // 把某一页顶到眼前）真正选过一次，之后新开的标签页就不再顶替它了 ——
+    // 否则 agent 每开一页都会把上一页顶掉，等于永远在抢视野。
+    if (this.startupTab !== null && tabId !== this.startupTab) this.startupTab = null;
     this.activeTab = tabId;
     // body / 记录淘汰要"先牺牲后台 tab"，所以必须让它知道谁是活跃的。
     this.networkMonitor.setActiveTab(tabId);
     const view = this._getView(tabId);
     if (view) {
-      this.window.addBrowserView(view);
+      // 只调 z 序：以前是"把所有视图 remove 掉、再 add 一个"，那等于每次切标签页
+      // 都让其余标签页失去合成表面（截图/自检全失效），而且 remove+add 本身会
+      // 闪一帧白。
+      this._attachView(view);
+      this._raiseView(view);
       this._layoutView(view);
       this._focusWebContents(view);
       view.webContents.setBackgroundThrottling(false);
@@ -4437,6 +4571,116 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
    *
    * 不传尺寸时纯读；传了就 setBounds + 立刻重排，再回读实际结果（不做乐观报告）。
    */
+  /**
+   * 窗口可见性 / 最小化（读 + 改）。`ui.window`。
+   *
+   * 为什么必须有（2026-10-28，用户要求"跟无头浏览器一样无感知运行"）：
+   * 在这之前没有任何一条路能让 agent 自己决定窗口显示与否 —— 窗口一旦被隐藏，
+   * 下一次操作触发的 _focusWindow 又把它拽回来，于是"后台运行"根本不是一个
+   * 稳定状态。现在可见性成为显式状态：
+   *   - 人：Dock 图标（app 'activate'）/ 手动最小化，随时能点开；
+   *   - agent：ui.window {visible|minimized}，AI_BROWSER_START_HIDDEN=1 启动即隐藏。
+   *
+   * 三条实现约束：
+   * 1. **隐藏不影响任何页面能力**。视图仍挂在这个窗口上、几何照算，读树/动作/
+   *    截图/上传/下载/对话框全部照旧（`npm run background` 里 20 条断言钉住）。
+   * 2. **隐藏不抢焦点**。show 默认走 showInactive()，只有调用方显式 focus:true
+   *    才把窗口带到前台 —— 这是"人主动要打开它"和"agent 偷偷弹窗"的区别。
+   * 3. **恢复显示后要重排**。macOS/Windows 显示瞬间 content 尺寸与隐藏时不同，
+   *    不重排就会出现"视图底部溢出"（Windows 上实测 26px，见 showInitialWindow）。
+   */
+  /** 窗口此刻是不是"人真的能看见"。判断绘制类问题时它是前置条件（见 _schedulePaintAudit）。 */
+  _windowVisible() {
+    try {
+      if (!this.window) return false;
+      if (this.window.isMinimized && this.window.isMinimized()) return false;
+      if (this.window.isVisible && !this.window.isVisible()) return false;
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  windowState() {
+    const out = { ok: true };
+    try {
+      out.visible = !!(this.window.isVisible && this.window.isVisible());
+      out.minimized = !!(this.window.isMinimized && this.window.isMinimized());
+      out.focused = !!(this.window.isFocused && this.window.isFocused());
+      out.bounds = this.window.getBounds();
+    } catch (_) {
+      return { ok: false, error: 'no-window' };
+    }
+    out.tabs = this.tabs.size;
+    out.active_tab = this.activeTab;
+    out.headless_ready = true;   // 后台能力已可用；留给调用方判断的显式承诺
+    return out;
+  }
+
+  setWindowVisible(visible, opts = {}) {
+    if (!this.window) return { ok: false, error: 'no-window' };
+    try {
+      if (visible) {
+        if (this.window.isMinimized && this.window.isMinimized()) {
+          try { this.window.restore(); } catch (_) { /* 已销毁 */ }
+        }
+        if (opts.focus === true && this.window.show) this.window.show();
+        else if (typeof this.window.showInactive === 'function') this.window.showInactive();
+        else if (this.window.show) this.window.show();
+        this.afterShowRelayout();
+        // 人刚刚把窗口点开：立刻自检一次"这一页到底画出来没有"。
+        // 后台期间故意不判（见 _schedulePaintAudit），所以这里是唯一能兜住
+        // "agent 在后台把页面搞白了、人一打开正好看到白屏"的时刻。
+        this._schedulePaintAudit(this.activeTab, 700);
+      } else {
+        if (this.window.hide) this.window.hide();
+      }
+    } catch (e) {
+      return { ok: false, error: String(e && e.message || e), ...this.windowState() };
+    }
+    return this.windowState();
+  }
+
+  async setWindowMinimized(min) {
+    if (!this.window) return { ok: false, error: 'no-window' };
+    try {
+      if (min) {
+        if (this.window.minimize) this.window.minimize();
+      } else {
+        if (this.window.restore) this.window.restore();
+        this.afterShowRelayout();
+      }
+    } catch (e) {
+      return { ok: false, error: String(e && e.message || e), ...this.windowState() };
+    }
+    // macOS 的 miniaturize 是带动画的：isMinimized() 在动画结束前仍返回 false，
+    // 当场回读会告诉调用方"没最小化"（实测踩到）。等动画走完再报，回执才是真的。
+    await new Promise((r) => setTimeout(r, 280));
+    return this.windowState();
+  }
+
+  /**
+   * 显示之后补几次重排。Windows 上 show() 之后原生边框才生效，content 高度会变
+   * 而外框不变 → 不触发 resize → 视图按显示前的尺寸布局，底部溢出（实测 26px）。
+   * 与 index.js 的 showInitialWindow 同一套理由，三次是为了覆盖边框真正应用的时刻。
+   */
+  afterShowRelayout() {
+    const relayout = () => {
+      try {
+        for (const [id, v] of this.tabs) {
+          if (id === this.activeTab) this._layoutView(v);
+        }
+        const v = this._getView(this.activeTab);
+        if (v && v.webContents && !v.webContents.isDestroyed()) v.webContents.invalidate();
+      } catch (_) { /* 窗口/视图已销毁 */ }
+    };
+    relayout();
+    const t1 = setTimeout(relayout, 150);
+    const t2 = setTimeout(relayout, 450);
+    if (t1.unref) t1.unref();
+    if (t2.unref) t2.unref();
+  }
+
   windowBounds(next) {
     const snapshot = () => {
       const out = { ok: true };
@@ -4660,37 +4904,29 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
    * 拽到最前，等于人完全没法用电脑。
    *
    * AI_BROWSER_FOCUS:
-   *   auto   (默认) 只在窗口被最小化/隐藏时恢复可见，**不** moveTop、**不** focus。
-   *                 CDP 受信输入（Input.dispatchKeyEvent / dispatchMouseEvent）在窗口
-   *                 非前台时依然生效，加上已有的 disable-backgrounding-occluded-windows /
-   *                 disable-renderer-backgrounding / disable-background-timer-throttling，
-   *                 后台窗口不会被降频或丢事件。
+   *   auto   (默认) **完全不碰窗口状态**：不 show、不 moveTop、不 focus。
+   *                  CDP 受信输入（Input.dispatchKeyEvent / dispatchMouseEvent）在窗口
+   *                  非前台、最小化、甚至隐藏时依然生效（加上已有的
+   *                  disable-backgrounding-occluded-windows / disable-renderer-backgrounding /
+   *                  disable-background-timer-throttling，后台窗口不会被降频或丢事件）。
+   *                  这是"无头式运行"的前提：窗口隐藏必须是**稳定状态**，而不是
+   *                  "下一次操作就弹回来"。
    *   always        旧行为：每次都 show + moveTop + focus（需要抢焦点时用）。
-   *   never         完全不碰窗口状态。
+   *   never         与 auto 相同（保留这个名字是为了兼容老配置）。
+   *
+   * ⚠️ 2026-10-28 之前 auto 会"窗口被最小化/隐藏就 restore + showInactive"，
+   * 依据是当时的产品不变量"窗口必须真实可见"。多 agent 并用之后这条不变量反过来
+   * 咬人：agent 每操作一次，隐藏的窗口就自己爬出来一次 —— 人在用电脑，窗口在
+   * 后台不停弹。现在改成：**窗口可见性只由人（Dock/activate）和显式 ui.window 决定**。
    */
   _focusWindow(view) {
     const policy = String(process.env.AI_BROWSER_FOCUS || 'auto').toLowerCase();
-    if (policy === 'never') return;
+    if (policy !== 'always') return;
     try {
-      if (policy === 'always') {
-        if (this.window.show) this.window.show();
-        if (this.window.moveTop) this.window.moveTop();
-        if (this.window.focus) this.window.focus();
-        if (view && view.webContents && view.webContents.focus) view.webContents.focus();
-        return;
-      }
-      // auto：产品承诺"窗口真实可见、人可随时介入"，所以被最小化/隐藏时要恢复可见；
-      // 但不主动抢到最前 —— 人可以继续用别的窗口，需要时自己点过来。
-      // 用 showInactive()，语义才前后一致：auto 分支**从不**夺走键盘焦点。
-      const hidden = (this.window.isVisible && !this.window.isVisible()) ||
-                     (this.window.isMinimized && this.window.isMinimized());
-      if (hidden) {
-        if (this.window.isMinimized && this.window.isMinimized() && this.window.restore) {
-          try { this.window.restore(); } catch (e) { /* 已销毁 */ }
-        }
-        if (typeof this.window.showInactive === 'function') this.window.showInactive();
-        else if (this.window.show) this.window.show();
-      }
+      if (this.window.show) this.window.show();
+      if (this.window.moveTop) this.window.moveTop();
+      if (this.window.focus) this.window.focus();
+      if (view && view.webContents && view.webContents.focus) view.webContents.focus();
     } catch (e) { /* 窗口已销毁等情况，忽略 */ }
   }
 

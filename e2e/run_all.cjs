@@ -42,6 +42,9 @@ const SUITES = [
   // download —— 「点下载」到底发生了什么：可显示的媒体文档不许变成下载、
   //             不可显示的不许把标签页留在"正在打开…"上（2026-10-27 证书事故）。
   'download',
+  // multiagent —— 多个 agent 并用：各自的目标、互不干扰、目标被关掉要报错
+  // background —— 窗口隐藏/最小化时全能力可用（无头式无人值守）
+  'multiagent', 'background',
   // flicker（帧级：加载时画面不许缩成一小块）**故意不在这里**：它要屏幕录制权限、
   // 窗口必须真的在屏幕上、且一轮要录 7 秒 × 3 轮。单独跑：`npm run flicker`。
 ];
@@ -82,11 +85,15 @@ function runOne(suite, port) {
       maxBuffer: 40 * 1024 * 1024,
     }, (err, stdout, stderr) => {
       const out = (stdout || '') + (stderr || '');
+      const verdict = parseVerdict(out);
       resolve({
         suite, port, ms: Date.now() - t0, holderBefore,
         code: err ? (String(err.code) === 'TIMEOUT' ? 'TIMEOUT' : err.code) : 0,
-        verdict: parseVerdict(out),
+        verdict,
         fails: out.split('\n').filter((l) => l.indexOf('FAIL |') >= 0).map((l) => l.trim().slice(0, 180)),
+        // 没有摘要 = 套件没跑完（挂住/崩了）。这时候**最有用的就是它最后几行输出** ——
+        // 以前这里什么都不留，只写"无摘要(未知)"，等于把唯一的线索扔了。
+        tail: verdict ? [] : out.split('\n').filter((l) => l.trim()).slice(-12).map((l) => l.trim().slice(0, 200)),
         // 身份核对 / 端口占用 的拦截信息，出现就说明环境有问题
         notes: out.split('\n').filter((l) => /不是本次拉起的进程|一直被占用|is busy/.test(l)).map((l) => l.trim().slice(0, 180)),
       });
@@ -109,6 +116,10 @@ async function main() {
       `${r.suite.padEnd(13)} port=${r.port} ${String(r.ms + 'ms').padEnd(8)} exit=${String(r.code).padEnd(6)} ${tag.padEnd(16)} ${ok ? '' : '  <<<'}`
     );
     r.fails.forEach((f) => console.log('      ! ' + f));
+    if (!v && r.tail && r.tail.length) {
+      console.log('      ~ 最后几行输出（没有摘要时这是唯一线索）：');
+      for (const l of r.tail) console.log('        | ' + l);
+    }
     r.notes.forEach((n) => console.log('      ~ ' + n));
     // 起跑前端口就被别人占着 → 这套件根本没机会跑。必须说清是谁占的，
     // 否则结论是"这个套件坏了"，而真相是"上一个套件没收拾干净"。

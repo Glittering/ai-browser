@@ -7,30 +7,31 @@ description: >-
 
 # ai-browser
 
-## 两条路，选一条就能干活
+## 两条路
 
-工具在就 `browse_navigate {"url":"https://example.com"}`；**不在也不用配任何东西**，走 CLI（同一引擎，装完即用）：
+工具在就 `browse_navigate {"url":"https://example.com"}`；**不在也不用配任何东西**，走 CLI（同一引擎）：
 
 ```
 ai-browser call ui.get_tree '{"subset":"interactive"}'        # 读页面，拿 e:xxx
 ai-browser call ui.act '{"action":"click","target":"e:a-3"}'  # 点它
-ai-browser call ui.navigate '{"url":"https://example.com"}'
 ```
 
-没这个命令就加前缀 `npx -y @glittering0717/ai-browser`。浏览器没开时会自动拉起。
+没这个命令就加前缀 `npx -y @glittering0717/ai-browser`；浏览器没开会自动拉起。
 
 CLI 方法 = 工具名去掉 `browse_` 换 `ui.`（`get_tree` `act` `navigate` … 一一对应）。
 不一一对应的 4 个（tabs/network/canvas/diff）见 `references/cli.md`。
 
+## 多 agent / 后台
+省略 `tab` = 操作你自己的页（`list` 里 `mine`）；新页默认不抢用户视野（`show:true` 才显示）。
+`tabs {"op":"window","visible":false}` → 后台运行，能力不变；要人登录再打开。
+
 ## 点东西只认 id
 
-`get_tree` 每个节点有 `id`（形如 `e:a-3`）。`act` 的 `target` **只接受这个 id**，
-传页面上的文字会报 `target_not_found`。
+`act` 的 `target` 只接受 `get_tree` 给的 id（如 `e:a-3`）；传页面文字会报 `target_not_found`。
 
 ## 操作后先看 effect_state
 
-`committed` 已生效 → 继续｜`none` 页面没动 → 换 target 或重读树｜
-`unknown` 说不准 → **先重读树再决定**，盲目重试会提交两次。
+`committed` 继续｜`none` 换 target 或重读树｜`unknown` **先重读树**再决定，盲目重试会提交两次。
 
 ## 卡住时
 
@@ -45,7 +46,7 @@ CLI 方法 = 工具名去掉 `browse_` 换 `ui.`（`get_tree` `act` `navigate` �
 
 ## 需要人帮忙
 
-登录/扫码/滑块/支付：**请用户在自己的窗口里操作**，他说"好了"再重读树确认。不要编造密码。
+登录/扫码/滑块/支付：请用户在窗口里操作，他说"好了"再重读树确认；不要编造密码。
 
 ## 按需深挖
 

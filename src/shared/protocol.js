@@ -71,6 +71,9 @@ export const VALID_METHODS = [
   'ui.paint_check',
   // 窗口/视图几何（读 + 改）。布局类缺陷需要它才能复现与回归。
   'ui.window_bounds',
+  // 窗口可见性 / 最小化（读 + 改）。后台运行（无头式无人值守）的开关：
+  // 隐藏是一个**稳定状态**，不会因为 agent 的下一次操作自己弹回来。
+  'ui.window',
   'ui.snapshot',
   'ui.diff',
   'ui.capabilities',
