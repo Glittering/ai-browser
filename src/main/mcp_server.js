@@ -44,7 +44,24 @@ const wsClient = createWsClient({
   url: WS_URL,
   timeout: WS_TIMEOUT,
   ensureRunning: () => ensureBrowser(),
+  // 自报家门：告诉浏览器"我是一个 agent"，于是它会给我一块自己的标签组
+  // （默认目标永远是组里我自己的页，绝不开在人眼前那一页上）。
+  // 名字只用于标签栏上那个小圆点旁边的文字，猜不出来就留空让服务端编号。
+  hello: { label: agentLabel(), auto_workspace: true },
 });
+
+/** 从环境推断是哪个客户端在驱动我。猜不出来就返回空串（服务端会编 "Agent N"）。 */
+function agentLabel() {
+  const env = process.env;
+  const explicit = String(env.AI_BROWSER_AGENT_NAME || '').trim();
+  if (explicit) return explicit.slice(0, 24);
+  if (env.CLAUDECODE || env.CLAUDE_CODE_ENTRYPOINT) return 'Claude';
+  if (env.CURSOR_TRACE_ID || env.CURSOR_AGENT) return 'Cursor';
+  if (env.TRAE_ENV || env.TRAE_AGENT) return 'Trae';
+  if (env.CODEX_HOME || env.OPENAI_CODEX) return 'Codex';
+  if (env.CLINE_ACTIVE) return 'Cline';
+  return '';
+}
 
 /** 拉起浏览器（幂等）。失败时抛带原因的 Error，由 mcp_ws 并进最终错误信息。 */
 async function ensureBrowser() {

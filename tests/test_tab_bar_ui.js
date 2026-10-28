@@ -23,6 +23,10 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const HTML = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'tab_bar.html'), 'utf8');
+// 标签栏把分组折叠的判据放在外部脚本里（<script src>）。jsdom 默认不取外部资源，
+// 所以这里读进来手动注入 —— 否则 window.TabBarLayout 不存在，整个 renderTabs 抛错，
+// 下面所有断言会一起变红，而真正的原因只是"测试环境没加载那个文件"。
+const LAYOUT_JS = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'tab_bar_layout.js'), 'utf8');
 
 // 假 ipcRenderer：记录调用，tab:list 返回外部可改的 tabs 数组
 function makeHarness(tabs) {
@@ -44,6 +48,7 @@ function makeHarness(tabs) {
       // jsdom 没有 require，这里注入一个，避免脚本走"非 Electron 降级"分支
       // （降级分支本身是另一个用例，见 TB-5）。
       window.require = () => ({ ipcRenderer });
+      window.eval(LAYOUT_JS);
     },
   });
   const { window } = dom;
@@ -162,6 +167,7 @@ describe('tab bar 在非 Electron 环境下的降级', () => {
       beforeParse(window) {
         window.addEventListener('error', (e) => errors.push(e.message));
         window.require = () => { throw new Error("Cannot find module 'electron'"); };
+        window.eval(LAYOUT_JS);   // 同上：外部脚本要手动注入
       },
     });
     const { window } = dom;

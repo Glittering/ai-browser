@@ -398,6 +398,46 @@ the write-verification will honestly report `input not verified` rather than pre
 `npm run multiagent` drives two connections against one browser and asserts all of the above,
 including 10 interleaved actions with no cross-contamination.
 
+### Tab groups: every agent gets its own corner
+
+Targets are per-connection, but tabs still shared one strip — you could not tell whose tab was whose,
+and nothing stopped an agent from opening twenty of them. Both are fixed by **ownership**:
+
+```
+group = 'human' | 'agent:<session>'
+```
+
+An agent declares itself with `ui.hello` (the MCP server and the CLI both do it on connect). From then
+on, the **first** call that touches a page and has no target yet gets a blank tab of its own, in its own
+group, and a one-time hint in the result:
+
+```json
+{"workspace": {"tab": 7, "group": "Claude", "created": true, "hint": "..."}}
+```
+
+So an agent **never** defaults to the tab you are looking at. Reading your page is still possible and
+still cheap — `browse_tabs {"op":"list"}`, find the entry with `group: "human"`, pass its `tab`
+explicitly. Reading does not take it over.
+
+In the tab strip your tabs stay as they were; each agent group collapses into a pill (its colour, name
+and tab count), expands on hover, pins on click, and stays expanded while you are looking at one of its
+tabs. Clicking a tab inside a group only changes what **you** see — it does not change the agent's target.
+
+Each group is capped (8 by default, `AI_BROWSER_TAB_LIMIT`). Opening past the cap is **refused**, not
+"quietly evicted", with the list of tabs you could close:
+
+```
+-32001 your tab group is full (8/8) — close one before opening another
+data: { reason: "group-full", limit: 8, tabs: [{tab, url}, ...] }
+```
+
+Popups cannot be refused (the page's script is waiting for the window), so in that one case the least
+recently used tab in the group — never the visible one, never one with a dialog open — is closed
+instead, and reported in `browse_tabs {"op":"list"}` as `evicted`.
+
+`npm run multiagent` (46 checks) covers it, M7–M9: auto workspace, the cap and its refusal payload,
+and that one full group does not affect anybody else's.
+
 ---
 
 This is the part most easily misunderstood, so plainly: **the agent drives the browser, and the human
@@ -742,7 +782,7 @@ not bugs. The full write-up, including why the first measurement of this was wro
 ## Test & dev
 
 ```bash
-npm test             # vitest — 988 tests across 70 files
+npm test             # vitest — 1024 tests across 73 files
 npm run smoke        # Electron contract layer, offline fixture      — 31 checks
 npm run capabilities # text fields, canvas, page source, network, DOM editing — 54 checks
 npm run richtext     # rich-text editors, nested menus, forms, errors, tags, upload — 117 checks
@@ -752,7 +792,7 @@ npm run canvas       # canvas draw-call capture — 13 checks
 npm run modeldiff    # canvas app data-model diff (the "unchanged" false green) — 12 checks
 npm run audit        # every advertised action must exist; wait/downloads/permissions/quit — 35 checks
 npm run nav          # address bar + load-failure error page (the "white screen" report) — 19 checks
-npm run focus        # no focus stealing + full capability while backgrounded — 32 checks
+npm run focus        # no focus stealing + full capability while backgrounded — 33 checks
 npm run interact     # trusted drag / key press / wheel (pointer gestures) — 31 checks
 npm run view         # viewport repaint budget + snapshot/diff verification — 29 checks
 npm run dialog       # browser-level dialogs (native sheet blocks the renderer) — 15 checks
@@ -760,10 +800,10 @@ npm run wrapper      # "in the tree but won't click" = matched a container, not 
 npm run paint        # blank-page self-check: verdicts, bounded ladder, no false alarms — 23 checks
 npm run layout       # geometry invariants + "no twitching" (zero extra repaints on nav) — 25 checks
 npm run download     # "clicked download": viewable media must display, the rest must save — 23 checks
-npm run multiagent   # several agents at once: own tab each, no cross-talk, gone tab errors — 32 checks
+npm run multiagent   # several agents at once: own tab each, no cross-talk, gone tab errors — 46 checks
 npm run background   # window hidden/minimized: every capability still works (headless-like) — 37 checks
 npm run flicker      # frame-level: no frame may render the page shrunk (needs screen recording) — 6 checks
-npm run e2e:all      # 一次跑完上面全部 22 个套件（每个独立端口）+ 可信汇总 — 728 checks
+npm run e2e:all      # 一次跑完上面全部 22 个套件（每个独立端口）+ 可信汇总 — 743 checks
 npm run verify:app   # boot the packaged /Applications app and assert on it — 22 checks
 npm run realsites    # navigate/read/act against a matrix of real sites
 ```

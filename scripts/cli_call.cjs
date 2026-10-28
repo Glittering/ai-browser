@@ -92,6 +92,15 @@ function rpcCall({ port, timeout, method, params }) {
     }, timeout);
 
     ws.on('open', () => {
+      // 自报家门，但**不要**自动工作区：CLI 是人坐在终端前敲的，"不传 tab
+      // 就打当前页"才是他期望的语义。auto_workspace:false 只关掉"自动开一页"，
+      // 分组照旧 —— 它自己 new_tab 出来的页仍然归到 "Terminal" 组里。
+      try {
+        ws.send(JSON.stringify({
+          jsonrpc: '2.0', method: 'ui.hello',
+          params: { label: 'Terminal', auto_workspace: false },
+        }));
+      } catch (_) { /* 发不出去就退化成匿名连接 */ }
       ws.send(JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }));
     });
     ws.on('message', (data) => {

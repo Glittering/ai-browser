@@ -210,7 +210,7 @@ export const MCP_TOOLS = [
   {
     name: 'browse_tabs',
     title: 'Tabs',
-    description: 'Tabs: list/new/close/switch/window. switch = your default target (then omit tab). new never steals the user\'s view unless show:true. window = hide/show; work continues while hidden.',
+    description: 'Tabs: list/new/close/switch/window. Yours are grouped and capped (list: count/limit). Full → close one. switch = default target. new never steals the view unless show:true. window = hide/show.',
     // 合并前是 4 个工具（list / new / close / set_active），每个只承载一个动词。
     // 合并后 destructiveHint 只能是 false —— 否则 op=list 也会被标成破坏性操作；
     // close 的破坏性写在 description 里。这是合并的唯一语义代价，接受。
@@ -289,7 +289,7 @@ export const MCP_TOOLS = [
   {
     name: 'browse_canvas',
     title: 'Read canvas',
-    description: 'Read <canvas> through captured draw calls (not pixels): list canvases, read texts/regions, configure, or capture a PNG fallback. 2D canvas text comes from fillText, so no OCR needed; WebGL is opaque.',
+    description: 'Read <canvas> via captured draw calls (not pixels): list, read texts/regions, configure, or capture a PNG fallback. 2D text comes from fillText, so no OCR; WebGL is opaque.',
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     inputSchema: {
       type: 'object',
@@ -354,7 +354,7 @@ export const MCP_TOOLS = [
   {
     name: 'browse_downloads',
     title: 'List downloads',
-    description: 'List downloads for a tab with their on-disk paths. Use after clicking an export/download button — downloads are asynchronous, so poll this rather than expecting the path in the click response.',
+    description: 'List a tab\'s downloads with on-disk paths. Downloads are async: poll this after clicking export/download instead of expecting the path in the click response.',
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     inputSchema: {
       type: 'object',

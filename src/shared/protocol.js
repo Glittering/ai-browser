@@ -104,6 +104,9 @@ export const VALID_METHODS = [
   // 服务端进程身份（pid + 启动时刻）。调用方据此核对"我连上的是不是我拉起的
   // 那个实例" —— 连错实例时结果毫无意义但不会报错，是最难查的一类。
   'ui.server_info',
+  // 连接自报家门（label / auto_workspace）。声明自己是 agent 的连接会拿到一块
+  // 自己的标签组与自动工作区 —— 这是"agent 的操作与人的操作隔离"的入口。
+  'ui.hello',
   'ui.canvas_configure',
   'ui.canvas_list',
   'ui.canvas_read',

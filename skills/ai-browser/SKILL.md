@@ -9,25 +9,25 @@ description: >-
 
 ## 两条路
 
-工具在就 `browse_navigate {"url":"https://example.com"}`；**不在也不用配任何东西**，走 CLI（同一引擎）：
+工具在就 `browse_navigate {"url":"https://example.com"}`。不在也不用配，走 CLI（同一引擎）：
 
 ```
 ai-browser call ui.get_tree '{"subset":"interactive"}'        # 读页面，拿 e:xxx
 ai-browser call ui.act '{"action":"click","target":"e:a-3"}'  # 点它
 ```
 
-没这个命令就加前缀 `npx -y @glittering0717/ai-browser`；浏览器没开会自动拉起。
+没这个命令就加 `npx -y @glittering0717/ai-browser`，浏览器没开会自动拉起。
+方法名 = 工具名把 `browse_` 换成 `ui.`（tabs 等例外）。
 
-CLI 方法 = 工具名去掉 `browse_` 换 `ui.`（`get_tree` `act` `navigate` … 一一对应）。
-不一一对应的 4 个（tabs/network/canvas/diff）见 `references/cli.md`。
+## 你的标签组
 
-## 多 agent / 后台
-省略 `tab` = 操作你自己的页（`list` 里 `mine`）；新页默认不抢用户视野（`show:true` 才显示）。
-`tabs {"op":"window","visible":false}` → 后台运行，能力不变；要人登录再打开。
+第一次动手会给你一页**空白工作页**，归在你自己的标签组；多 agent 各一组，互不相干。
+省略 `tab` 就打它；用户的页不会被碰也不会被顶掉。组有上限，满了先关再开。
+看用户的页 / 人登录扫码 / 全程后台：`references/tabs.md`。
 
 ## 点东西只认 id
 
-`act` 的 `target` 只接受 `get_tree` 给的 id（如 `e:a-3`）；传页面文字会报 `target_not_found`。
+`act` 的 `target` 只认 `get_tree` 给的 id；传文字会报 `target_not_found`。
 
 ## 操作后先看 effect_state
 
@@ -46,10 +46,11 @@ CLI 方法 = 工具名去掉 `browse_` 换 `ui.`（`get_tree` `act` `navigate` �
 
 ## 需要人帮忙
 
-登录/扫码/滑块/支付：请用户在窗口里操作，他说"好了"再重读树确认；不要编造密码。
+登录、扫码、滑块、支付：请用户在窗口里操作，说"好了"再重读树；不要编造密码。
 
 ## 按需深挖
 
+- `references/tabs.md` — 标签组、上限、把页面交给人的正确姿势
 - `references/cli.md` — CLI 全部方法与参数对照
 - `references/troubleshooting.md` — 失败排查顺序
 - `references/hard-pages.md` — canvas / 富文本 / iframe / 上传

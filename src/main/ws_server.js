@@ -14,6 +14,7 @@ import { recordError, noteCall, recentErrors } from './error_log.js';
 // 默认目标标签页的判据（explicit > session > active > first），理由与两条不可
 // 退让的约束见 shared/tab_route.cjs 顶部（多 agent 并用时"目标被别人改掉"）。
 import tabRoute from '../shared/tab_route.cjs';
+import tabGroup from '../shared/tab_group.cjs';
 
 // Each startWSServer() owns a private WebSocketServer. Keeping it local (not a
 // module global) means multiple servers can coexist — required by tests that
@@ -56,6 +57,12 @@ const TABLESS_METHODS = new Set([
   'ui.window', 'ui.window_bounds', 'ui.window_shown', 'ui.quit',
   'ui.subscribe', 'ui.unsubscribe',
 ]);
+// 这些方法本来就在"管理标签页"，不能先替调用方开一个工作页再执行。
+const TAB_OWN_METHODS = new Set([
+  'ui.new_tab', 'ui.list_tabs', 'ui.close_tab', 'ui.set_active_tab',
+  'ui.server_info', 'ui.errors', 'ui.window', 'ui.window_bounds',
+  'ui.window_shown', 'ui.quit', 'ui.subscribe', 'ui.unsubscribe', 'ui.hello',
+]);
 
 export function startWSServer(pageManager, port = config.wsPort, onQuit = null) {
   // Bind loopback only — the protocol carries no auth. ws' default (host
@@ -78,6 +85,29 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
   wss.on('connection', (ws, _req) => {
     const sessionId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const subscriptions = new Set();
+    // 连接的身份与工作区。isAgentConn 只有 ui.hello 才会置真 —— 裸 WS（e2e、
+    // 脚本、调试）保持老行为：不传 tab 就打当前页。
+    let clientName = null;
+    let isAgentConn = false;
+    // 声明自己是 agent 的连接默认获得自动工作区；CLI 这类"人就坐在终端前"的
+    // 入口显式关掉（auto_workspace:false），它想打当前页就是打当前页。
+    let autoWorkspace = true;
+    // 自报家门的两种写法都要认：MCP 发**通知**（无 id），有些客户端会发成
+    // 普通请求（带 id 等回执）。只认通知的话，带 id 的那种会掉进 switch 变成
+    // "Method not found"，而调用方通常只看结果不看错误 —— 表现就是"自动工作区
+    // 有时生效有时不生效"，这类半生效最难查。
+    const applyHello = (p) => {
+      const params = p || {};
+      clientName = String(params.label || params.client || '').trim().slice(0, 24) || null;
+      isAgentConn = true;
+      if (params.auto_workspace === false) autoWorkspace = false;
+      if (process.env.AI_BROWSER_AUTO_WORKSPACE === '0') autoWorkspace = false;
+      // capped:true —— 声明自己是 agent 才受"每组上限"约束（见 canOpenInGroup）。
+      if (typeof pageManager.ensureGroup === 'function') {
+        pageManager.ensureGroup(sessionId, clientName, { capped: true });
+      }
+      return { ok: true, agent: clientName || true, auto_workspace: autoWorkspace };
+    };
 
     pageManager.registerClient(sessionId, ws);
 
@@ -101,6 +131,15 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
           const events = msg.params?.events || [];
           events.forEach(ev => subscriptions.delete(ev));
           pageManager.removeSubscription(sessionId, events);
+        }
+        // ui.hello：连接自报家门。MCP / CLI 在拿到 socket 后立刻发。
+        //
+        // 为什么需要它：WS 是纯 JSON-RPC，服务端只看到一个 socket，不知道对面
+        // 是"一个 agent"还是"某段脚本"。而"要不要给你一块自己的工作区"必须
+        // 区分这两种人 —— 脚本（e2e、调试）期望的是老行为：不传 tab 就打当前页。
+        // 所以只有**主动声明自己是 agent**的连接才自动获得工作区。
+        if (msg.method === 'ui.hello') {
+          applyHello(msg.params);
         }
         return;
       }
@@ -136,8 +175,14 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
       } catch (_) {
         routed = { tab: params.tab === undefined ? null : params.tab, source: 'unknown' };
       }
-      const tabId = routed.tab;
+      let tabId = routed.tab;
+      // 本次回复要附带的一次性提示（只在本连接刚拿到工作区时出现一次）。
+      let workspaceNote = null;
       const send = (payload) => {
+        if (workspaceNote && payload && payload.result &&
+            typeof payload.result === 'object' && !Array.isArray(payload.result)) {
+          if (!payload.result.workspace) payload.result.workspace = workspaceNote;
+        }
         if (ws.readyState === 1) ws.send(JSON.stringify(payload));
       };
       // 会话标签页没了 → 必须在这一层拦住（否则会退回到别人的页面继续执行）。
@@ -153,6 +198,43 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
       };
 
       const t0 = Date.now();
+      // ---- 自动工作区 ----------------------------------------------------
+      //
+      // agent 第一次要动页面、而它还没指定过任何目标时，给它一页**自己的**空标签，
+      // 归到它自己的组里。这是"agent 的操作与人的操作完全隔离"的地基：默认目标
+      // 再也不会落在人眼前那一页上（那是 v2.2.0 留下的最后一个口子 —— 会话没有
+      // 绑定时就 fallback 到 active，而 active 永远是人正在看的页）。
+      //
+      // 四条不触发，缺一不可：
+      //   1. 不是 agent（没发 ui.hello）：裸 WS（e2e / 脚本 / 调试）保持老行为，
+      //      不传 tab 就打当前页 —— 否则所有回归和临时脚本都会突然对着一片空白。
+      //   2. 方法本身在管标签页（new_tab / list_tabs / window …）：先开一页再列
+      //      标签页是荒谬的。
+      //   3. 调用方显式点了 tab，或本连接已经有绑定：那是明确意图，不许覆盖。
+      //   4. AI_BROWSER_AUTO_WORKSPACE=0：留着给"我就想让它打当前页"的场景。
+      if (isAgentConn && autoWorkspace && !TAB_OWN_METHODS.has(method) &&
+          (params.tab === undefined || params.tab === null) &&
+          typeof pageManager.newTab === 'function' &&
+          typeof pageManager.sessionTabOf === 'function' &&
+          pageManager.sessionTabOf(sessionId) === null) {
+        try {
+          const g = typeof pageManager.ensureGroup === 'function'
+            ? pageManager.ensureGroup(sessionId, clientName) : null;
+          const wid = pageManager.newTab(null, { show: false, group: g ? g.id : undefined });
+          pageManager.bindSessionTab(sessionId, wid);
+          tabId = wid;
+          // 这条提示只出现一次（本连接第一次动手），所以可以写得具体些：
+          // 它同时解释了"你拿到了一页空白"和"想看人的页面该怎么做"。
+          workspaceNote = {
+            tab: wid,
+            group: g ? g.label : null,
+            created: true,
+            hint: 'Your own blank tab. The user\'s visible page was left untouched and is NOT your target — navigate here. To just LOOK at the user\'s page: browse_tabs {op:"list"}, find the tab with group "human", pass its tab explicitly (reading does not take it over).',
+          };
+        } catch (_) {
+          // 建不出来就退回原目标：不能因为"想隔离"反而把这次调用打死。
+        }
+      }
       try {
         if (!TABLESS_METHODS.has(method) && routingError()) return;
         switch (method) {
@@ -345,10 +427,41 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
               visibleIsStartup: pageManager.activeTab !== null &&
                 pageManager.activeTab === pageManager.startupTab,
             });
-            const newTabId = pageManager.newTab(params.url || null, { show });
+            // 归属：这一页算谁的。agent 开的页进它自己的组（上限按组算），
+            // 人点「+」开的页进 human 组（没有上限）。
+            const g = typeof pageManager.ensureGroup === 'function'
+              ? pageManager.ensureGroup(sessionId, clientName) : null;
+            const groupId = g ? g.id : undefined;
+            // 上限：**拒绝**而不是偷偷挤掉一页。挤掉是破坏性的（agent 可能正
+            // 在那一页上跑流程），而拒绝是一次必须做的决定 —— 这正是上限存在
+            // 的目的：逼 agent 把没用的页关掉，而不是无限开。
+            //
+            // 只对**声明过自己是 agent** 的连接生效：裸 WS（e2e / 脚本 / 调试）
+            // 不受限，否则那些一次性开二十个标签的回归套件会突然开始报 group-full。
+            const cap = (isAgentConn && g && typeof pageManager.canOpenInGroup === 'function')
+              ? pageManager.canOpenInGroup(groupId) : { allowed: true };
+            if (!cap.allowed) {
+              const open = typeof pageManager.tabsInGroup === 'function'
+                ? pageManager.tabsInGroup(groupId) : [];
+              send({
+                jsonrpc: '2.0', id,
+                error: {
+                  code: -32001,
+                  message: `your tab group is full (${cap.count}/${cap.limit}) — close one before opening another`,
+                  data: {
+                    reason: 'group-full',
+                    group: g.label, limit: cap.limit, count: cap.count,
+                    tabs: open.map((t) => ({ tab: t.id, url: t.url })),
+                    hint: 'browse_tabs {op:"close", tab:<id>} on one you no longer need',
+                  },
+                },
+              });
+              break;
+            }
+            const newTabId = pageManager.newTab(params.url || null, { show, group: groupId });
             // 新标签页立刻成为**这个连接的**工作目标（不影响别的连接、也不影响人）。
             if (typeof pageManager.bindSessionTab === 'function') pageManager.bindSessionTab(sessionId, newTabId);
-            send({ jsonrpc: '2.0', id, result: { tab: newTabId, shown: show } });
+            send({ jsonrpc: '2.0', id, result: { tab: newTabId, shown: show, group: g ? g.label : null } });
             break;
           }
           case 'ui.close_tab': {
@@ -373,7 +486,27 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
             if (mine !== null && mine !== undefined) {
               for (const t of tabs) if (t.id === mine) t.mine = true;
             }
-            send({ jsonrpc: '2.0', id, result: { tabs } });
+            // groups：每组的页数与上限。agent 要能**事先**知道自己还有几个名额，
+            // 而不是撞到 group-full 才知道 —— 那时代码已经写到一半了。
+            const groups = typeof pageManager.listGroups === 'function' ? pageManager.listGroups() : [];
+            // evicted：被上限挤掉（只可能是页面自己弹窗撑爆的时候）的页，
+            // 回采一次就清空 —— 不说的话 agent 会以为那一页"自己消失了"。
+            const evicted = Array.isArray(pageManager.evictions) ? pageManager.evictions.splice(0) : [];
+            send({
+              jsonrpc: '2.0', id,
+              result: {
+                tabs,
+                ...(groups.length ? {
+                  groups: groups.map((g) => ({
+                    id: g.id, label: g.label, count: g.count,
+                    // limit 只对受约束的组有意义；不限量的组别报一个假的 8
+                    limit: g.capped === true ? g.limit : null,
+                    ...(g.id === tabGroup.groupIdForSession(sessionId) ? { mine: true } : {}),
+                  })),
+                } : {}),
+                ...(evicted.length ? { evicted } : {}),
+              },
+            });
             break;
           }
           // 窗口首次显示的时刻与当时页面状态。
@@ -437,6 +570,11 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
           // ui.evaluate / ui.get_tree 却毫不知情：测的是别人的实例，结果毫无
           // 意义，而且不报错，只给出一堆莫名其妙的失败。
           // 有了 pid，调用方就能核对"是不是我 spawn 的那个进程"。
+          // 自报家门的"请求"写法（带 id）：报完立刻回执，调用方好确认身份已生效。
+          case 'ui.hello': {
+            send({ jsonrpc: '2.0', id, result: applyHello(params) });
+            break;
+          }
           case 'ui.server_info': {
             send({
               jsonrpc: '2.0', id,

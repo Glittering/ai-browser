@@ -20,20 +20,68 @@ class Browser {
       }
     });
 
-    this.ws.on("error", (e) => console.error("WS error:", e.message));
-  }
-
-  ready() {
-    return new Promise((resolve) => {
-      this.ws.on("open", resolve);
+    this.ws.on("error", (e) => {
+      this._lastError = e;
+      this._rejectAll(new Error("WS error: " + e.message));
+    });
+    // 连接断了必须**叫醒所有等着的调用**。
+    //
+    // 没有这一条的话，任何一次中途掉线都会让调用方的 Promise 永久挂住 ——
+    // 在 e2e 里表现为"跑到某一步就 150s 超时、没有任何线索"（2026-10-28 实测：
+    // 前一个实例退出途中端口又被新实例接上，客户端连上的是正在死的那一个，
+    // 于是就永久等一个永远不会到的回包）。
+    this.ws.on("close", () => {
+      this._rejectAll(new Error("WS closed"));
     });
   }
 
-  call(method, params = {}) {
+  _rejectAll(err) {
+    for (const [, cb] of this._pending) cb({ error: { message: err.message } });
+    this._pending.clear();
+  }
+
+  /** 等连接就绪。失败/超时都 reject —— 绝不允许"永远等下去"。 */
+  ready(timeoutMs = 15000) {
+    if (this.ws.readyState === 1) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new Error("WS not open after " + timeoutMs + "ms" +
+          (this._lastError ? " (" + this._lastError.message + ")" : "")));
+      }, timeoutMs);
+      const onOpen = () => { cleanup(); resolve(); };
+      const onFail = (e) => { cleanup(); reject(e instanceof Error ? e : new Error(String(e && e.message || e))); };
+      const cleanup = () => {
+        clearTimeout(timer);
+        this.ws.removeListener("open", onOpen);
+        this.ws.removeListener("error", onFail);
+        this.ws.removeListener("close", onFail);
+      };
+      this.ws.on("open", onOpen);
+      this.ws.on("error", onFail);
+      this.ws.on("close", onFail);
+    });
+  }
+
+  call(method, params = {}, timeoutMs = 60000) {
     return new Promise((resolve) => {
       const id = ++this._id;
-      this._pending.set(id, resolve);
-      this.ws.send(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
+      let timer = null;
+      const finish = (msg) => { if (timer) clearTimeout(timer); resolve(msg); };
+      timer = setTimeout(() => {
+        if (this._pending.has(id)) {
+          this._pending.delete(id);
+          resolve({ error: { message: "no reply to " + method + " within " + timeoutMs + "ms (step hung or connection lost)" } });
+        }
+      }, timeoutMs);
+      if (timer.unref) timer.unref();
+      this._pending.set(id, finish);
+      try {
+        this.ws.send(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
+      } catch (e) {
+        this._pending.delete(id);
+        resolve({ error: { message: "send failed: " + e.message } });
+      }
     });
   }
 

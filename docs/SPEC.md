@@ -425,6 +425,54 @@ explicit（调用方点名） > session（这个 WS 连接自己的标签页） 
 **自动跟随**（点链接开新标签）改的是**目标**不是**视野**：`opened_tab` 回执让 ws 层
 把会话目标挪过去，人眼前的页面只有在 opener 就是可见页时才跟着切。
 
+### 标签组：每个 agent 一块自己的地方（v2.3.0）
+
+会话级目标解决了"动作落在哪一页"，但标签条上仍是一锅粥：人看不出哪些页是自己的、
+哪些是哪个 agent 的；也没有任何东西**约束** agent 开页面的数量。归属模型补上这两块：
+
+```
+group = 'human' | 'agent:<sessionId>'
+```
+
+`shared/tab_group.cjs` 是唯一判据（纯函数，`tests/test_tab_group.js` 钉住）。
+
+**自动工作区**。MCP/CLI 建连后立刻发 `ui.hello {label, auto_workspace}`（通知或请求都认）。
+声明自己是 agent 的连接，**第一次要动页面而还没指定目标**时，浏览器给它开一页空白标签、
+归进它自己的组，并在这次结果里附一次 `workspace` 提示：
+
+```json
+{"workspace": {"tab": 7, "group": "Claude", "created": true, "hint": "…"}}
+```
+
+这是"agent 永远不会默认开在人眼前那一页上"的地基。四条**不**触发，缺一不可：
+① 没发 `ui.hello`（裸 WS：e2e / 脚本 / 调试保持老行为，否则所有回归会突然对着空白）；
+② 方法本身在管标签页（`new_tab` / `list_tabs` / `window` …）；
+③ 调用方显式点了 `tab`，或本连接已有绑定；④ `AI_BROWSER_AUTO_WORKSPACE=0`。
+CLI 发 `auto_workspace:false` —— 人坐在终端前敲命令时，"不传 tab 就打当前页"才是他要的。
+
+**上限**。每组默认 8 页（`AI_BROWSER_TAB_LIMIT`）。`ui.new_tab` 撞上限时**拒绝**，不回
+"静默挤掉一页"：挤掉是破坏性的（agent 可能正在那一页跑流程），而拒绝是一次必须做的决定 ——
+这正是上限存在的理由（后台运行时没人看得见它的标签页，不设限就会开到内存告急）。回执带
+`data.reason='group-full'`、`limit`、以及可关闭清单 `data.tabs`。
+
+页面自己弹的窗口（`window.open` / `target=_blank`）**不能拒绝**（站点脚本在等它），
+只能牺牲：本组里"最久没用、不在人眼前、没有挂着对话框"的那一页，并记进
+`ui.list_tabs` 的 `evicted`（回采一次即清空）—— 不说的话 agent 会以为那页自己消失了。
+没有候选就允许超限：宁可多一页，不吞正在用的页。
+
+**看 ≠ 拥有**。人点开 agent 的页只是"看"（`activeTab` 变了，会话目标不变）；用户的标签页
+也不因为有 agent 在跑而变得只读。要让用户接管（登录/扫码/支付），agent 用
+`ui.set_active_tab {show:true}` 把页面顶到人眼前。
+
+**标签栏**。人的页平铺；每个 agent 组折叠成一个 pill（组色 + 名字 + 页数，满额变暖色），
+悬停展开、点击钉住；**正在看的那一组强制展开**，否则人切过去就找不到自己在看什么。
+判据在 `renderer/tab_bar_layout.js`（纯函数，`tests/test_tab_bar_layout.js` 钉住）——
+靠人肉悬停验证交互等于没验证。这里**不做**竖向下拉菜单：标签栏是固定高度的 BrowserView，
+往下弹会被裁掉，要能弹就得每次悬停把标签栏长高、把页面下推，那正是本文件另一头
+"渲染三宗罪"的来源。
+
+回归：`npm run multiagent`（46 断言，M7–M9 覆盖自动工作区 / 上限 / 组间隔离）。
+
 ---
 
 ## 后台：窗口不显示时照样把活干完
@@ -644,14 +692,17 @@ sheet**，因此它既不在语义树里，也不受页面点击控制；**而�
 
 ## 测试基线
 
-- 单元：`npm test` —— Vitest，71 文件 / 1001 条，0 skip。
+- 单元：`npm test` —— Vitest，73 文件 / 1024 条，0 skip。
 - 端到端：各 `npm run <suite>` 自起 Electron（隔离 profile）：
   `smoke` / `capabilities` / `richtext` / `network` / `value` / `canvas` / `modeldiff` /
   `audit` / `focus` / `interact` / `view` / `readcov` / `window_open` /
   `dialog` / `wrapper` / `paint` / `layout` / `download` / `multiagent` / `background`。
-  **改动不得破坏任何一项。** 一次跑全部：`npm run e2e:all`（22 套件 / 700+ 断言）。
+  **改动不得破坏任何一项。** 一次跑全部：`npm run e2e:all`（22 套件 / 745 断言）。
   另外两个**不进全量**：`npm run flicker`（要屏幕录制权限 + 窗口真的在屏幕上）、
   `npm run realsites`（依赖外网）。
+  测试客户端（`tools/browser.cjs`）**不许永久等**：连接断开/回包超时都要把挂起的
+  调用唤醒成一条错误。没有这一条，一次中途掉线会让套件挂到看门狗（150s）且没有任何线索
+  —— 排查时唯一能看到的是"卡在某一步"，而真正的原因（连上了正在退出的实例）被吞掉了。
   新建套件必须同时加进 `e2e/run_all.cjs` 的 `SUITES` —— 加了但没进全量等于没加
   （`dialog`/`wrapper`/`paint`/`layout` 就这样在 v2.1.16–v2.1.19 期间从没被跑过）。
 - `ui.wait` 的 `target` 先按元素 id 精确匹配、再退化为 label 子串匹配；

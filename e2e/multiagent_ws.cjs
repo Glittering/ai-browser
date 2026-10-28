@@ -38,10 +38,22 @@ const fails = [];
 // 整个套件会**静默挂住**，在 run_all 里表现为"420s 后 TIMEOUT / 无摘要"——
 // 没有停在哪儿、也没有失败明细。看门狗把它变成一句可诊断的报错。
 let STAGE = 'init';
+let CHILD = null;          // 供看门狗打印子进程最后几行（否则超时那天没有任何线索）
 const stage = (s) => { STAGE = s; };
 {
   const wd = setTimeout(() => {
     console.error(`\n!! WATCHDOG: 卡在 [${STAGE}] 超过 150s —— 这个阶段有 RPC 没返回`);
+    // 子进程还活着吗？stderr 说了什么？超时现场唯一的两个线索。
+    try {
+      if (CHILD) console.error(`   子进程 ${CHILD.pid} ${CHILD.exitCode === null ? '仍在' : '已退出 code=' + CHILD.exitCode}`);
+    } catch (_) {}
+    const lines = (CHILD && CHILD.__stderrLines) || [];
+    if (lines.length) {
+      console.error('   主进程最后 12 行：');
+      for (const l of lines.slice(-12)) console.error('     | ' + String(l).slice(0, 200));
+    } else {
+      console.error('   （主进程没有 stderr 输出）');
+    }
     guard.killAll();
     process.exit(9);
   }, 150000);
@@ -55,7 +67,9 @@ function check(name, cond, detail) {
 /** 一次 RPC，把"成功/失败"摊平成 {ok, result, error}，免得每处都判两次。 */
 async function rpc(conn, method, params = {}) {
   const msg = await conn.call(method, params);
-  if (msg && msg.error) return { ok: false, error: msg.error.message, code: msg.error.code };
+  // 把 error.data 也带出来：组满这种"拒绝但可救"的错误，可关闭清单就在 data 里，
+  // 丢了它就只能断言"报错了"，无法验证"它告诉了我该怎么办"。
+  if (msg && msg.error) return { ok: false, error: msg.error.message, code: msg.error.code, data: msg.error.data };
   return { ok: true, result: msg && msg.result !== undefined ? msg.result : msg };
 }
 
@@ -79,6 +93,8 @@ function startServer() {
 
 async function spawnElectron(port) {
   const env = { ...process.env, AI_BROWSER_PORT: String(port), AI_BROWSER_WATCHDOG: '0' };
+  // 组上限压小，才能在几秒内把"满了怎么办"测出来（默认 8 要开很多页）。
+  env.AI_BROWSER_TAB_LIMIT = '4';
   delete env.ELECTRON_RUN_AS_NODE;
   delete env.NODE_OPTIONS;
   if (!env.AI_BROWSER_USER_DATA) env.AI_BROWSER_USER_DATA = path.join(require('node:os').tmpdir(), `ai-browser-e2e-multi-${port}`);
@@ -140,12 +156,37 @@ async function main() {
   }
   stage('spawn');
   const child = await spawnElectron(WS_PORT);
+  CHILD = child;
   stage('spawned');
 
   // 两个 Browser 实例 = 两条 WS 连接 = 两个 agent 会话（MCP 那边每个进程一条）
-  const A = new Browser(WS_PORT);
-  const B = new Browser(WS_PORT);
-  await A.ready(); await B.ready();
+  //
+  // 带重试：`waitPortOpen` 只证明"这个端口能连上"，证明不了"连上的是我刚拉起的
+  // 那个进程"。上一个实例还在退出途中时端口可能短暂由它占着，客户端连过去的瞬间
+  // 它就死了 —— 那一次连接会一直挂到超时（2026-10-28 实测，看门狗报"卡在 spawned"）。
+  // 这里用 server_info 的 pid 认人，认错了就重连，最多三次。
+  let A = null, B = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    A = new Browser(WS_PORT);
+    B = new Browser(WS_PORT);
+    try {
+      await A.ready(10000);
+      await B.ready(10000);
+    } catch (e) {
+      A.close(); B.close();
+      console.log(`  [connect] 第 ${attempt} 次没连上（${e.message}），重试…`);
+      await sleep(800);
+      continue;
+    }
+    const info = await A.call('ui.server_info', {});
+    const pid = info && info.result && info.result.pid;
+    if (pid === child.pid) break;
+    A.close(); B.close();
+    console.log(`  [connect] 第 ${attempt} 次连到别的实例（pid=${pid}，期望 ${child.pid}），重试…`);
+    await sleep(800);
+    A = null; B = null;
+  }
+  if (!A || !B) throw new Error('三次都没能连上本次拉起的实例');
   await harness.assertIdentity(A, child, 'multiagent');
 
   // ---- M1 各自的工作标签页 ----
@@ -281,6 +322,68 @@ async function main() {
     // 换回来，别影响后面的收尾
     await rpc(A, 'ui.set_active_tab', { tab: tabA, show: false });
   }
+
+  // ---- M7 自报家门 → 自动工作区 ----
+  stage('M7');
+  console.log('\n[M7] hello 之后第一次动手：拿到自己的空白工作页，人的页面一动不动');
+  const C = new Browser(WS_PORT);
+  await C.ready();
+  {
+    const hello = await rpc(C, 'ui.hello', { label: 'Probe-C' });
+    check('M7 hello 被接受并回执', hello.ok && hello.result && hello.result.ok === true, JSON.stringify(hello).slice(0, 160));
+    const humanBefore = (await rpc(A, 'ui.list_tabs', {})).result.tabs.filter((t) => t.active).map((t) => t.id);
+    const first = await rpc(C, 'ui.get_tree', {});
+    const ws = first.result && first.result.workspace;
+    check('M7 第一次调用自动开了工作页并给一次性提示', !!ws && ws.created === true, JSON.stringify(ws).slice(0, 220));
+    check('M7 提示说明了怎么读用户的页面', !!ws && /group .?human/i.test(ws.hint || ''), ws && ws.hint);
+    const url = first.result && first.result.context && first.result.context.url;
+    check('M7 工作页是空白页（不是人正在看的那一页）', url === 'about:blank', String(url));
+    const humanAfter = (await rpc(A, 'ui.list_tabs', {})).result.tabs.filter((t) => t.active).map((t) => t.id);
+    check('M7 人眼前的页面没有被换掉', JSON.stringify(humanBefore) === JSON.stringify(humanAfter),
+      JSON.stringify({ humanBefore, humanAfter }));
+    const own = (await rpc(C, 'ui.list_tabs', {})).result.tabs.find((t) => t.mine);
+    check('M7 工作页归在自己的组里', !!own && own.group_kind === 'agent' && own.group_label === 'Probe-C',
+      JSON.stringify(own));
+  }
+
+  // ---- M8 每组上限 ----
+  stage('M8');
+  console.log('\n[M8] 组有上限：满了拒绝 + 给出可关闭清单；关掉一页就能继续');
+  {
+    let full = null;
+    for (let i = 0; i < 10 && !full; i++) {
+      const r = await rpc(C, 'ui.new_tab', { url: `${base}/C${i}` });
+      if (!r.ok) full = r;
+    }
+    check('M8 超过上限时 new_tab 被拒绝', !!full && /full/i.test(full.error || ''), JSON.stringify(full).slice(0, 200));
+    check('M8 拒绝回执带 reason / limit / 可关闭清单',
+      !!full && full.data && full.data.reason === 'group-full' && full.data.limit === 4 &&
+      Array.isArray(full.data.tabs) && full.data.tabs.length > 0, JSON.stringify(full && full.data).slice(0, 240));
+    const g = (await rpc(C, 'ui.list_tabs', {})).result.groups.find((x) => x.mine);
+    check('M8 list_tabs 事先报出本组用量与上限', !!g && g.count === g.limit && g.limit === 4, JSON.stringify(g));
+    const victim = full.data.tabs[0].tab;
+    const closed = await rpc(C, 'ui.close_tab', { tab: victim });
+    const reopened = await rpc(C, 'ui.new_tab', { url: `${base}/C-again` });
+    check('M8 关掉一页之后可以继续开', closed.ok && closed.result.ok === true && reopened.ok,
+      JSON.stringify({ closed: closed.result, reopened: reopened.result }).slice(0, 200));
+  }
+
+  // ---- M9 组与组之间互不影响 ----
+  stage('M9');
+  console.log('\n[M9] 一个组满载不影响别人；分组清单各自独立');
+  {
+    const aOpen = await rpc(A, 'ui.new_tab', { url: `${base}/A-still-works` });
+    check('M9 A 仍然能开新页', aOpen.ok, JSON.stringify(aOpen).slice(0, 160));
+    const groups = (await rpc(A, 'ui.list_tabs', {})).result.groups || [];
+    const labels = groups.map((x) => x.label).sort();
+    check('M9 三个组各自独立存在', labels.length >= 3 && labels.indexOf('Probe-C') >= 0, JSON.stringify(labels));
+    const mineA = groups.filter((x) => x.mine).map((x) => x.label);
+    check('M9 每个连接只把自己那一组算作 mine', mineA.length === 1 && mineA[0] !== 'Probe-C', JSON.stringify(mineA));
+    const all = (await rpc(A, 'ui.list_tabs', {})).result.tabs;
+    check('M9 每个标签页都带归属', all.every((t) => typeof t.group === 'string' && t.group.length > 0),
+      JSON.stringify(all.map((t) => t.group)));
+  }
+  C.close();
 
   console.log(`\n==== PASS=${PASS} FAIL=${FAIL} ====`);
   if (FAIL) {

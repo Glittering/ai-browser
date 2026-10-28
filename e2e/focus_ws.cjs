@@ -229,7 +229,15 @@ async function runGroup({ label, port, extraEnv, expectStealOnBoot, expectStealO
     );
   };
 
-  await step("ui.new_tab", () => b.call("ui.new_tab", { url: HOST + "/focus" }));
+  // ⚠️ 这里必须显式 show:true。
+  //
+  // v2.2.0 起"新标签页默认在**后台**开"（不顶掉人眼前那页），而焦点只跟着
+  // setActive 走 —— 所以不带 show 的 new_tab 在**任何**策略下都不会抢焦点，
+  // 拿它当对照组的一条会永远红（它不是回归：v2.2.0 的代码同样红）。
+  // 对照组要证明的是"show:true 这条路上，always 确实会抢"。
+  await step("ui.new_tab show:true", () => b.call("ui.new_tab", { url: HOST + "/focus", show: true }));
+  // 不带 show 的那条单独断言：对照组里也不许抢（后台才是默认）。
+  await step("ui.new_tab（默认后台）", () => b.call("ui.new_tab", { url: HOST + "/focus" }), false);
   await step("ui.set_active_tab", () => b.call("ui.set_active_tab", { tab }));
   await step("ui.act type", () => b.call("ui.act", { action: "type", target: "txt", params: { text: "x" }, tab }));
   await step("ui.act click", () => b.call("ui.act", { action: "click", target: "btn", tab }));

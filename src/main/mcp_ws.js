@@ -29,6 +29,11 @@ export function createWsClient({
   maxRetryDelay = 10000,
   ensureRunning = null,      // Lazy launch hook: async; called on connection
                              // failure so the server can spawn Electron on demand.
+  hello = null,              // 连接建立后立刻发的自报家门（ui.hello 通知）。
+                             // 为什么必须发：服务端只看得到一个 socket，分不清
+                             // 对面是"一个 agent"还是"一段脚本"。而"要不要给你
+                             // 自己的工作区/标签组"必须区分这两者 —— 脚本期望
+                             // 老行为（不传 tab 就打当前页），agent 期望隔离。
 } = {}) {
   let _ws = null;        // current OPEN socket (or null)
   let _connecting = null; // in-flight getWs() promise (dedupes concurrent callers)
@@ -97,6 +102,12 @@ export function createWsClient({
         if (open) {
           _ws = ws;
           attachPersistent(ws);
+          // 自报家门必须在**第一条 RPC 之前**发出去：TCP/WS 保序，服务端会先
+          // 处理它，于是第一条业务调用就已经带着身份（能拿到自己的标签组）。
+          if (hello) {
+            try { ws.send(JSON.stringify({ jsonrpc: '2.0', method: 'ui.hello', params: hello })); }
+            catch (_e) { /* 发不出去就退化成匿名连接，不影响调用 */ }
+          }
           return ws;
         }
 

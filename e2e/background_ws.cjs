@@ -115,6 +115,27 @@ async function waitPath(conn, tab, want, timeoutMs = 12000) {
   return false;
 }
 
+/**
+ * 读树拿 ref → 动手 → 如果回执说 No target（读树之后页面又渲染了一次，ref 过期了）
+ * 就重读一次再来一遍。
+ *
+ * 为什么要有这个：这条套件测的是"窗口隐藏时还能不能操作"，不是"ref 永不失效"。
+ * 全量并发跑的时候页面偶尔会在读树与派发之间重绘一帧，一句 No target 就把整条
+ * 套件打断在第一步（实测过一次，单跑 37/37 全过）。重试一次是诚实的：
+ * 它不掩盖能力缺失（真点不动的话重读也点不动）。
+ */
+async function actWithRef(conn, tab, matcher, params, tries = 2) {
+  let last = null;
+  for (let i = 0; i < tries; i++) {
+    const ref = await findRef(conn, tab, matcher);
+    if (!ref) { last = { ok: false, error: 'ref-not-found' }; await sleep(150); continue; }
+    last = await rpc(conn, 'ui.act', { action: params.action, target: ref, ...params });
+    if (last.ok && last.result && last.result.success !== false) return last;
+    await sleep(200);
+  }
+  return last;
+}
+
 async function findRef(conn, tab, matcher) {
   const r = await rpc(conn, 'ui.get_tree', { tab });
   if (!r.ok) return null;
@@ -173,14 +194,12 @@ async function main() {
   // ---- B2 隐藏状态下的全套能力 ----
   console.log('\n[B2] 窗口隐藏时：点击 / 输入 / 滚动 / 上传 / 导航 / 网络 / 对话框');
   {
-    const refBtn = await findRef(b, tab, (n) => n.id === 'b' || String(n.label || '') === '按钮');
-    const click = await rpc(b, 'ui.act', { action: 'click', target: refBtn });
+    const click = await actWithRef(b, tab, (n) => n.id === 'b' || String(n.label || '') === '按钮', { action: 'click' });
     check('B2 点击成功', click.ok && click.result.success !== false, JSON.stringify(click).slice(0, 160));
     await sleep(150);
     check('B2 点击真的生效', (await rpc(b, 'ui.evaluate', { tab, js: 'document.getElementById("r").textContent' })).result.value === 'clicked');
 
-    const refInput = await findRef(b, tab, (n) => n.id === 't' || n.role === 'textbox');
-    const type = await rpc(b, 'ui.act', { action: 'type', target: refInput, text: 'hidden-ok' });
+    const type = await actWithRef(b, tab, (n) => n.id === 't' || n.role === 'textbox', { action: 'type', text: 'hidden-ok' });
     check('B2 输入成功', type.ok && type.result.success !== false, JSON.stringify(type).slice(0, 160));
     check('B2 输入真的落地', (await rpc(b, 'ui.evaluate', { tab, js: 'document.getElementById("t").value' })).result.value === 'hidden-ok');
 

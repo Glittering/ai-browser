@@ -42,6 +42,7 @@ import { MediaInline } from './media_inline.js';
 // 默认目标标签页的判据（explicit > session > active > first）与"新标签页要不要
 // 切到人眼前"的策略。见 shared/tab_route.cjs 顶部（多 agent 并用的三条事故）。
 import tabRoute, { shouldShowChildTab } from '../shared/tab_route.cjs';
+import tabGroup from '../shared/tab_group.cjs';
 import { probeCapabilities } from './capability_probe.js';
 import valueContract from '../shared/value_contract.cjs';
 // 输入成功与否的判定口径（纯函数，独立模块便于单测）。详见文件内注释：
@@ -210,6 +211,17 @@ class PageManager {
     // 所有人的默认目标都变成它；B 说"点提交"，点在 A 的页面上。判据与优先级见
     // shared/tab_route.cjs（explicit > session > active > first）。
     this._sessionTab = new Map();
+    // ---- 标签页归属（人的一组，每个 agent 一组）----
+    //
+    // 为什么需要它：会话级目标解决了"动作落在哪一页"，但标签条上仍然是一锅粥 ——
+    // 人看不出哪些页是自己的、哪些是哪个 agent 的；也没有任何东西**约束** agent
+    // 开页面的数量，一个跑长任务的 agent 能悄悄开二十个，内存被无声吃掉。
+    // 归属同时承担三件事：标签栏怎么归拢、上限算谁的、人点开 agent 的页只是"看"。
+    this._tabGroup = new Map();     // tabId -> groupId
+    this._groups = new Map();       // groupId -> { id, kind, label, color, limit, createdAt }
+    this._tabUsedAt = new Map();    // tabId -> 最后一次被导航/动作的时间（LRU 淘汰用）
+    this._groupSeq = 0;             // 组编号（Agent 1 / Agent 2 …）
+    this.evictions = [];            // 被上限挤掉的标签页（最多 20 条，ui.list_tabs 回采后清空）
     this._openedTabs = new Map();   // sourceTabId -> { id, url } (new tab opened by window.open)
     this._windowOpenTokens = new Map(); // token -> { tabId, sourceTabId } (window.open shim, preload bridge.cjs)
     this._windowOpenShimTabs = new Set(); // 已注入 window.open 垫片的 tabId
@@ -502,6 +514,132 @@ class PageManager {
    * 把这个连接"自己的工作标签页"记下来。
    * 断开连接时**不关页面**：agent 进程退出后，人可能正想看看它干到哪了。
    */
+  // ---- 标签页归属 ----------------------------------------------------------
+  //
+  // 组 id 有两条来源：HUMAN_GROUP（人点「+」、启动页、人点链接派生出来的页）
+  // 和 groupIdForSession(sessionId)（一个 agent 连接一组）。
+  // 一个组没有标签页了就删掉 —— 否则标签栏会积一堆空的分组。
+
+  /** 建（或取）一个 agent 的组。label 是给人看的（"Agent 2" / 客户端名）。 */
+  ensureGroup(sessionId, label, opts) {
+    const id = tabGroup.groupIdForSession(sessionId);
+    let g = this._groups.get(id);
+    if (!g) {
+      this._groupSeq += 1;
+      g = {
+        id,
+        kind: 'agent',
+        label: String(label || '').trim().slice(0, 24) || ('Agent ' + this._groupSeq),
+        // 颜色按组的诞生顺序取，不按 sessionId 哈希：人记的是"紫色的那个"，
+        // 哈希出来每组都可能撞色。
+        color: tabGroup.colorFor(this._groupSeq - 1),
+        limit: tabGroup.limitFromEnv(process.env),
+        // capped = 这个组受限额约束。只有**声明过自己是 agent** 的连接才有
+        // （ui.hello）；裸 WS（e2e / 脚本 / 调试）拿到组只是为了让标签页有归属，
+        // 不受限 —— 否则一次性开二十个标签的回归套件会突然报 group-full。
+        capped: false,
+        createdAt: Date.now(),
+      };
+      this._groups.set(id, g);
+    } else if (label) {
+      g.label = String(label).trim().slice(0, 24) || g.label;
+    }
+    if (opts && opts.capped === true) g.capped = true;
+    return g;
+  }
+
+  groupOfTab(tabId) {
+    return this._tabGroup.get(tabId) || tabGroup.HUMAN_GROUP;
+  }
+
+  groupMeta(groupId) {
+    const id = groupId || tabGroup.HUMAN_GROUP;
+    if (id === tabGroup.HUMAN_GROUP) {
+      return { id, kind: 'human', label: '我的标签页', color: null, limit: null };
+    }
+    return this._groups.get(id) || { id, kind: 'agent', label: id, color: null, limit: null };
+  }
+
+  /** 组里还有哪些页（按 tabId 升序 = 创建顺序）。 */
+  tabsInGroup(groupId) {
+    const out = [];
+    for (const [id] of this.tabs) {
+      if (this.groupOfTab(id) === groupId) {
+        out.push({
+          id,
+          url: this.tabs.get(id).webContents.getURL(),
+          usedAt: this._tabUsedAt.get(id) || 0,
+          dialog: this._openDialogs.has(id) ? true : undefined,
+        });
+      }
+    }
+    return out;
+  }
+
+  /** 这个组还能不能再开一页。 */
+  canOpenInGroup(groupId) {
+    const meta = this.groupMeta(groupId);
+    // 没被标记 capped 的组（裸 WS / 脚本拿到的组）不限量：组只是个归属标签。
+    if (meta.capped !== true) return { allowed: true, count: this.tabsInGroup(groupId).length, limit: null, remaining: null };
+    return tabGroup.decideOpen({
+      group: groupId,
+      count: this.tabsInGroup(groupId).length,
+      limit: meta.limit,
+    });
+  }
+
+  /** 组满时的牺牲品：最久没用、不在看、没有等人点的对话框。没有就返回 null。 */
+  pickEvictableInGroup(groupId, exceptTabId) {
+    const meta = this.groupMeta(groupId);
+    if (tabGroup.isHumanGroup(groupId)) return null;
+    if (meta.capped !== true) return null;   // 不受限的组永远不需要牺牲谁
+    if (meta.limit && this.tabsInGroup(groupId).length < meta.limit) return null;
+    return tabGroup.pickEvictable({
+      tabs: this.tabsInGroup(groupId),
+      except: exceptTabId,
+      activeTab: this.activeTab,
+    });
+  }
+
+  /**
+   * 记录"这一页刚被用过"，供 LRU 淘汰排序。
+   * 只在导航/动作这类**作用于页面**的地方调：读一次树不算用过，
+   * 否则 agent 循环读树会让真正在用的页被判定为"新"，反而淘汰掉该留的。
+   */
+  touchTab(tabId) {
+    if (tabId === undefined || tabId === null) return;
+    this._tabUsedAt.set(tabId, Date.now());
+  }
+
+  /** 标签栏/接口用的分组清单（空组已在上面的清理里去掉，这里再滤一遍保险）。 */
+  listGroups() {
+    const out = [];
+    for (const [gid, meta] of this._groups) {
+      const tabs = this.tabsInGroup(gid);
+      if (!tabs.length) continue;
+      out.push({ ...meta, count: tabs.length });
+    }
+    out.sort((a, b) => a.createdAt - b.createdAt);
+    return out;
+  }
+
+  _forgetTab(tabId) {
+    const gid = this._tabGroup.get(tabId);
+    this._tabGroup.delete(tabId);
+    this._tabUsedAt.delete(tabId);
+    if (!gid || gid === tabGroup.HUMAN_GROUP) return;
+    // 组空了就删：留在 Map 里会让标签栏出现一个 0 页的分组，下次同名 agent
+    // 重连还会复用那个组的编号/颜色，看起来像"上一轮的残留"。
+    if (!this.tabsInGroup(gid).length) this._groups.delete(gid);
+  }
+
+  /** 把一页挪进某个组（人"接手" agent 的页 / 反向都走这条）。 */
+  moveToGroup(tabId, groupId) {
+    if (!this.tabs.has(tabId)) return false;
+    this._tabGroup.set(tabId, groupId || tabGroup.HUMAN_GROUP);
+    return true;
+  }
+
   bindSessionTab(sessionId, tabId) {
     if (!sessionId) return;
     if (tabId === undefined || tabId === null) this._sessionTab.delete(sessionId);
@@ -807,6 +945,7 @@ class PageManager {
     const tid = tabId !== undefined ? tabId : this.activeTab;
     const view = this._getView(tid);
     if (!view) return { ok: false, error: 'Tab not found' };
+    this.touchTab(tid);
     // 一旦有人在这一页上导航过，它就不再是"还没人动过的启动页"了 —— 新标签页
     // 也就不该再顶替它（否则 agent 每开一页都把上一页顶掉，等于一直抢视野）。
     this._spendStartupPrivilege();
@@ -1679,6 +1818,7 @@ class PageManager {
   async executeAction(action, target, params = {}, tabId) {
     const ms = actionDeadlineMs(action, params);
     const tid = tabId !== undefined ? tabId : this.activeTab;
+    this.touchTab(tid);
     // 见 navigate 里的同一句：动过手的页面不再是"启动页"。
     this._spendStartupPrivilege();
     // 本次动作的起始时刻：用来判断"有没有对话框是在这一次动作里被应答的"，
@@ -3505,6 +3645,10 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
       },
     });
     this.tabs.set(tabId, view);
+    // 归属在最早的这一刻定下来：后面所有涉及"组"的判断（上限、标签栏、关闭
+    // 后清理空组）都读这一条，晚设一步就会出现"页已经在了、但没人认领"的窗口期。
+    this._tabGroup.set(tabId, opts.group || tabGroup.HUMAN_GROUP);
+    this._tabUsedAt.set(tabId, Date.now());
     // 每个标签页、从出生起就关掉后台节流。以前只在 setActive 里设，于是"从没
     // 被显示过"的标签页永远带着节流：定时器被拉长到 1s、rAF 停摆，站点的轮询/
     // 动画/自动保存全部变慢，而 agent 看起来只是"这一页有点慢"。
@@ -3537,8 +3681,25 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
       // 派生标签页跟**打开它的那一个**走：可见页里弹出来的照旧弹到人眼前
       // （浏览器惯例），后台页里弹出来的留在后台 —— agent 流程里登录/预览/
       // 下载这类弹窗极多，每弹一个就抢一次视野等于人没法用电脑。
+      //
+      // 归属也跟打开者走：agent 的页弹出来的子页仍然属于那个 agent，否则它会
+      // 悄悄跑到"人的标签页"里，下次人清理自己的标签就把 agent 的流程删了。
+      const parentGroup = self.groupOfTab(tabId);
+      // 弹窗把组撑满时不能拒绝（站点的脚本在等这个窗口），只能牺牲一页：
+      // 最久没用、不在人眼前、没有挂着对话框的那个。
+      if (!self.canOpenInGroup(parentGroup).allowed) {
+        const victim = self.pickEvictableInGroup(parentGroup, tabId);
+        if (victim !== null) {
+          const deadUrl = (self._getView(victim) || {}).webContents
+            ? self._getView(victim).webContents.getURL() : '';
+          self.evictions.push({ tab: victim, url: deadUrl, at: Date.now(), reason: 'group-full' });
+          if (self.evictions.length > 20) self.evictions.shift();
+          self.closeTab(victim);
+        }
+      }
       const childId = self.newTab(urlToOpen, {
         show: shouldShowChildTab({ openerIsVisible: tabId === self.activeTab }),
+        group: parentGroup,
       });
       // Track which source tab opened a new tab so `executeAction` can report the
       // resulting tab and auto-follow it. Generic (any target=_blank / window.open).
@@ -3600,6 +3761,8 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
       let signalReady = () => {};
       const ready = new Promise((resolve) => { signalReady = resolve; });
       this._windowOpenShimReady.set(tabId, ready);
+      // 占位页地址：proceed 要用它判断"这一页还在不在等我"。
+      const placeholderUrl = this._loadingPlaceholderUrl(targetUrl);
       let proceeded = false;
       const proceed = () => {
         if (proceeded) return;
@@ -3608,6 +3771,20 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
           // 失败也放行：宁可这个 tab 没有垫片，也不能把它卡在占位页。
           signalReady();
           if (targetUrl && wc0 && !wc0.isDestroyed()) {
+            // ⚠️ 延迟到达的 proceed **绝不能覆盖已经发生的真实导航**。
+            //
+            // 实测（2026-10-28，npm run background 在 v2.2.0 上同样复现）：
+            // 垫片安装偶尔会挂十几秒，这期间 agent 已经把这一页导航走了；
+            // 等它终于 resolve，下面这行 loadURL(启动页) 又把页面盖回去 ——
+            // 表现是"打开的是目标页，下一刻自己跳回首页"，读到的树也成了首页的。
+            // 判据只看一句：现在还在占位页上吗？不在就什么都不做。
+            // 判据要宽松：空 / about:blank 都还算"还没开始"，只有**明确导航
+            // 到别处**（另一个 http/file 地址）才放弃 —— 收紧成"必须等于占位页"
+            // 会在占位页刚发起、getURL() 还返回 about:blank 的那一瞬误判，
+            // 结果是新标签页永远停在占位页（wrapper 套件当场 red）。
+            const cur = wc0.getURL();
+            const stillMine = !cur || cur === 'about:blank' || cur === placeholderUrl;
+            if (!stillMine) return;
             // 让"正在加载"可被观测：白屏最贵的地方不是慢，是慢得无法和
             // "开错了"区分（见 listTabs 的 state 字段）。
             this._tabNavState.set(tabId, 'loading');
@@ -3636,7 +3813,7 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
       // loading.html 只做展示（目标地址 + 转圈），不发请求不跳转，真实导航
       // 仍由上面的 proceed 发起。无目标 URL 的占位 tab（window.open("") 的
       // 老站模式）保持 about:blank：它本来就要停在这里等 location 赋值。
-      wc0.loadURL(this._loadingPlaceholderUrl(targetUrl)).catch(() => {});
+      wc0.loadURL(placeholderUrl).catch(() => {});
       wc0.once('did-finish-load', () => { clearTimeout(guard); proceed(); });
     }
 
@@ -4353,6 +4530,7 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
       view.webContents.close();
     }
     this.tabs.delete(tabId);
+    this._forgetTab(tabId);
     // window.open 垫片记账：这个 tab 若是某次 window.open 的目标，token 已
     // 失去意义（nav 到达也只会在上面打一行 warn），清掉防止 Map 无限增长。
     for (const [token, entry] of this._windowOpenTokens) {
@@ -4442,11 +4620,20 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
   listTabs() {
     const list = [];
     for (const [id, view] of this.tabs) {
+      const gid = this.groupOfTab(id);
+      const g = this.groupMeta(gid);
       list.push({
         id,
         url: view.webContents.getURL(),
         title: view.webContents.getTitle(),
         active: id === this.activeTab,
+        // 归属：'human' = 人的页，'agent:<session>' = 某个 agent 的工作区。
+        // agent 靠它判断"这一页是不是我的"，人靠它在标签栏归拢。
+        group: gid,
+        group_label: g.label,
+        ...(g.color ? { group_color: g.color } : {}),
+        ...(g.capped === true && g.limit ? { group_limit: g.limit } : {}),
+        ...(g.kind === 'agent' ? { group_kind: 'agent' } : {}),
         // 'pending' = 停在占位页等脚本注入（真实导航还没发起）
         // 'loading' = 真实导航已发起、还没完成 —— 这时候页面多半还是空的，
         //             是"正在打开"而不是"开错了"，等它，不要重试

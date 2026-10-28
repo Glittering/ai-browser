@@ -61,6 +61,34 @@
   #new-tab:hover { background: #2a2a2a; color: #fff; }
   .tab-id { color: #555; font-size: 10px; margin-right: 4px; flex: none; }
 
+  /* ---- agent 分组 ----
+     一个 agent 的一组标签页折叠成一个 pill（带组色和页数），悬停展开。
+     为什么不做成"竖着掉下来的下拉菜单"：标签栏是一个固定高度（74px）的
+     BrowserView，往下弹会被自己裁掉；要能弹就得每次悬停都把标签栏长高、把页面
+     往下推 —— 那正是本项目历史上闪烁/几何脱节的来源（见 SPEC 的渲染三宗罪）。
+     就地展开没有这个代价：一行之内把这一组的标签摊开，鼠标移开自动收起。 */
+  .group-pill {
+    display: flex; align-items: center; gap: 6px; flex: none;
+    height: 36px; padding: 0 10px; cursor: pointer;
+    background: #232326; border-right: 1px solid #2a2a2a;
+    -webkit-app-region: no-drag; max-width: 190px;
+  }
+  .group-pill:hover { background: #2c2c30; }
+  .group-pill.open { background: #303036; }
+  .g-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .g-label {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-size: 11px; color: #9a9a9a; max-width: 110px;
+  }
+  .group-pill.open .g-label { color: #e8e8e8; }
+  .g-count {
+    font-size: 10px; color: #999; background: #333338;
+    border-radius: 8px; padding: 1px 5px; flex: none;
+  }
+  .g-count.full { color: #f0b46a; background: #3a2f1e; }
+  /* 组内的标签：左侧一条组色，一眼看出"这页是那个 agent 的" */
+  .tab.in-group { box-shadow: inset 3px 0 0 var(--g, #555); }
+
   /* ---- 第二行：工具栏（地址栏 + 导航按钮）---- */
   #toolbar {
     display: flex; align-items: center; gap: 6px;
@@ -119,6 +147,7 @@
   <span id="status"></span>
 </div>
 
+<script src="tab_bar_layout.js"></script>
 <script>
 // ipcRenderer 在 Electron 主窗口里才有。直接用浏览器/测试页打开本文件时
 // require 会抛错——以前这会让整个 <script> 中断，连布局和滚动监听都不生效
@@ -178,8 +207,12 @@ function shortName(name) {
   return s.length > 18 ? s.slice(0, 12) + '…' + s.slice(-5) : s;
 }
 
-let lastIds = '';      // 上次渲染的 tab id 序列 —— 只有它变了才重建 DOM
+let lastSig = '';        // 上次渲染的结构签名（标签 + 分组 + 展开态）
 let lastActiveId = null;
+// 分组折叠状态（哪些组展开、哪些被钉住）。判据在 tab_bar_layout.js —— 纯函数，
+// 由 tests/test_tab_bar_layout.js 钉住；这里只管画。
+let layoutState = TabBarLayout.empty();
+let currentActiveGroup = null;
 
 // 把指定 tab 滚进可视区（只在它确实在视区外时才动，避免无谓跳动）。
 // 用 getBoundingClientRect 而不是 offsetLeft：后者依赖 offsetParent，
@@ -192,41 +225,69 @@ function scrollTabIntoView(id) {
   else if (er.right > cr.right) tabsEl.scrollLeft += (er.right - cr.right) + 8;
 }
 
+// 服务端会给每个组配色；万一没给（老版本），按组 id 哈希出一个稳定颜色，
+// 至少保证同一组每次都是同一个色，而不是随机闪。
+const FALLBACK_COLORS = ['#7c6cf0', '#3fb6a8', '#e0a33e', '#e06c75', '#5aa9e6', '#c678dd'];
+function colorFor(id) {
+  if (!id) return '#666';
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+  return FALLBACK_COLORS[h % FALLBACK_COLORS.length];
+}
+
+/** 造一个标签元素。inGroup 时左侧带一条组色，表示"这页属于某个 agent"。 */
+function makeTabEl(tab, groupColor) {
+  const el = document.createElement('div');
+  el.className = 'tab' + (tab.active ? ' active' : '') + (groupColor ? ' in-group' : '');
+  el.dataset.id = tab.id;
+  if (groupColor) el.style.setProperty('--g', groupColor);
+  // 标题在 UI 上被截断到 30 字（标签宽度有限），完整标题 + 地址放 tooltip：
+  // 否则长标题站点的标签永远看不出是哪一篇（"【第 12 章】…"全一样）。
+  el.title = tabTooltip(tab);
+  el.innerHTML = '<span class="tab-id">[' + tab.id + ']</span>' +
+    '<span class="tab-title">' + escapeHtml((tab.title || tab.url || 'New Tab').slice(0, 30)) + '</span>' +
+    '<span class="tab-close" data-id="' + tab.id + '">&times;</span>';
+  return el;
+}
+
+/** 一个折叠组：组色圆点 + 名字 + 页数（满额时数字变暖色，提示该关了）。 */
+function makePillEl(item) {
+  const el = document.createElement('div');
+  el.className = 'group-pill' + (item.open ? ' open' : '');
+  el.dataset.group = item.id;   // 存**组 id**：颜色表与展开状态都以 id 为键
+  el.title = 'agent 的标签组：' + item.label + '\n悬停展开，点击钉住（' +
+    item.count + '/' + (item.limit || '∞') + '）';
+  el.innerHTML = '<span class="g-dot" style="background:' + (item.color || colorFor(item.id)) + '"></span>' +
+    '<span class="g-label">' + escapeHtml(item.label) + '</span>' +
+    '<span class="g-count' + (item.limit && item.count >= item.limit ? ' full' : '') + '">' + item.count + '</span>';
+  return el;
+}
+
 async function renderTabs() {
   try {
     const tabs = await invoke('tab:list');
-    const ids = tabs.map(function (t) { return t.id; }).join(',');
+    const view = TabBarLayout.build(tabs, layoutState);
+    layoutState = view.state;
+    currentActiveGroup = view.activeGroup;
 
-    if (ids !== lastIds) {
-      // 结构变了（增/删 tab）：重建 DOM，但必须保住横向滚动位置 ——
-      // 否则在右端关掉一个标签后视图会跳回最左，后面的标签又摸不着了。
+    const sig = TabBarLayout.signature(tabs, view.state) + '#' + view.activeGroup;
+    if (sig !== lastSig) {
+      // 结构变了（增/删 tab、分组变化、展开态变化）：重建 DOM，但必须保住
+      // 横向滚动位置 —— 否则在右端关掉一个标签后视图会跳回最左。
       const prevScroll = tabsEl.scrollLeft;
       tabsEl.innerHTML = '';
-      for (const tab of tabs) {
-        const el = document.createElement('div');
-        el.className = 'tab' + (tab.active ? ' active' : '');
-        el.dataset.id = tab.id;
-        // 标题在 UI 上被截断到 30 字（标签宽度有限），完整标题 + 地址放 tooltip：
-        // 否则长标题站点的标签永远看不出是哪一篇（"【第 12 章】…"全一样）。
-        el.title = tabTooltip(tab);
-        el.innerHTML = '<span class="tab-id">[' + tab.id + ']</span>' +
-          '<span class="tab-title">' + escapeHtml((tab.title || tab.url || 'New Tab').slice(0, 30)) + '</span>' +
-          '<span class="tab-close" data-id="' + tab.id + '">&times;</span>';
-        el.addEventListener('click', function (e) {
-          // 从 this.dataset 取 id，不用闭包里的 tab —— 增量更新时闭包会过期。
-          const id = parseInt(this.dataset.id);
-          if (e.target.classList.contains('tab-close')) send('tab:close', id);
-          else send('tab:activate', id);
-        });
-        tabsEl.appendChild(el);
+      for (const item of view.items) {
+        if (item.type === 'group') tabsEl.appendChild(makePillEl(item));
+        else tabsEl.appendChild(makeTabEl(item.tab, item.inGroup ? (item.color || colorFor(item.tab.group)) : null));
       }
-      lastIds = ids;
+      lastSig = sig;
       tabsEl.scrollLeft = prevScroll;
     } else {
       // 结构没变：只改标题和激活态。绝不重建 —— 这里每 1.5s 就跑一次，
       // 一旦重建，用户刚滚到的位置就被重置，标签一多就永远滚不回去。
-      for (let i = 0; i < tabs.length && i < tabsEl.children.length; i++) {
-        const t = tabs[i], el = tabsEl.children[i];
+      for (const t of tabs) {
+        const el = tabsEl.querySelector('.tab[data-id="' + t.id + '"]');
+        if (!el) continue;
         el.classList.toggle('active', !!t.active);
         const titleEl = el.querySelector('.tab-title');
         const title = (t.title || t.url || 'New Tab').slice(0, 30);
@@ -244,6 +305,38 @@ async function renderTabs() {
     if (activeId !== null) lastActiveId = activeId;
   } catch (e) { /* ipcRenderer 尚未就绪 */ }
 }
+
+// ---- 分组的交互（事件委托：标签是增量更新的，逐个挂监听重建后就会丢）----
+tabsEl.addEventListener('click', function (e) {
+  const pill = e.target.closest ? e.target.closest('.group-pill') : null;
+  if (pill) {
+    layoutState = TabBarLayout.toggle(layoutState, pill.dataset.group);
+    renderTabs();
+    return;
+  }
+  const el = e.target.closest ? e.target.closest('.tab') : null;
+  if (!el || !el.dataset.id) return;
+  const id = parseInt(el.dataset.id);
+  if (e.target.classList.contains('tab-close')) send('tab:close', id);
+  else send('tab:activate', id);
+});
+
+tabsEl.addEventListener('mouseover', function (e) {
+  const pill = e.target.closest ? e.target.closest('.group-pill') : null;
+  if (!pill) return;
+  const g = pill.dataset.group;
+  if (layoutState.expanded.indexOf(g) >= 0) return;  // 已展开：再重建会自己触发自己
+  layoutState = TabBarLayout.hover(layoutState, g);
+  renderTabs();
+});
+
+// 鼠标离开标签条：收起没被钉住、也不是"正在看的那一组"的组。
+tabsEl.addEventListener('mouseleave', function () {
+  const next = TabBarLayout.leave(layoutState, currentActiveGroup);
+  if (next.expanded.join(',') === layoutState.expanded.join(',')) return;
+  layoutState = next;
+  renderTabs();
+});
 
 // 横向滚动：鼠标滚轮是垂直的，标签栏要的是左右滚（浏览器惯例）。
 // overflow 改成 auto 只是"能滚"，没有这一条仍然只能拖滚动条/用触控板横扫。

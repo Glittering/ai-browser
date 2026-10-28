@@ -94,6 +94,40 @@ macOS 用户也可以直接用打包好的 `.dmg`（Release 里），不用装 N
 不同标签页之间完全并行。两个 agent 往同一个输入框里同时打字不做协调——值校验会如实报
 `input not verified`，而不是假装都写进去了。
 
+## 标签组：每个 agent 一块自己的地方
+
+目标按连接分了，但标签条上原本是一锅粥——看不出哪页是谁的，也没东西拦住 agent 开二十个页。
+现在按**归属**管：
+
+```
+group = 'human' | 'agent:<会话>'
+```
+
+agent 建连后自报家门（MCP 和 CLI 都会发 `ui.hello`）。此后它**第一次**要动页面、又还没有目标时，
+浏览器会开一页空白标签归到它自己的组里，并在结果里附一次提示：
+
+```json
+{"workspace": {"tab": 7, "group": "Claude", "created": true, "hint": "..."}}
+```
+
+于是 agent **永远不会**默认开在你正在看的那一页上。想看你的页面也便宜：`browse_tabs
+{"op":"list"}` 里 `group: "human"` 的那条，显式传 `tab` —— 读一下不会把它抢走。
+
+标签条上，你的标签页照旧平铺；每个 agent 组折叠成一个 pill（组色 + 名字 + 页数），悬停展开、
+点击钉住，正在看的那一组强制展开。**点开组里的页只是"你看"，不改 agent 的目标。**
+
+每个组有上限（默认 8，`AI_BROWSER_TAB_LIMIT` 可调）。超了是**拒绝**，不是"悄悄挤掉一页"，
+并且告诉你关哪个：
+
+```
+-32001 your tab group is full (8/8) — close one before opening another
+data: { reason: "group-full", limit: 8, tabs: [{tab, url}, ...] }
+```
+
+只有一种例外：页面自己弹的窗口（`window.open` / `target=_blank`）没法拒绝（站点脚本在等它），
+这时会关掉本组里"最久没用、不在人眼前、没有挂着对话框"的那一页，并在 `list` 的 `evicted`
+里告诉你。
+
 ## 后台运行（跟无头一样无感知）
 
 ```bash
