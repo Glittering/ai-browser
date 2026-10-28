@@ -43,6 +43,7 @@ import { MediaInline } from './media_inline.js';
 // 切到人眼前"的策略。见 shared/tab_route.cjs 顶部（多 agent 并用的三条事故）。
 import tabRoute, { shouldShowChildTab } from '../shared/tab_route.cjs';
 import tabGroup from '../shared/tab_group.cjs';
+import placeholder from '../shared/placeholder.cjs';
 import { probeCapabilities } from './capability_probe.js';
 import valueContract from '../shared/value_contract.cjs';
 // 输入成功与否的判定口径（纯函数，独立模块便于单测）。详见文件内注释：
@@ -878,15 +879,18 @@ class PageManager {
   showDownloadResult(tabId, rec) {
     const view = this.tabs.get(tabId);
     if (!view || view.webContents.isDestroyed()) return false;
-    const q = new URLSearchParams();
-    q.set('id', rec.id || '');
-    q.set('name', rec.filename || 'download');
-    q.set('path', rec.path || '');
-    q.set('mime', rec.mime || '');
-    q.set('size', String(rec.total_bytes || 0));
-    q.set('url', rec.url || '');
     const pagePath = path.join(__dirname, '../renderer/download.html');
-    const target = 'file://' + pagePath + '?' + q.toString();
+    // 一律走 shared/placeholder.cjs 的构造器：手拼 'file://' + path 在打包后
+    // （/Applications/AI Browser.app 含空格）加载不出来。
+    const target = placeholder.fileUrlWithQuery(pagePath, {
+      id: rec.id || '',
+      name: rec.filename || 'download',
+      path: rec.path || '',
+      mime: rec.mime || '',
+      size: String(rec.total_bytes || 0),
+      url: rec.url || '',
+    });
+    if (!target) return false;
     view.webContents.loadURL(target).catch(() => {});
     return true;
   }
@@ -3778,13 +3782,10 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
             // 等它终于 resolve，下面这行 loadURL(启动页) 又把页面盖回去 ——
             // 表现是"打开的是目标页，下一刻自己跳回首页"，读到的树也成了首页的。
             // 判据只看一句：现在还在占位页上吗？不在就什么都不做。
-            // 判据要宽松：空 / about:blank 都还算"还没开始"，只有**明确导航
-            // 到别处**（另一个 http/file 地址）才放弃 —— 收紧成"必须等于占位页"
-            // 会在占位页刚发起、getURL() 还返回 about:blank 的那一瞬误判，
-            // 结果是新标签页永远停在占位页（wrapper 套件当场 red）。
-            const cur = wc0.getURL();
-            const stillMine = !cur || cur === 'about:blank' || cur === placeholderUrl;
-            if (!stillMine) return;
+            // 注意判据在 shared/placeholder.cjs 里（按文件名，不按字符串相等）——
+            // 这里踩过两次：收紧成"必须等于占位页"会让新标签页永远卡住，
+            // 而字符串相等在打包路径含空格时恒为 false。
+            if (!placeholder.isPlaceholderUrl(wc0.getURL())) return;
             // 让"正在加载"可被观测：白屏最贵的地方不是慢，是慢得无法和
             // "开错了"区分（见 listTabs 的 state 字段）。
             this._tabNavState.set(tabId, 'loading');
@@ -3897,13 +3898,14 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
         pagePath = path.join(__dirname, '../renderer/error_page.html');
       } catch (_) { return; }
 
-      const q = new URLSearchParams({
+      const target = placeholder.fileUrlWithQuery(pagePath, {
         url: String(validatedURL || ''),
         code: String(errorCode),
         text: String(errorDescription || ''),
       });
       try {
-        view.webContents.loadURL('file://' + pagePath + '?' + q.toString());
+        if (!target) throw new Error('bad page path');
+        view.webContents.loadURL(target);
       } catch (e) {
         console.error('[page_manager] error page load failed:', e.message);
         this._failureGuard.delete(tabId);
@@ -5346,14 +5348,11 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
   // "正在打开 <url>"），无目标地址时保持 about:blank（window.open("") 的
   // 占位 tab 要停在这里等站点赋 location，不能显示成"正在打开"）。
   _loadingPlaceholderUrl(targetUrl) {
-    if (!targetUrl) return 'about:blank';
-    try {
-      const pagePath = path.join(__dirname, '../renderer/loading.html');
-      const q = new URLSearchParams({ url: String(targetUrl) });
-      return 'file://' + pagePath + '?' + q.toString();
-    } catch (_e) {
-      return 'about:blank';
-    }
+    // 用 pathToFileURL 而不是 'file://' + path：打包后的路径含空格
+    // （/Applications/AI Browser.app/...），手拼出来的 URL 与 Chromium 报回来的
+    // 一个是字面空格、一个是 %20，任何"字符串相等"的判据都会失效。详见
+    // shared/placeholder.cjs 顶部（v2.3.0 的事故）。
+    return placeholder.placeholderUrlFor(path.join(__dirname, '../renderer/loading.html'), targetUrl);
   }
 
   _ensureWindowOpenShim(tabId, view) {

@@ -199,6 +199,12 @@ async function main() {
       if (id) break;
       await sleep(250);
     }
+    if (!id) {
+      const lt = unwrap(await b.call('ui.list_tabs', {}).catch(() => null));
+      const me = (lt && lt.tabs || []).find((x) => x.id === tab);
+      console.log('[dbg] S3 没找到按钮：tab=' + tab + ' url=' + (me && me.url) + ' state=' + (me && me.state) +
+        ' tabs=' + JSON.stringify((lt && lt.tabs || []).map((x) => x.id + ':' + String(x.url).slice(-28))));
+    }
     check('S3 找到「删除评论」按钮', !!id, 'no clickable after 8s');
 
     const t0 = Date.now();
