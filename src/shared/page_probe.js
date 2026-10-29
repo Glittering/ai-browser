@@ -69,9 +69,11 @@ export const PAGE_PROBE_JS = `(function(){
     }catch(_e){}
     var n=0;
     try{ n=document.getElementsByTagName('*').length; }catch(_e){}
-    var cf=null;
-    try{ var fpFn=window.__aiCanvasFp; if(typeof fpFn==='function'){var v=fpFn(); if(v)cf=v.fp+':'+v.n+':'+v.frames;} }catch(_e){}
-    return {t:t.length,h:(h>>>0).toString(36),d:(dv||'').replace(/\\s+/g,'').length,n:n,u:String(location.href),c:cf};
+    var cf=null,cn=null;
+    try{ var fpFn=window.__aiCanvasFp; if(typeof fpFn==='function'){var v=fpFn(); if(v){cf=String(v.fp);cn=v.n;}} }catch(_e){}
+    var vis='';
+    try{ vis=String(document.visibilityState||''); }catch(_e){}
+    return {t:t.length,h:(h>>>0).toString(36),d:(dv||'').replace(/\\s+/g,'').length,n:n,u:String(location.href),c:cf,k:cn,v:vis};
   }catch(e){ return {__err:String((e&&e.message)||e)}; }
 })()`;
 
@@ -113,28 +115,55 @@ const HINT_CLICK =
   + 'expected inside an out-of-process iframe, this probe cannot see it — verify with '
   + 'get_tree/screenshot instead.';
 
-// DOM 一字未动、画布重绘了。这是 canvas 应用上"写入成功"的**常态**外观：图元不是
-// DOM 节点，画一笔只会让 <canvas> 重新绘制一次。措辞必须把"证据"与"可能只是动画"
-// 分开说 —— 这个信号本身分不清这两者，而分不清就不能让调用方当成铁证。
+// canvas 侧的证据分两种，措辞必须分开 —— 它们的下一步动作完全相反。
+//
+// 可归因（动作前 150ms 空闲窗口里指纹没动过）：这就是 canvas 应用上"写入成功"
+// 的**常态**外观，图元不是 DOM 节点，画一笔只会让 <canvas> 重绘一次。
+// 而调用方最容易犯的错恰恰是"为了确认再画一次"，于是画布上多了一个形状。
 const HINT_CANVAS =
-  'page_changed=true via canvas only: the DOM is byte-identical but the canvas draw sequence '
-  + 'changed, which is what a successful write looks like on a canvas-rendered surface (shapes '
-  + 'are not DOM nodes). Caveat: a page that repaints continuously (animation, live cursor, '
-  + 'clock) will also change this fingerprint without any action of yours — if you are unsure, '
-  + 'take two snapshots with no action in between; if the canvas fingerprint moves on its own, '
-  + 'treat it as unusable evidence and verify with ui.canvas_read or a page-provided export.';
+  'page_changed=true by canvas only: the DOM is byte-identical and the canvas draw sequence '
+  + 'changed — the normal shape of a successful write on a canvas surface (shapes are not DOM '
+  + 'nodes). Do NOT redo the action to "make sure": a second drag/paste duplicates the result. '
+  + 'Read content back via the route in ui.capabilities, not ui.canvas_read — full-frame '
+  + 'renderers (Excalidraw-class) log no fillText, so an empty texts[] does NOT mean empty canvas.';
+
+// 不可归因（空闲窗口里指纹自己在动）：这一页会自己重绘（时钟、光标、动画、直播）。
+// 此时"画布变了"什么都证明不了。把它算进 page_changed 尤其危险 —— 那会把
+// page_probe 最初要抓的那件事（点了没反应）重新变回**永远为真**。
+const HINT_CANVAS_NOISY =
+  'canvas signal unusable on this page: the canvas repainted during a 150ms idle window before '
+  + 'the action, so a canvas change cannot be attributed to your action. page_changed reflects '
+  + 'the DOM only here. Verify through the app\'s own state (ui.capabilities route) or by '
+  + 'comparing two screenshots.';
+
+// 画布变了、但**归因不了**：页面在空闲窗口里被后台节流冻住了（一次绘制都没有），
+// 于是既不能说是我的动作、也不能说不是。这时最容易被误读成"成功"，所以必须
+// 明说"别当成落地了"。
+const HINT_CANVAS_UNKNOWN =
+  'canvas changed, but attribution unknown: the page was hidden or throttled during the idle check, '
+  + 'so this repaint may be its own animation. Do NOT assume your action landed. Bring the page to '
+  + 'the front and check again, or verify through the app state route in ui.capabilities.';
+
+// 动作前用于标定"这一页画布会不会自己动"的空闲窗口。150ms 覆盖 60fps 下 9 帧，
+// 足够看出持续重绘；再长就会让 canvas 页上每次动作都多等一截。只在页面确实有
+// canvas 指纹时才等（见 page_manager.executeAction）。
+export const IDLE_WINDOW_MS = 150;
 
 /**
  * 比较前后两次探针。纯函数，无 Electron 依赖，可直接单测。
- * @returns {{changed: boolean|null, delta: object|null,
- *            domChanged: boolean, canvasChanged: boolean|null}}
- *          changed=null 表示数据不可比（某次探针失败），调用方应忽略而不是当成 false。
- *          canvasChanged=null 表示这一页没有 canvas 指纹（没装 hook / hook 关着），
- *          此时 changed 完全由 DOM 决定 —— 与加这个信号之前的行为逐字节一致。
+ *
+ * @param {object} opts.idleBaseline 动作前、早于 before 的一次采样。给了它才做
+ *        "这一页画布会不会自己动"的标定；不给就只按指纹差异下结论。
+ * @returns {{changed, delta, domChanged, canvasChanged, canvasIdle}}
+ *   canvasChanged: true=内容变了 / false=没变 / null=没有可用信号
+ *   （没装 hook、只有一侧有指纹、或**这一页自己在重绘**）
+ *   canvasIdle:    true=空闲期静止（变化可归因给动作）/ false=自己在动 / null=没标定
  */
-export function diffProbe(before, after) {
+export function diffProbe(before, after, opts = {}) {
   const ok = (p) => p && typeof p === 'object' && !p.__err && typeof p.h === 'string';
-  if (!ok(before) || !ok(after)) return { changed: null, delta: null, domChanged: false, canvasChanged: null };
+  if (!ok(before) || !ok(after)) {
+    return { changed: null, delta: null, domChanged: false, canvasChanged: null, canvasIdle: null };
+  }
   const delta = {
     text_chars: (Number(after.t) || 0) - (Number(before.t) || 0),
     dom_nodes: (Number(after.n) || 0) - (Number(before.n) || 0),
@@ -144,11 +173,58 @@ export function diffProbe(before, after) {
     || (Number(before.n) || 0) !== (Number(after.n) || 0)
     || (Number(before.d) || 0) !== (Number(after.d) || 0)
     || before.u !== after.u;
-  // 两边都有指纹才比较：只有一边有时（探针执行期间 hook 刚好装上/关掉）不能下结论。
+
+  // 只比**帧指纹本身**，绝不比它周围的计数器。
+  //
+  // 这里踩过一次，代价很大：接入时把探针字段写成 `fp:n:frames` 的拼接串，而 n 与
+  // frames 是单调递增的计数器 —— 于是"内容一模一样地重绘了一遍"（时钟、光标、
+  // ECharts 动画区间、canvas 视频）也会让字符串变化，page_changed 变成**永远为真**，
+  // 恰好把 page_probe 存在的意义（抓"点了没反应"）反过来废掉。
+  // hook 里的 fp 本来是对的（同内容 → 同 fp，有单测钉住），是接入层把它废掉了。
+  // 教训：**单测证明了 A，产品用的是 A 的包装 B** —— 两边各自都"对"，合起来是错的。
   const cb = typeof before.c === 'string' ? before.c : null;
   const ca = typeof after.c === 'string' ? after.c : null;
-  const canvasChanged = (cb && ca) ? cb !== ca : null;
-  return { changed: domChanged || canvasChanged === true, delta, domChanged, canvasChanged };
+  const raw = (cb && ca) ? cb !== ca : null;
+
+  // 空闲标定：判断"这一页会不会自己画"。
+  //
+  // 判据是**绘制计数**，不是指纹。这一点改过一次，方向是反的：
+  // 一开始用"空闲期两次采样指纹不同 = 自己在画"，那是拿一个受采样相位影响的量
+  // 去回答一个与相位无关的问题。同内容重绘的页面（60fps 画同一个画面）两次采样
+  // 有相当概率取到同一个前缀哈希，于是"自己在画"漏判，接着把页面自己的动画
+  // 算成我的功劳 —— 错在放行方向上，最不能接受的那一种。绘制计数单调递增，
+  // 空闲窗口里涨了就是画了，与相位无关。
+  //
+  // 三份采样分工：
+  //   idleBaseline → before   动作之前（150ms）。这里在画 = 页面自己会动。
+  //   before       → after    动作本身，这就是要观测的差值。
+  //   after        → post     动作之后。还在画 = 画面不会停下来。
+  //
+  // 只有"没画"这个结论需要**正证据**：空闲窗口里一次绘制都没有，也不一定是静止
+  // —— 后台标签页被 Chromium 把 rAF 降到约 1fps 甚至暂停，页面是真的冻住了，而
+  // 动作会把它唤醒。此时若判"可归因"，放行的恰好是页面自己的动画。所以隐藏页面
+  // 上给出 null（不可判），这是唯一诚实的答案。
+  let canvasIdle = null;
+  if (raw !== null) {
+    const ib = opts.idleBaseline;
+    const pb = opts.postBaseline;
+    const kBefore = Number(before.k) || 0;
+    const kAfter = Number(after.k) || 0;
+    if (ib && typeof ib.c === 'string') {
+      const drewIdle = kBefore - (Number(ib.k) || 0);
+      const postBusy = pb && typeof pb.c === 'string'
+        && (pb.c !== ca || (Number(pb.k) || 0) > kAfter);
+      if (postBusy || ib.c !== cb || drewIdle >= 2) {
+        canvasIdle = false;
+      } else if (String(before.v || '') === 'visible') {
+        canvasIdle = true;
+      } else {
+        canvasIdle = null;
+      }
+    }
+  }
+  const canvasChanged = (canvasIdle === false) ? null : raw;
+  return { changed: domChanged || canvasChanged === true, delta, domChanged, canvasChanged, canvasIdle };
 }
 
 /**
@@ -156,25 +232,43 @@ export function diffProbe(before, after) {
  *
  * 只在 changed === false 时附加 page_delta 和 effect_hint：
  * 正常路径（changed:true）不多说一个字，避免每步回执都多两行噪音。
- * 唯一的例外是"仅 canvas 变化"：那正是纯 canvas 应用上成功写入的样子，而调用方
- * 从 succcess:true 里看不出这一手到底落到了哪里，所以给一句 canvas_changed 说明。
+ * 例外是"仅 canvas 变化"（成功写入的样子，调用方看不出落点）与"canvas 自漂"
+ * （信号不可用，必须说清不是"没变化"）。
  */
-export function applyProbe(res, before, after, action) {
+export function applyProbe(res, before, after, action, opts = {}) {
   if (!res || typeof res !== 'object') return res;
-  const d = diffProbe(before, after);
+  const d = diffProbe(before, after, opts);
   if (d.changed === null) return res;
   const out = { ...res, page_changed: d.changed };
+
+  // canvas 字段**只在页面确实有 canvas 信号时**才出现，且出现就恒为三态之一。
+  // 曾经只在 true 时写，于是"没变"与"没装 hook"在回执里长得一模一样 ——
+  // 一个读不出含义的字段比没有这个字段更糟。没有 canvas 的页面继续不给字段，
+  // 与加这个信号之前逐字节一致。
+  const hasCanvas = d.canvasChanged !== null || d.canvasIdle !== null;
+  if (hasCanvas) {
+    out.canvas_changed = d.canvasChanged;
+    out.dom_changed = d.domChanged;
+    // canvas_idle **连同 null 一起发**。null 的含义是"标定不出来"（页面在后台被
+    // 节流、空闲期一次绘制都没有），而"省略这个字段"会被读成"这一页没有画布"。
+    // 两者的下一步动作相反：前者要另找验证手段，后者根本不用担心画布。
+    out.canvas_idle = d.canvasIdle;
+  }
+
   if (d.changed) {
-    if (d.canvasChanged === true && !d.domChanged) {
-      out.canvas_changed = true;
-      if (!out.effect_hint) out.effect_hint = HINT_CANVAS;
+    if (d.canvasChanged === true && !d.domChanged && !out.effect_hint) {
+      // 只有标定到"空闲期静止"才敢说这是成功写入的样子。标定不出来时
+      // （canvasIdle=null）同样的话会变成一句误导。
+      out.effect_hint = d.canvasIdle === true ? HINT_CANVAS : HINT_CANVAS_UNKNOWN;
     }
     return out;
   }
+
   out.page_delta = d.delta;
   const isWrite = MUST_HAVE_EFFECT.has(String(action || ''));
   if (!out.effect_hint) {
-    out.effect_hint = isWrite ? HINT_WRITE : HINT_CLICK;
+    // 自漂时不能说"payload 很可能没落地"——那等于用一个坏掉的观测手段下结论。
+    out.effect_hint = d.canvasIdle === false ? HINT_CANVAS_NOISY : (isWrite ? HINT_WRITE : HINT_CLICK);
   }
   // 写类动作 + 主文档零变化 = 内容很可能没落地。把 effect_state 从 committed
   // 降回 unknown，否则回执是自相矛盾的：success:true + effect_state:committed
@@ -189,4 +283,13 @@ export function applyProbe(res, before, after, action) {
   return out;
 }
 
-export default { PAGE_PROBE_JS, shouldProbe, settleMs, diffProbe, applyProbe };
+// 默认导出是**另一个对象**，不是命名空间本身。page_manager 用的是
+// `import pageProbe from ...`，于是这里少列一个名字，调用方拿到的就是 undefined
+// 而不会报错 —— IDLE_WINDOW_MS 就漏过一次：`setTimeout(r, undefined)` 等于 0ms，
+// "空闲标定"退化成"立刻再采一次"，两次采样的计数完全相同，页面被误判成静止，
+// 于是动画页上的"画布变了"被算成动作生效。症状在很远的地方（回执里 canvas_idle
+// 恒为 true），根因在这里。
+// 由 tests/test_page_probe.js 的 PP-30 逐键核对，不再靠人记得。
+export default {
+  PAGE_PROBE_JS, shouldProbe, settleMs, diffProbe, applyProbe, IDLE_WINDOW_MS,
+};

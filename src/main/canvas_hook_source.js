@@ -183,20 +183,45 @@ export function buildCanvasHookSource(opts = {}) {
     // ---- 帧指纹 ----------------------------------------------------------
     // 用途是**变化检测**，不是重建场景：一个纯 canvas 应用（Excalidraw / 白板 /
     // 数据网格）的写入在 DOM 上常常零字节变化，于是 page_probe 与 ui.diff 会
-    // 回答 unchanged —— 对"我真的画了一条线"这种事实给出假绿的反面（假阴性），
-    // 而这正是本工具唯一的赌注。
+    // 回答 unchanged —— 对"我真的画了一条线"这种事实给出假阴性，而这正是本工具
+    // 唯一的赌注。
     //
-    // 累积方式是"自上次清屏以来的**绘制序列**哈希"：
-    //   clear  → frames+1，fp 归零（一帧的边界通常就是清屏）
-    //   其它   → fp = fp*33 ^ hash(sig)，顺序敏感
-    // 于是"内容没变的一帧"得到同一个 fp，"多画了一个形状"得到不同的 fp。
-    // 连续同签名调用在下面会被合并成 repeat_count，但**指纹按合并后的 sig 算**，
-    // 所以 100 次相同填充与 1 次相同填充会得到不同的 fp —— 这是有意的：
-    // 重复次数本身就是"这一帧画了多少东西"的一部分。
+    // 只累积**会改变像素**的记录。meta（getContext / resize / transfer）与
+    // state（save / restore / translate）改的是上下文状态，不是像素；让它们进去，
+    // 等于"一个像素都没画也算变更" —— 实测 ECharts / 广告位 / 1x1 反爬 canvas
+    // 都是"每次 render 调一次 getContext 但可能什么都不画"，那是纯粹的假阳性源。
+    //
+    // 语义：fp = "自上次帧边界以来，绘制序列的哈希"。帧边界 = 整屏清屏或整屏铺底。
+    // 于是**同一段绘制序列得到同一个 fp**，多画一个形状就得到不同的 fp。
+    //
+    // 两条设计边界，都是踩过之后定下来的：
+    //
+    // 1. **不要把 n / frames 拼进被比较的值。** 它们单调递增，于是"内容逐字节
+    //    相同的重绘"（时钟、光标、动画循环、canvas 视频）也会让比较结果变化，
+    //    判定退化成"永远为真" —— 恰好把 page_probe 存在的意义（抓"点了没反应"）
+    //    反过来废掉。接入层曾经写成 fp:n:frames 的拼接串，就是这么坏的：
+    //    hook 里的 fp 有单测钉住是对的，产品用的是它的包装，两边各自都"对"，
+    //    合起来是错的。
+    //
+    // 2. **不要把"已完成的帧"缓存起来只暴露上一帧。** 试过，退回了：静态页面上
+    //    一次写入只产生**一帧**，而且那一帧要等到下次清屏才算"完成" —— 于是
+    //    用户刚画的那个矩形永远看不见，正好是本改动要修的那个缺陷。
+    //
+    // 代价是采样可能落在帧中间，读到一个"前缀哈希"。这个方向的错误是**安全的**：
+    // 同前缀 → 迄今画出的像素确实一样；不同前缀 → 报"变了"（假阳性），而假阳性
+    // 由 page_probe 的空闲标定兜住（见 page_probe.js 的 canvasIdle）。反过来
+    // 若为了消掉假阳性而做缓存/延迟提交，代价是引入假阴性，而假阴性没有任何兜底。
     try {
-      if (rec.k === "clear") { FP.frames++; FP.fp = 0; }
-      else FP.fp = ((FP.fp * 33) ^ hash32(sig)) >>> 0;
       FP.n++;
+      var fk = rec.k;
+      if (fk !== "meta" && fk !== "state") {
+        if (fk === "clear" || rec.fb === 1) {
+          FP.fp = 0;
+          FP.frames++;
+        } else {
+          FP.fp = ((FP.fp * 33) ^ hash32(sig)) >>> 0;
+        }
+      }
     } catch (e) {}
     if (mode !== "trace" && lastEntry && lastSig === sig) {
       lastEntry.n += 1;
@@ -311,10 +336,20 @@ export function buildCanvasHookSource(opts = {}) {
       b: rectBounds(m, x, y, w, h), st: styleOf(ctx)
     };
     // 全量 clear 等价于场景重置 → 新 epoch。
-    if (method === "clearRect" && st.w > 0 && st.h > 0 &&
-        x <= 0 && y <= 0 && (x + w) >= st.w && (y + h) >= st.h) {
+    var full = st.w > 0 && st.h > 0 &&
+        x <= 0 && y <= 0 && (x + w) >= st.w - 0.5 && (y + h) >= st.h - 0.5;
+    if (method === "clearRect" && full) {
       st.epoch += 1;
       rec.e = st.epoch;
+    } else if (method === "fillRect" && full) {
+      // 整屏填充 = 一帧的开始（fb = frame boundary）。
+      //
+      // 为什么需要这条：帧指纹在 clear 上归零，但**很多渲染器从不清屏**，直接用
+      // 背景色铺满整屏（本项目的测试夹具就是这样写的）。没有这条，fp 会从页面
+      // 打开起一直累积，变成"这个会话画过什么"的日志哈希 —— 它确实会变，但它
+      // 回答不了"现在这一帧和刚才那一帧是不是同一个"。有了这条，"整屏铺底 +
+      // 画内容"的渲染器也能得到逐帧可比的指纹。
+      rec.fb = 1;
     }
     push(rec);
   }
@@ -669,15 +704,23 @@ export function buildCanvasHookSource(opts = {}) {
   // 不可枚举，避免被页面自己的 for-in / Object.keys(window) 扫到；
   // recording=false 时返回 null（不是 0）—— "没在录"和"录了但什么都没画"
   // 是两件事，用 0 表示前者会让调用方以为画布是空的。
+  //
+  // configurable:false：这一条是给**被观测页面**设的门槛。属性可配置时，页面
+  // 在 hook 之后可以用一次 defineProperty 把它换成返回常量的函数，于是所有
+  // canvas 写入都被判成"没变化" —— 验证能力被被验证方单方面关掉。
+  // 代价是同一页面里重复注入会抛错，但 hook 本身有 __aiCanvasHook 幂等短路，
+  // 不会走到第二次定义。
+  var fpApi = function () {
+    if (!recording) return null;
+    return { n: FP.n, fp: FP.fp, frames: FP.frames, on: 1 };
+  };
   try {
     Object.defineProperty(G, "__aiCanvasFp", {
-      value: function () {
-        if (!recording) return null;
-        return { n: FP.n, fp: FP.fp, frames: FP.frames, on: 1 };
-      },
-      configurable: true, enumerable: false, writable: false,
+      value: fpApi, configurable: false, enumerable: false, writable: false,
     });
-  } catch (e) { try { G.__aiCanvasFp = function () { return recording ? { n: FP.n, fp: FP.fp, frames: FP.frames, on: 1 } : null; }; } catch (e2) {} }
+  } catch (e) {
+    try { G.__aiCanvasFp = fpApi; } catch (e2) {}
+  }
 
   try {
     if (typeof G.addEventListener === "function") {

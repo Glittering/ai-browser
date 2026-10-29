@@ -378,10 +378,7 @@ export const DEFAULT_SNAPSHOT_JS = `(function(){
         out.model = { global: p.k, kind: p.f.kind, count: p.f.count, fp: p.f.fp };
       }
     } catch (_) {}
-    try {
-      var cfp = window.__aiCanvasFp;
-      if (typeof cfp === 'function') { var cv = cfp(); if (cv) out.canvas = cv; }
-    } catch (_) {}
+    try { var cfp = window.__aiCanvasFp; if (typeof cfp === 'function') { var cv = cfp(); if (cv) out.canvas = cv.fp; } } catch (_) {}
     return out;
   } catch (e) {
     return { __error: String(e && e.message || e) };

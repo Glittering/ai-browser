@@ -503,7 +503,16 @@ const rich = flat.length >= 60 && roleSet.size >= 4 && actionable >= 10;
       preferred: false,
       why: `${totalCanvas} canvas element(s) (${topCanvas} top-level, ${frameCanvas} in frames) but only ${flat.length} semantic elements (${actionable} actionable) — do NOT keep trying coordinate gestures to hit canvas-drawn items; go find the app's data model instead`,
       evidence: { canvas_top: topCanvas, canvas_in_frames: frameCanvas, elements: flat.length, actionable },
-      how: 'ui.canvas list/read can still extract text drawn via fillText (no OCR), but that is a fallback, not a primary path',
+      // 这句曾经承诺 "ui.canvas list/read can still extract text drawn via fillText"。
+      // 实测（2026-10-29，Excalidraw）：2D canvas 也可以**一次 fillText 都没有** ——
+      // 整帧 clearRect + Path2D + 离屏合成，于是 texts[] 是空的。照着旧承诺去
+      // "读文本"的 agent 会得到空数组，然后判定"这个画布是空的"，而画布上其实
+      // 画满了图元。承诺要么给条件，要么不给。
+      how: 'ui.canvas_read lists draw calls; texts[] holds only strings drawn with fillText. '
+        + 'Full-frame repaint renderers (Excalidraw-class) log only clearRect/fillRect, so an '
+        + 'EMPTY texts[] does NOT mean an empty canvas. Canvas is write-verifiable (ui.act '
+        + 'canvas_changed / canvas_idle, ui.diff canvas); to READ content go to the L1 route or '
+        + 'the app\'s own export',
     });
   }
 

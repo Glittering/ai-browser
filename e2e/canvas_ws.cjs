@@ -95,11 +95,47 @@ const BOARD_PAGE = `<!doctype html><html><head><meta charset="utf-8">
 </script>
 </body></html>`;
 
+// 自漂 / 自重绘页：专门用来证伪"画布变了就是我的动作生效了"。
+//
+// mode=same  每帧整屏重绘**完全相同**的内容（相当于一个静止画面的动画循环，
+//            或 ECharts 在动画区间里的重复提交）。修复前它会让 page_changed
+//            永远为真：探针比的是 `fp:n:frames`，而 n/frames 单调递增。
+// mode=drift 每帧内容都不同（时钟指针 / 协作光标 / 进度条）。这类页面上画布
+//            变化**不可归因**，工具必须说"这个信号在这里不可用"，而不是硬报 changed。
+const ANIM_PAGE = (mode) => `<!doctype html><html><head><meta charset="utf-8">
+<title>Anim-${mode}</title>
+<style>html,body{margin:0;padding:0;overflow:hidden;background:#fff}canvas{display:block}</style>
+</head><body>
+<canvas id="cv" width="900" height="600"></canvas>
+<script>
+(function () {
+  var c = document.getElementById('cv'), x = c.getContext('2d'), t = 0;
+  var DRIFT = ${JSON.stringify(mode === 'drift')};
+  function frame() {
+    t++;
+    x.clearRect(0, 0, 900, 600);
+    x.fillStyle = '#ffffff'; x.fillRect(0, 0, 900, 600);
+    x.strokeStyle = '#000000'; x.lineWidth = 2;
+    // same: 坐标固定 → 每帧绘制序列逐字节相同；drift: 每帧都在挪
+    x.strokeRect(DRIFT ? (t * 7) % 800 : 100, 100, 60, 60);
+  }
+  // 用 setInterval 而不是 requestAnimationFrame：Chromium 对不可见标签页会**暂停
+  // rAF**（这和 backgroundThrottling 是两个机制，项目已经关掉了后者），于是后台
+  // 跑的时候这个"动画页"其实几乎静止 —— 那样测出来的是"没有噪声时我们没被带偏"，
+  // 而不是"有噪声时我们没被带偏"。夹具必须保证噪声真的存在，否则这一组断言
+  // 全是空转（2026-10-14 踩过一模一样的坑）。
+  setInterval(frame, 16);
+})();
+</script>
+</body></html>`;
+
 function startServer() {
   return new Promise((resolve) => {
     const server = http.createServer((req, res) => {
       res.setHeader("Content-Type", "text/html; charset=utf-8");
-      res.end(String(req.url || "").startsWith("/board") ? BOARD_PAGE : CANVAS_PAGE);
+      const u = String(req.url || "");
+      if (u.startsWith("/anim")) res.end(ANIM_PAGE(/drift/.test(u) ? 'drift' : 'same'));
+      else res.end(u.startsWith("/board") ? BOARD_PAGE : CANVAS_PAGE);
     });
     server.listen(0, "127.0.0.1", () => resolve(server));
   });
@@ -336,6 +372,99 @@ async function main() {
   const st = (still2 && still2.result) || {};
   check("CB-10 静止不动时 diff 判 unchanged（画布指纹不会自己漂）",
     st.changed === false, `verdict=${st.verdict} counts=${JSON.stringify(st.counts)}`);
+
+  check("CB-11 静态页的回执带 canvas_idle:true（标定真的跑了）",
+    dr.canvas_idle === true, JSON.stringify(dr.canvas_idle));
+
+  // ==========================================================================
+  // 9) 反面：画布自己在动的时候，工具必须闭嘴
+  //
+  // 这一组是红队评审逼出来的。第一版把探针字段写成 `fp:n:frames`，而 n/frames
+  // 单调递增 —— 于是"内容一模一样地重绘一遍"也会让 page_changed 为真，
+  // 恰好把 page_probe 的原始动机（抓"点了没反应"）反过来废掉。
+  // 三条断言分别钉住：同内容重绘不算变、自漂页不谎称变了、而自漂这件事本身
+  // 确实存在（最后一组阴性对照，证明不是我们把眼睛闭上了）。
+  // ==========================================================================
+  console.log("\n[画布自己在动时：不能谎称『我这一手生效了』]");
+  const sameTab = (await b.call("ui.new_tab", { url: HOST + "/anim?mode=same" }, 20000)).result.tab;
+  await sleep(2500);
+  const sameFp = await b.call("ui.evaluate", { js: "typeof window.__aiCanvasFp", tab: sameTab });
+  check("CB-12 同内容重绘页也装了 hook",
+    sameFp && sameFp.result && sameFp.result.value === "function",
+    JSON.stringify(sameFp && sameFp.result && sameFp.result.value));
+
+  // 前提：这一页必须**真的在重绘**，否则下面两条是空转（测的是"没噪声时没被带偏"）。
+  const sameN1 = await b.call("ui.evaluate", { js: "window.__aiCanvasFp().n", tab: sameTab });
+  await sleep(400);
+  const sameN2 = await b.call("ui.evaluate", { js: "window.__aiCanvasFp().n", tab: sameTab });
+  const sameAlive = (Number(sameN2.result.value) || 0) - (Number(sameN1.result.value) || 0) >= 3;
+  check("CB-12b 前提：同内容重绘页确实每帧在画",
+    sameAlive, `n ${sameN1.result.value} → ${sameN2.result.value}`);
+
+  // 这一条守的是 **hook 层**：内容一模一样地反复重绘，指纹必须收敛到一个有界集合。
+  // 判据用「取值集合有界」而不是「两次采样相等」—— 后者取决于采样落在帧内的什么
+  // 位置（一次 IPC 往返落在 16ms 帧的哪个阶段是随机的），写成那样就是偶发绿。
+  // 这里用硬上界：这一页每帧只画 3 条记录，所以前缀哈希最多 4 种（含"刚清屏还没画"
+  // 的 0）。
+  //
+  // ⚠️ 它**不**覆盖接入层（探针要不要把 n/frames 拼进被比较的值）。那一条由
+  // tests/test_canvas_fingerprint.js 的 CF-10/CF-11 **执行**真实的 PAGE_PROBE_JS /
+  // DEFAULT_SNAPSHOT_JS 来钉，并且已经回退验证过会转红。e2e 做不到：要判断接入层
+  // 有没有混计数器，只能看"两次采样是否相等"，而那又回到采样相位的运气上。
+  const sames = [];
+  for (let i = 0; i < 6; i++) {
+    const r = await b.call("ui.evaluate", { js: "window.__aiCanvasFp().fp", tab: sameTab });
+    sames.push(String((r && r.result && r.result.value)));
+    await sleep(50);
+  }
+  const distinct = new Set(sames).size;
+  check("CB-13 同内容重绘页上指纹只有一个有界取值集合（计数器没混进来）",
+    distinct <= 4, `distinct=${distinct} of 6 samples: ${sames.join(",")}`);
+
+  const samePress = await b.call("ui.act", {
+    action: "press", params: { key: "Escape" }, tab: sameTab,
+  }, 30000);
+  const spr = (samePress && samePress.result) || {};
+  check("CB-14 同内容重绘页上按 Esc（什么都不该发生）→ page_changed:false",
+    spr.page_changed === false,
+    `page_changed=${spr.page_changed} canvas_changed=${JSON.stringify(spr.canvas_changed)} ` +
+    `canvas_idle=${JSON.stringify(spr.canvas_idle)}`);
+  check("CB-15 该页被标定为「自己在画」→ canvas_changed:null，不谎称变了也不谎称没变",
+    spr.canvas_changed === null && spr.canvas_idle === false,
+    `canvas_changed=${JSON.stringify(spr.canvas_changed)} canvas_idle=${JSON.stringify(spr.canvas_idle)}`);
+
+  const driftTab = (await b.call("ui.new_tab", { url: HOST + "/anim?mode=drift" }, 20000)).result.tab;
+  await sleep(2500);
+  const driftN1 = await b.call("ui.evaluate", { js: "window.__aiCanvasFp().n", tab: driftTab });
+  await sleep(400);
+  const driftN2 = await b.call("ui.evaluate", { js: "window.__aiCanvasFp().n", tab: driftTab });
+  const driftAlive = (Number(driftN2.result.value) || 0) - (Number(driftN1.result.value) || 0) >= 3;
+  check("CB-16b 前提：自漂页确实每帧在画（否则 CB-17..19 是空转）",
+    driftAlive, `n ${driftN1.result.value} → ${driftN2.result.value}`);
+
+  const driftSnap = await b.call("ui.snapshot", { tab: driftTab, label: "drift-1" });
+  await sleep(500);
+  const driftDiff = await b.call("ui.diff", { snapshot: driftSnap.result.snapshot, tab: driftTab }, 40000);
+  // 阴性对照：这一页的画布**确实**每帧都在变。如果这条不成立，下面那条
+  // "canvas 信号不可用"就不是判定的功劳，而是我们根本没看见变化。
+  check("CB-16 自漂页 500ms 后 diff 确实报 changed（现象真实存在）",
+    driftDiff && driftDiff.result && driftDiff.result.changed === true,
+    `verdict=${driftDiff && driftDiff.result && driftDiff.result.verdict}`);
+
+  const driftPress = await b.call("ui.act", {
+    action: "press", params: { key: "Escape" }, tab: driftTab,
+  }, 30000);
+  const dpr = (driftPress && driftPress.result) || {};
+  // 前提不成立时记 SKIP 而不是 FAIL：这一页没有动画，"自漂能不能被识别"就无从谈起，
+  // 硬判红等于把环境问题算成产品缺陷（本项目为此专门立过规矩）。
+  const dcheck = (name, cond, detail) =>
+    driftAlive ? check(name, cond, detail) : note("SKIP(自漂页没在动) " + name);
+  dcheck("CB-17 自漂页上同样的动作 → canvas_idle:false（自漂被标定出来了）",
+    dpr.canvas_idle === false, JSON.stringify(dpr.canvas_idle));
+  dcheck("CB-18 自漂页上 canvas_changed 降为 null（不可归因就不下结论）",
+    dpr.canvas_changed === null, JSON.stringify(dpr.canvas_changed));
+  dcheck("CB-19 自漂页上 page_changed 不因画布自转而变成 true",
+    dpr.page_changed === false, `page_changed=${dpr.page_changed} hint=${String(dpr.effect_hint || "").slice(0, 80)}`);
 
   // 9) 总开关：AI_BROWSER_CANVAS_HOOK=0 时不注入。顺带钉住"指纹只能来自 hook"——
   //    否则 CB-1..CB-10 可能测的是一个与 hook 无关的东西。

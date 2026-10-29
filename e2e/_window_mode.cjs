@@ -26,7 +26,13 @@
 //            白屏诊断的观测口）—— 隐藏模式下没有"窗口显示"这件事，断言无从谈起。
 //
 // 临时想让某个套件显示窗口：AI_BROWSER_E2E_VISIBLE=1 npm run <suite>。
-const VISIBLE = new Set(['focus', 'flicker', 'layout', 'paint', 'nav']);
+// canvas 也在可见名单里，理由与上面几条同类：**它测的现象在后台不存在**。
+// CB-16..19 要验证"页面自己在做动画时，工具能不能识别出来、并且不谎称是我的动作"。
+// 而 Chromium 对不可见标签页把 requestAnimationFrame 降到 ~1fps 甚至暂停 —— 后台跑
+// 的时候那个动画页几乎是静止的，于是测出来的是"空环境里没有噪声"，不是"有噪声时
+// 我们没被带偏"（本项目 2026-10-14 踩过完全一样的坑：关掉噪声源后 41/41 全过）。
+// 可见模式走 showInactive：窗口出现但不夺焦点、不把用户当前 app 顶下去。
+const VISIBLE = new Set(['focus', 'flicker', 'layout', 'paint', 'nav', 'canvas']);
 
 const FORCE_VISIBLE = /^(1|true|yes|on)$/i.test(String(process.env.AI_BROWSER_E2E_VISIBLE || ''));
 // 反过来也留一个逃生口：想确认"隐藏下到底还差什么"时，强制全部隐藏。

@@ -1850,6 +1850,23 @@ class PageManager {
     // 动作前先拍一张。为什么拍在 withDeadline 外面：deadline 只应该盖住动作
     // 本身，探针有它自己的 1.5s 上限，混进同一个预算会让"动作超时"和
     // "探针慢"两种完全不同的故障共用一个错误码。
+    // canvas 页要先量一次"空闲时画布会不会自己动"。
+    //
+    // 光比帧指纹只挡掉了"同内容重绘"这一类假阳性，挡不住"每帧内容都不同"的页面
+    // （时钟指针、协作者光标、进度条、直播、ECharts 动画区间）。在动作**之前**
+    // 多采一次、隔 150ms 再采一次，就能看出这一页会不会自漂；会自漂时"画布变了"
+    // 不可归因给动作，探针据此把 canvasChanged 降为 null（page_probe.diffProbe）。
+    //
+    // 代价只在有 canvas 指纹的页面上发生（普通页面一次都不多等），因为这一层
+    // 存在的意义是**不把"点了没反应"变成永远为真**——那是 page_probe 的原始动机。
+    let idleBaseline = null;
+    if (pageProbe.shouldProbe(action)) {
+      const idleFirst = await this._pageProbe(tid, action);
+      if (idleFirst && typeof idleFirst.c === 'string') {
+        await new Promise((r) => setTimeout(r, pageProbe.IDLE_WINDOW_MS));
+        idleBaseline = idleFirst;
+      }
+    }
     const probeBefore = await this._pageProbe(tid, action);
     try {
       const res = await withDeadline(
@@ -1864,7 +1881,17 @@ class PageManager {
       if (probeBefore) {
         await new Promise((r) => setTimeout(r, pageProbe.settleMs(action)));
         const probeAfter = await this._pageProbe(tid, action);
-        out = pageProbe.applyProbe(out, probeBefore, probeAfter, action);
+        // 动作之后再采一次。画面在动作结束后还在自己变 → 这一页会自漂，画布的
+        // 变化不能归因给我的动作。为什么必须补这一刀：动作前的空闲窗口可能正好
+        // 落在页面被后台节流冻住的时刻（Chromium 对不可见标签页把 rAF 降到 ~1fps），
+        // 那时"空闲期没动"不代表"它不会动"，而动作本身会唤醒页面。
+        // 只有画布页付这 150ms；其它页面的 probeAfter.c 是 null，直接跳过。
+        let postBaseline = null;
+        if (probeAfter && typeof probeAfter.c === 'string') {
+          await new Promise((r) => setTimeout(r, pageProbe.IDLE_WINDOW_MS));
+          postBaseline = await this._pageProbe(tid, action);
+        }
+        out = pageProbe.applyProbe(out, probeBefore, probeAfter, action, { idleBaseline, postBaseline });
       }
       const dlg = this._dialogSince(tid, startedAt);
       if (dlg) out = { ...out, dialog: dlg };
