@@ -669,4 +669,4 @@ export function diffLite(prevLite, newLite) {
   return { revealed, hidden };
 }
 
-export default { normalizeAxTree, markAggregatedLabels, mergeFrameTrees, modalsFromAx, extractFromDebugger, axRead, axRaw, ensureHandles, attachHrefs, filterInteractive, liteSnapshot, diffLite, VERSION_TAG };
+export default { normalizeAxTree, markAggregatedLabels, mergeFrameTrees, modalsFromAx, extractFromDebugger, axRead, axRaw, ensureHandles, attachHrefs, filterInteractive, liteSnapshot, diffLite, VERSION_TAG, summarizeEditors };
