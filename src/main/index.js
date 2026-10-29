@@ -12,6 +12,7 @@ import { parseWatchdogTargets, isWatchdogEnabled } from '../shared/watchdog.js';
 import { wrapSetActive } from '../shared/tab_hooks.js';
 import { initErrorLog, recordError, markShutdown, getLogPath } from './error_log.js';
 import errorBanner from '../shared/error_banner.cjs';
+import { classifyShowReason, describeShowUrl } from '../shared/window_show.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -845,14 +846,26 @@ function showInitialWindow() {
     // "窗口在这一刻显示了、而页面是空的"这个事实本身也必须留下 —— 那正是要抓的
     // 白屏形态。若等 Promise 成功才记，renderer 起不来时记录永远是 null，
     // 观测口在最需要它的时候失灵。
+    // 那一刻 webContents 上到底是哪一页 —— 这决定了 show_reason 能不能说实话。
+    //
+    // 2026-10-24 起新标签页先加载 loading.html 占位页（把白屏换成"正在打开 <url>"），
+    // 而占位页**自己也会发 dom-ready**。于是"等到 dom-ready 才显示"这条承诺被它
+    // 架空了：记录里写着 dom-ready + waited_for_dom:true，而此刻页面是我们的占位页，
+    // 目标文档一个字节都没到（实测：外网不通时 body 恒为 578 字符）。
+    // 口径交给 shared/window_show.js 折算，那里有完整的来由与反例。
+    let curUrl = '';
+    try { curUrl = (wc && !wc.isDestroyed() && wc.getURL) ? String(wc.getURL() || '') : ''; } catch (_e) { curUrl = ''; }
+    const cls = classifyShowReason(reason, curUrl);
     const rec = {
       tab: pageManager.activeTab,
       body_len: null,
       ready_state: null,
-      // 'dom-ready' | 'fail-load' | 'renderer-ready' | 'timeout'
-      show_reason: reason || 'unknown',
-      // 真话：只有 3s 兜底（renderer 迟迟没到）才是 false。
-      waited_for_dom: reason !== 'timeout',
+      // 'dom-ready' | 'renderer-ready' | 'fail-load' | 'timeout' | 'placeholder'
+      show_reason: cls.show_reason,
+      // 真话：只有**目标文档**就绪才算等到了。占位页就绪不算（那是我们自己的页面）。
+      waited_for_dom: cls.waited_for_dom,
+      // 当时挂在 webContents 上的地址（占位页 URL 里带着目标地址，最有用的一半）。
+      show_url: describeShowUrl(curUrl),
       renderer_ready: false,
     };
     pageManager.windowShownAt = rec;

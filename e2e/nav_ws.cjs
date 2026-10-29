@@ -108,11 +108,12 @@ const check = (name, cond, detail) => {
 const note = (text) => console.log(`  NOTE | ${text}`);
 const defect = (sev, area, text) => DEFECTS.push({ sev, area, text });
 
-async function spawnElectron(port) {
+async function spawnElectron(port, extraEnv) {
   const electronPath = require("electron");
   const childEnv = { ...process.env, ...windowEnv('nav'), AI_BROWSER_PORT: String(port) };
   delete childEnv.ELECTRON_RUN_AS_NODE;
   if (!childEnv.AI_BROWSER_USER_DATA) childEnv.AI_BROWSER_USER_DATA = require('node:path').join(require('node:os').tmpdir(), `ai-browser-e2e-nav-${port}`);
+  Object.assign(childEnv, extraEnv || {});
   const child = spawn(electronPath, ["."], {
     cwd: ROOT, stdio: "ignore", detached: true, env: childEnv,
   });
@@ -217,18 +218,37 @@ async function main() {
     //
     // （`waited_for_dom` 曾经恒为 true，两种路径混成一种，这个区分根本做不出来。）
     const waitedForDom = !!(shown && shown.waited_for_dom !== false);
+    // 显示时还挂在**我们自己的占位页**上（loading.html）：这一条路径上"1.5s 内有内容"
+    // 不是承诺 —— 目标文档根本还没开始下载。判据降级到 NV-A4（最终会加载出内容），
+    // 并新增 NV-A5 明确断言"这种时刻必须记成 placeholder"。
+    const onPlaceholder = !!(shown && shown.show_reason === 'placeholder');
     if (waitedForDom) {
       check("NV-A3 窗口显示后极短时间内页面已有内容（不是白屏）",
         !!(shownDom && shownDom.body > 1000),
         `显示记录=${JSON.stringify(shown)} 之后 1.5s 内 body=${shownDom && shownDom.body}`);
+    } else if (onPlaceholder) {
+      note(`NV-A3 本次显示时还停在占位页（show_reason=placeholder, show_url=${String(shown.show_url || '').slice(0, 80)}）`
+        + ` —— 目标文档尚未就绪，"1.5s 内有内容"在这里不是承诺，判据降级到 NV-A4。`
+        + ` 1.5s 内 body=${shownDom && shownDom.body}`);
     } else {
       note(`NV-A3 本次显示走了 3s 兜底（show_reason=${shown && shown.show_reason}），`
         + `dom-ready 未在窗口内到达 —— 判据降级到 NV-A4，不做"1.5s 内有内容"的断言。`
         + ` 1.5s 内 body=${shownDom && shownDom.body}`);
     }
-    check("NV-A3b 显示原因如实记录（waited_for_dom 不是恒 true 的摆设）",
-      !!shown && typeof shown.show_reason === "string" && typeof shown.waited_for_dom === "boolean"
-      && (shown.waited_for_dom === (shown.show_reason !== "timeout")),
+    // 判据写成**显式枚举**而不是"!= timeout"（排除法只认得它排除过的那个值）。
+    //
+    // ⚠️ 但要说清楚这条**管不到什么**：它只检查记录内部是否自洽，管不到"那一刻
+    // 页面到底是谁"。占位页撒谎的形态是 {dom-ready, true} —— 完全满足这条规则。
+    // 回退验证也确认了：把实现改回老逻辑，NV-A3b **照绿**，只有 NV-A5 转红。
+    // 真正的守卫是 NV-A5（慢起始页必须记 placeholder）与单测 WD-01..08。
+    //
+    // 这里刻意**不 import** src/shared/window_show.js 的常量：判据要和实现各写一遍，
+    // 两边同时写错才不会一起变绿（本项目在 CTX-021 上踩过"两条实现互证"的坑）。
+    const READY_REASONS = ["dom-ready", "renderer-ready"];
+    const KNOWN = ["dom-ready", "renderer-ready", "fail-load", "timeout", "placeholder", "unknown"];
+    check("NV-A3b show_reason 落在枚举内，且只有真的等到了目标页才报 waited_for_dom",
+      !!shown && KNOWN.includes(shown.show_reason) && typeof shown.waited_for_dom === "boolean"
+      && shown.waited_for_dom === READY_REASONS.includes(shown.show_reason),
       JSON.stringify(shown && { r: shown.show_reason, w: shown.waited_for_dom }));
     note("window_shown：" + JSON.stringify(shown));
     // 再等一会儿确认内容完整（与上面"显示时刻"是两个判据：一个管时序，一个管内容）
@@ -241,6 +261,54 @@ async function main() {
     check("NV-A4 默认页最终完整加载（内容在）",
       !!(startDom && startDom.body > 1000),
       `body=${startDom && startDom.body} title=${JSON.stringify(startDom && startDom.title)}`);
+
+    // =====================================================================
+    console.log("\n[NV-A5 显示时还停在占位页 —— 必须如实记 placeholder]");
+    // =====================================================================
+    // 这是上一条判据的**阳性对照**：把起始页换成一个 2s 才响应的地址，窗口一定
+    // 在占位页（loading.html）阶段就显示了。此时记录必须写 placeholder +
+    // waited_for_dom:false —— 修复前这里报的是 dom-ready/true，因为占位页**自己**
+    // 会发 dom-ready。区别不在显示时机（那是 2026-10-24 的 UX 决定），只在这条
+    // 记录会不会把"我们自己的空壳"说成"等到了页面"。
+    const slowPort = WS_PORT + 1;
+    if (await harness.waitPortFree(slowPort, 10000)) {
+      const slowChild = await spawnElectron(slowPort, { AI_BROWSER_START_URL: HOST + "/slow" });
+      const b2 = new Browser(slowPort);
+      try {
+        await b2.ready();
+        await harness.assertIdentity(b2, slowChild, "nav-slow");
+        let slowShown = null;
+        for (let i = 0; i < 24 && !slowShown; i++) {
+          await sleep(250);
+          const r = await b2.call("ui.window_shown", {});
+          slowShown = (r.result || {}).shown || null;
+        }
+        check("NV-A5 起始页未就绪就显示 → show_reason=placeholder 且 waited_for_dom:false",
+          !!slowShown && slowShown.show_reason === "placeholder" && slowShown.waited_for_dom === false,
+          JSON.stringify(slowShown && { r: slowShown.show_reason, w: slowShown.waited_for_dom }));
+        check("NV-A5b 记录里带上当时那一页的地址（能看出是占位页、目标是谁）",
+          !!slowShown && /loading\.html/.test(String(slowShown.show_url || ""))
+          && /slow/.test(String(slowShown.show_url || "")),
+          String(slowShown && slowShown.show_url).slice(0, 120));
+        // 记账变严不能换来"页面进不去"：占位页之后真实导航必须照常完成。
+        // 慢页本身很小（body 只有一行 <h1>），判据用标题而不是 body 长度 ——
+        // 拿 200 字符卡它等于在测夹具大小，不是测"导航有没有走完"。
+        const slowTab = ((await b2.call("ui.list_tabs", {})).result.tabs || [])[0].id;
+        let slowDom = null;
+        for (let i = 0; i < 24; i++) {
+          await sleep(500);
+          slowDom = await readDom(b2, slowTab);
+          if (slowDom && /慢页/.test(String(slowDom.title || ""))) break;
+        }
+        check("NV-A5c 占位页之后真实页面照常加载（记账变严不影响导航）",
+          !!(slowDom && /慢页/.test(String(slowDom.title || ""))),
+          `title=${JSON.stringify(slowDom && slowDom.title)} href=${String(slowDom && slowDom.href).slice(0, 80)}`);
+      } finally {
+        try { b2.close(); } catch (_e) {}
+      }
+    } else {
+      note("SKIP NV-A5：端口 " + slowPort + " 一直被占用，跳过第二实例的用例");
+    }
 
     // =====================================================================
     console.log("\n[NV-B 根因 A：导航失败必须给错误页，不能白屏]");
