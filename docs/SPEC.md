@@ -342,6 +342,33 @@ window.devicePixelRatio ∈ {1,2}
 - `ui.server_info` 回执带 `render_path: {gpu, reason}`（`default` / `env` / `fallback`）——
   排查绘制类问题时，第一件事就是确认跑在哪条路上。
 
+### 应用图标：两条渲染路径必须同尺寸
+
+macOS 26 起，系统给 bundle 里的 icns 套了一层统一图标网格：内容缩到约 **86.7%**
+再套 squircle。而 `app.dock.setIcon()` 拿到的是裸 `NSImage`，**不套**这层网格 ——
+直接塞满出血的图，Dock 里就比旁边所有图标大一圈。
+
+结果是同一个应用出现两个尺寸：从 `/Applications` 启动（bundle icns）正常，`npm start`
+启动（`dock.setIcon`）偏大 16%。用户看到的正是"图标一会大一会小"。
+
+现在的约定：
+
+| 产物 | 用途 | 内容占比 |
+|---|---|---|
+| `build/icon.svg` | 母版 | — |
+| `build/icon.png`（1024，满出血） | icns 的源、Windows/Linux 窗口图标 | 100% |
+| `build/icon-dock.png`（1024） | `dock.setIcon` 专用，预先按网格缩好 | 86.7% ±1.5% |
+
+`npm run icons` 重建整条链；`npm run icon:check` 量这三个数字（`tests/test_icon_geometry.js`
+同口径钉住）。`ui.server_info` 带 `icon: {source, file, content_ratio}` —— `source` 是
+`bundle`（打包版，用 Info.plist）还是 `dock.setIcon`（源码启动），`content_ratio` 是
+实际设进去那张图的实测占比。两个数字对不上，就是又跑偏了，不用靠肉眼比。
+
+打包侧另有两个约束：`Resources` 里**只留一份 icns**（packager 自己拷的
+`electron.icns` 要删掉，否则 IconServices 建出重复表示）；构建目录里的 `.app` 打包后
+从 LaunchServices 注销，安装脚本的旧版备份用 `.app.bak` 结尾 —— 同一个 bundle id
+在 LS 里留多份记录时，Dock / Finder 可能解析到旧的那份图标。
+
 ## 帧级回归（`npm run flicker`）
 
 白屏有判据、几何有等式，但"闪一下"这两类**只有在窗口像素里才存在**：DOM 正常、
@@ -454,6 +481,10 @@ CLI 发 `auto_workspace:false` —— 人坐在终端前敲命令时，"不传 t
 "静默挤掉一页"：挤掉是破坏性的（agent 可能正在那一页跑流程），而拒绝是一次必须做的决定 ——
 这正是上限存在的理由（后台运行时没人看得见它的标签页，不设限就会开到内存告急）。回执带
 `data.reason='group-full'`、`limit`、以及可关闭清单 `data.tabs`。
+
+MCP 层（`src/main/mcp_server.js` 的 tool handler）必须把这个执行期失败翻译成**工具结果**
+形式（`isError: true` + `Error: <message>`），不能让它逃成 JSON-RPC error —— 否则 agent
+收不到"请关掉一个"的提示，目录审核 / 客户端实际调用都把它当成 protocol failure 处理。
 
 页面自己弹的窗口（`window.open` / `target=_blank`）**不能拒绝**（站点脚本在等它），
 只能牺牲：本组里"最久没用、不在人眼前、没有挂着对话框"的那一页，并记进
@@ -705,6 +736,15 @@ sheet**，因此它既不在语义树里，也不受页面点击控制；**而�
   —— 排查时唯一能看到的是"卡在某一步"，而真正的原因（连上了正在退出的实例）被吞掉了。
   新建套件必须同时加进 `e2e/run_all.cjs` 的 `SUITES` —— 加了但没进全量等于没加
   （`dialog`/`wrapper`/`paint`/`layout` 就这样在 v2.1.16–v2.1.19 期间从没被跑过）。
+- **跑测试不许抢用户的电脑**（2026-10-28 修）：所有套件必须经 `e2e/_window_mode.cjs`
+  的 `windowEnv(suite)` 取窗口策略 —— 默认 `AI_BROWSER_START_HIDDEN=1`，进程起来但
+  **不出窗口**（读树/点击/输入/截图/导航全部照常，`background` 套件 37 条钉住）。
+  只有 `focus` / `flicker` / `layout` / `paint` 四档可见，且走 `showInactive`
+  （窗口出现但**不夺焦点**）—— 这四个套件测的正是"看得见/几何/白屏"，隐藏就没得测。
+  以前 27 处 spawn 没一处设策略，`showInitialWindow` 里 `byAgent=false` →
+  `show()` → 每跑一个套件就把窗口拍在用户脸上（跑一次全量 = 22 次）。
+  `tests/test_e2e_window_mode.js` 的 WM-5 扫全目录，漏掉任何一个 spawn 都会红。
+  想临时看窗口：`AI_BROWSER_E2E_VISIBLE=1 npm run <suite>`。
 - `ui.wait` 的 `target` 先按元素 id 精确匹配、再退化为 label 子串匹配；
   新增动作或角色时必须同步核对执行器里真有对应 case（`audit` 套件逐条验）。
 - 测量类断言必须先验前提：锁屏时前台恒为 `loginwindow`，会造成假绿/假红；

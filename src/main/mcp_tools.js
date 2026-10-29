@@ -17,7 +17,7 @@ export const MCP_TOOLS = [
       type: 'object',
       properties: {
         url: { type: 'string', description: 'URL to navigate to.' },
-        tab: { type: 'integer', description: 'Tab id (default: active tab).' },
+        tab: { type: 'integer', description: 'Tab id; omit → session default.' },
         wait_until: { type: 'string', enum: ['commit', 'domcontentloaded', 'load'], description: 'How far to wait. commit = navigation committed (fastest, content may not be painted); domcontentloaded = DOM ready (default, safe for SPAs); load = also subresources (can hang forever on pages that never fire load).' }
       },
       required: ['url']
@@ -35,7 +35,7 @@ export const MCP_TOOLS = [
         ax: { type: 'boolean', description: 'Use the AX read layer (links carry url).', default: false },
         subset: { type: 'string', enum: ['interactive', 'full'], description: 'Prune layout-only branches (token saver).' },
         mode: { type: 'string', enum: ['diff', 'full'], description: 'Return only new/hidden interactive nodes since last read.' },
-        tab: { type: 'integer', description: 'Tab id (default: active tab).' }
+        tab: { type: 'integer', description: 'Tab id; omit → session default.' }
       }
     }
   },
@@ -117,7 +117,7 @@ export const MCP_TOOLS = [
             button: { type: 'string', enum: ['left', 'middle', 'right'], description: 'Canvas apps pan on middle/right drag.' }
           }
         },
-        tab: { type: 'integer', description: 'Tab id (default: active tab).' }
+        tab: { type: 'integer', description: 'Tab id; omit → session default.' }
       },
       required: ['action']
     }
@@ -131,7 +131,7 @@ export const MCP_TOOLS = [
       type: 'object',
       properties: {
         js: { type: 'string', description: 'Page-context JS expression (not statements). Max 5000 chars. Promises are awaited.' },
-        tab: { type: 'integer', description: 'Tab id (default: active tab).' },
+        tab: { type: 'integer', description: 'Tab id; omit → session default.' },
         frame_ref: { type: 'string', description: 'Run inside this cross-process frame (an axf-... id from the tree). Pass it explicitly when touching iframe content: building the selector by string concatenation defeats the automatic route and the top-frame run returns null.' }
       },
       required: ['js']
@@ -148,7 +148,7 @@ export const MCP_TOOLS = [
         direction: { type: 'string', enum: ['up', 'down'], default: 'down' },
         amount: { type: 'integer', default: 500, description: 'Pixels (ignored if target set).' },
         target: { type: 'string', description: 'data-ai-id to scroll into view.' },
-        tab: { type: 'integer', description: 'Tab id (default: active tab).' }
+        tab: { type: 'integer', description: 'Tab id; omit → session default.' }
       }
     }
   },
@@ -164,7 +164,7 @@ export const MCP_TOOLS = [
         target: { type: 'string', description: 'Button label (button_enabled).' },
         text: { type: 'string', description: 'Text/URL fragment (text_contains / url_contains).' },
         timeout_ms: { type: 'integer', default: 10000 },
-        tab: { type: 'integer', description: 'Tab id (default: active tab).' }
+        tab: { type: 'integer', description: 'Tab id; omit → session default.' }
       },
       required: ['condition']
     }
@@ -177,7 +177,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        tab: { type: 'integer', description: 'Tab id (default: active tab).' }
+        tab: { type: 'integer', description: 'Tab id; omit → session default.' }
       }
     }
   },
@@ -189,7 +189,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        tab: { type: 'integer', description: 'Tab id (default: active tab).' },
+        tab: { type: 'integer', description: 'Tab id; omit → session default.' },
         format: { type: 'string', enum: ['png', 'jpeg', 'webp'], description: 'Image format. Default png. jpeg at quality 85 is ~5x smaller — prefer it for long pages.' },
         quality: { type: 'number', description: '0-100, jpeg/webp only (ignored for png). Default 85 for jpeg.' },
         fullPage: { type: 'boolean', description: 'Capture the full scrollable page, not just the viewport. Cannot be combined with clip.' },
@@ -210,7 +210,7 @@ export const MCP_TOOLS = [
   {
     name: 'browse_tabs',
     title: 'Tabs',
-    description: 'Tabs: list/new/close/switch/window. Yours are grouped and capped (list: count/limit). Full → close one. switch = default target. new never steals the view unless show:true. window = hide/show.',
+    description: 'Tabs: list/new/close/switch/window. Yours are grouped and capped. switch = default; add show:true. new never steals the view unless show:true. window = hide/show.',
     // 合并前是 4 个工具（list / new / close / set_active），每个只承载一个动词。
     // 合并后 destructiveHint 只能是 false —— 否则 op=list 也会被标成破坏性操作；
     // close 的破坏性写在 description 里。这是合并的唯一语义代价，接受。
@@ -218,10 +218,10 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        op: { type: 'string', enum: ['list', 'new', 'close', 'switch', 'window'], description: 'list = every tab; switch = set default; window = hide/show.' },
-        tab: { type: 'integer', description: 'close / switch: the target tab id.' },
+        op: { type: 'string', enum: ['list', 'new', 'close', 'switch', 'window'], description: 'list = every tab; new = open; close = close; switch = default; window = hide/show.' },
+        tab: { type: 'integer', description: 'close / switch: the target tab id; omit → session default.' },
         url: { type: 'string', description: 'new: open at this URL (default about:blank).' },
-        show: { type: 'boolean', description: 'new: bring it to the front (default: background).' },
+        show: { type: 'boolean', description: 'new: bring it to the front (default: background); switch: same (default: false).' },
         visible: { type: 'boolean', description: 'window: true = show, false = hide.' }
       },
       required: ['op']
@@ -281,7 +281,7 @@ export const MCP_TOOLS = [
             capture_bodies: { type: 'string', enum: ['none', 'api', 'all'] }
           }
         },
-        tab: { type: 'integer', description: 'Tab id (default: active tab).' }
+        tab: { type: 'integer', description: 'Tab id; omit → session default.' }
       },
       required: ['operation']
     }
@@ -295,7 +295,7 @@ export const MCP_TOOLS = [
       type: 'object',
       properties: {
         operation: { type: 'string', enum: ['list', 'read', 'configure', 'capture'], description: 'Operation.' },
-        tab: { type: 'integer', description: 'Tab id (default: active tab).' },
+        tab: { type: 'integer', description: 'Tab id; omit → session default.' },
         canvas_id: { type: 'string', description: 'read/capture: id from list.' },
         view: { type: 'string', enum: ['summary', 'calls'], description: 'read: summary (default) or raw draw calls.' },
         since_seq: { type: 'integer', description: 'read: cursor from pagination.next_seq.' },
@@ -320,7 +320,7 @@ export const MCP_TOOLS = [
         snapshot: { type: 'string', description: 'diff: the id returned by snapshot.' },
         rearm: { type: 'boolean', description: 'diff: make the current state the new baseline, so you can loop "assert no change" over many steps.' },
         forget: { type: 'boolean', description: 'diff: drop the stored baseline when done.' },
-        tab: { type: 'integer', description: 'Tab id (default: active tab).' }
+        tab: { type: 'integer', description: 'Tab id; omit → session default.' }
       },
       required: ['operation']
     }
@@ -335,7 +335,7 @@ export const MCP_TOOLS = [
       properties: {
         include_network: { type: 'boolean', description: 'Include observed JSON-ish endpoints (default true).' },
         network_limit: { type: 'integer', description: 'How many captured requests to scan.' },
-        tab: { type: 'integer', description: 'Tab id (default: active tab).' }
+        tab: { type: 'integer', description: 'Tab id; omit → session default.' }
       }
     }
   },
@@ -347,7 +347,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        tab: { type: 'integer', description: 'Tab id (default: active tab).' }
+        tab: { type: 'integer', description: 'Tab id; omit → session default.' }
       }
     }
   },
@@ -359,7 +359,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        tab: { type: 'integer', description: 'Tab ID (defaults to the active tab).' },
+        tab: { type: 'integer', description: 'Tab id; omit → session default.' },
       },
     },
   },

@@ -5,6 +5,7 @@
 //   node e2e/e2e_realsites.cjs            # 矩阵 + 全部专项
 //   node e2e/e2e_realsites.cjs --flow zhihu|baidu|tabs|github   # 仅矩阵 + 指定专项
 //   node e2e/e2e_realsites.cjs --runs 2   # 双跑（质量门）
+const { windowEnv } = require('./_window_mode.cjs');
 const path = require('node:path');
 const net = require('node:net');
 const { spawn } = require('node:child_process');
@@ -47,7 +48,7 @@ async function ensureElectron() {
   console.log('port ' + WS_PORT + ' 未监听 — spawn Electron');
   const electronPath = require('electron');
 const guard = require('./_spawn_guard.cjs');
-  const childEnv = { ...process.env, AI_BROWSER_PORT: String(WS_PORT) };
+  const childEnv = { ...process.env, ...windowEnv('e2e_realsites'), AI_BROWSER_PORT: String(WS_PORT) };
   // ELECTRON_RUN_AS_NODE 会让 Electron 以纯 Node 模式启动（不起窗口、不监听 WS）。
   delete childEnv.ELECTRON_RUN_AS_NODE;
   const child = spawn(electronPath, ['.'], { cwd: ROOT, detached: true, stdio: 'ignore', env: childEnv });

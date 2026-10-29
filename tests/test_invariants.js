@@ -203,4 +203,18 @@ describe('不变量 6：MCP 协议面在目录扫描器面前必须完整', () =
   it('evaluate 守卫拒绝必须以 isError 工具结果返回，而不是抛出 -32603', () => {
     expect(mcpSrc).toMatch(/isError:\s*true/);
   });
+
+  it(`${MCP_SERVER_JS} 的 browse_tabs switch 必须把 show 透传给 set_active_tab（Bug 2）`, () => {
+    // Bug 2 修复：agent 说“切到这个标签页”可能还要看（show:true），
+    // MCP handler 不得再硬编码 show:false，否则文档化用法与实现悖违。
+    expect(mcpSrc).toMatch(
+      /if \(op === 'switch'\)[\s\S]*?set_active_tab[\s\S]*?show:\s*args\.show === true/
+    );
+  });
+
+  it(`${MCP_SERVER_JS} 的 browse_tabs switch 不得再硬编码 show:false`, () => {
+    // 2026-10-28 修 Bug 2 前，switch handler 写死 `show: false` ——
+    // 等于把“让 agent 也把页面顶到人眼前”这条合法路径删掉了。
+    expect(mcpSrc).not.toContain(`ui.set_active_tab', { tab: args.tab, show: false }`);
+  });
 });

@@ -23,6 +23,7 @@
 // 依赖：ffmpeg + 带 Quartz/PIL 的 python3（缺了就 SKIP，不误报红）。
 // Run: npm run flicker
 
+const { windowEnv } = require('./_window_mode.cjs');
 const harness = require('./_harness.cjs');
 const http = require('node:http');
 const fs = require('node:fs');
@@ -104,6 +105,7 @@ async function spawnApp(port) {
   const electronPath = require('electron');
   const childEnv = {
     ...process.env,
+    ...windowEnv('flicker'),
     AI_BROWSER_PORT: String(port),
     AI_BROWSER_WATCHDOG: '0',
     // 让窗口自己浮到前台（我们的 focus 策略里 always 会 show/moveTop/focus）——

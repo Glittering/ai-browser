@@ -18,6 +18,7 @@
 //
 // Run: npm run multiagent
 
+const { windowEnv } = require('./_window_mode.cjs');
 const harness = require('./_harness.cjs');
 const http = require('node:http');
 const path = require('node:path');
@@ -92,7 +93,7 @@ function startServer() {
 }
 
 async function spawnElectron(port) {
-  const env = { ...process.env, AI_BROWSER_PORT: String(port), AI_BROWSER_WATCHDOG: '0' };
+  const env = { ...process.env, ...windowEnv('multiagent'), AI_BROWSER_PORT: String(port), AI_BROWSER_WATCHDOG: '0' };
   // 组上限压小，才能在几秒内把"满了怎么办"测出来（默认 8 要开很多页）。
   env.AI_BROWSER_TAB_LIMIT = '4';
   delete env.ELECTRON_RUN_AS_NODE;

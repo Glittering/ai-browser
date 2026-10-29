@@ -75,7 +75,9 @@ function appBundleFromBinary(bin) {
 /** 用 LaunchServices 启动（macOS）。返回是否成功把进程扔出去（不代表端口会开）。 */
 function launchViaOpen(bundle, root, log) {
   try {
-    const child = spawn('open', ['-n', '-a', bundle, '--args', root], {
+    // -g：不激活 App。agent 拉起浏览器不该把用户正在做的事顶下去（同理见
+    // install_app.cjs）。配合 AI_BROWSER_LAUNCHED_BY_AGENT=1，窗口出现但不夺焦点。
+  const child = spawn('open', ['-g', '-n', '-a', bundle, '--args', root], {
       stdio: 'ignore',
       detached: true,
     });

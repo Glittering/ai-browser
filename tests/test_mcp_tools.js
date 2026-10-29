@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { MCP_TOOLS } from '../src/main/mcp_tools.js';
 
 describe('MCP tool list (token-cost guard)', () => {
@@ -200,5 +202,49 @@ describe('MCP tool list (token-cost guard)', () => {
     expect(open.has('browse_evaluate')).toBe(true);
     expect(open.has('browse_quit')).toBe(false);
     expect(open.has('browse_tabs')).toBe(false);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// Bug 2：tab / group 语义必须与实现同义 —— agent 端工具 schema 与技能文档
+// 不得再出现 stale 文案（"默认 active tab" / "window.open 自动接管 active"），
+// 否则 agent 会按旧规则操作，一 agent = 一块自己的 group 的策略形同虚设。
+// ────────────────────────────────────────────────────────────────────────────
+
+describe('MCP tab / group semantics (Bug 2)', () => {
+  const tabTaking = MCP_TOOLS.filter(
+    (t) => t.inputSchema && t.inputSchema.properties && t.inputSchema.properties.tab
+  );
+
+  it('BUG2-1: 带 tab 的工具描述不得出现旧的 "default: active tab" 措辞', () => {
+    expect(tabTaking.length).toBeGreaterThan(0);
+    for (const t of tabTaking) {
+      const d = t.inputSchema.properties.tab.description || '';
+      expect(d, `${t.name} 的 tab 描述`).not.toContain('active tab');
+    }
+  });
+
+  it('BUG2-2: 带 tab 的工具描述必须写清“省略 = session default”', () => {
+    for (const t of tabTaking) {
+      const d = t.inputSchema.properties.tab.description || '';
+      expect(d, `${t.name} 的 tab 描述`).toContain('session default');
+    }
+  });
+
+  it('BUG2-3: browse_tabs 的 show 对 switch 可用，op 集合与 required 不变', () => {
+    const t = MCP_TOOLS.find((x) => x.name === 'browse_tabs');
+    expect(t.inputSchema.properties.show).toBeTruthy();
+    expect(t.inputSchema.properties.show.description).toContain('switch');
+    expect(t.inputSchema.properties.tab.description).toContain('switch');
+    expect(t.inputSchema.required).toEqual(['op']);
+    expect(t.inputSchema.properties.op.enum).toEqual(['list', 'new', 'close', 'switch', 'window']);
+  });
+
+  it('BUG2-4: agent 端 skill 文档不得再出现 stale 的 tab / 窗口语义', () => {
+    const tasks = readFileSync(join(process.cwd(), 'skills', 'ai-browser', 'references', 'tasks.md'), 'utf8');
+    expect(tasks, 'tasks.md 仍出现“默认动作落在”这类旧措辞').not.toContain('默认动作落在');
+    expect(tasks, 'tasks.md 仍出现“自动接管为 active”这类旧措辞').not.toContain('自动接管为 active');
+    expect(tasks, 'tasks.md 必须说明省略 tab 打自己工作页').toContain('自己的工作页');
+    expect(tasks, 'tasks.md 必须说明 switch 可带 show:true').toContain('show:true');
   });
 });

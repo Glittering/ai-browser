@@ -11,6 +11,7 @@
 // Run:  npm run capabilities
 //       AI_BROWSER_PORT=<port> npm run capabilities
 
+const { windowEnv } = require('./_window_mode.cjs');
 const harness = require("./_harness.cjs");
 const http = require("node:http");
 const net = require("node:net");
@@ -126,7 +127,7 @@ async function main() {
   const electronPath = require("electron");
   console.log("spawn electron @", electronPath, "port", WS_PORT);
 const guard = require('./_spawn_guard.cjs');
-  const childEnv = { ...process.env, AI_BROWSER_PORT: String(WS_PORT) };
+  const childEnv = { ...process.env, ...windowEnv('capabilities'), AI_BROWSER_PORT: String(WS_PORT) };
   // ELECTRON_RUN_AS_NODE 会让 Electron 以纯 Node 模式启动 —— 不起窗口、
   // 不监听 WS，测试永远等不到端口。这里要的是真正的应用进程，故剔除。
   delete childEnv.ELECTRON_RUN_AS_NODE;

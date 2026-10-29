@@ -10,6 +10,7 @@
 //   修复后：harness.assertIdentity 核对 ui.server_info.pid，当场 exit 4。
 //
 // 跑：REPRO_PORT=9799 node e2e/_repro_identity.cjs
+const { windowEnv } = require('./_window_mode.cjs');
 const { spawn } = require('node:child_process');
 const path = require('node:path');
 const WebSocket = require(path.join(__dirname, '..', 'node_modules', 'ws'));
@@ -36,7 +37,7 @@ function startImpostor() {
 async function main() {
   const t0 = Date.now();
   const kid = spawn(process.execPath, [path.join(ROOT, 'e2e', 'value_ws.cjs')], {
-    cwd: ROOT, env: { ...process.env, AI_BROWSER_PORT: String(PORT) },
+    cwd: ROOT, env: { ...process.env, ...windowEnv('_repro_identity'), AI_BROWSER_PORT: String(PORT) },
   });
   let out = '';
   kid.stdout.on('data', (d) => { out += d.toString(); });

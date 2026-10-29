@@ -13,6 +13,7 @@
 //
 // 自带 fixture、不依赖外网。Run: npm run paint
 
+const { windowEnv } = require('./_window_mode.cjs');
 const harness = require('./_harness.cjs');
 const http = require('node:http');
 const { spawn } = require('node:child_process');
@@ -69,7 +70,7 @@ function startServer() {
 
 async function spawnElectron(port) {
   const electronPath = require('electron');
-  const childEnv = { ...process.env, AI_BROWSER_PORT: String(port), AI_BROWSER_WATCHDOG: '0' };
+  const childEnv = { ...process.env, ...windowEnv('paint'), AI_BROWSER_PORT: String(port), AI_BROWSER_WATCHDOG: '0' };
   // ELECTRON_RUN_AS_NODE 会让二进制降级成 node REPL（只打印 Welcome to Node.js 就退出）
   delete childEnv.ELECTRON_RUN_AS_NODE;
   delete childEnv.NODE_OPTIONS;

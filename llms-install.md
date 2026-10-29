@@ -130,7 +130,7 @@ focuses the existing window (single instance lock).
 
 ## The 17 tools
 
-- `browse_navigate` — load a URL in the active or given tab.
+- `browse_navigate` — load a URL in your tab or the given tab.
 - `browse_get_tree` — semantic tree + context (modals, toasts, required-field
   hints, login state, stats). Params: `subset: "interactive"` (token saver, use by
   default), `ax: true` (links carry urls), `mode: "diff"` (only new/hidden nodes).
@@ -161,8 +161,8 @@ focuses the existing window (single instance lock).
 - `browse_repaint` — force compositor redraw when the window shows a stale page.
 - `browse_downloads` — list downloads with on-disk paths (poll after clicking
   export/download; downloads are asynchronous).
-- `browse_tabs` — tab management: `{op: "list" | "new" | "close" | "switch"}`.
-  `switch` sets the default target for later calls, so you rarely pass `tab`.
+- `browse_tabs` — tab management: `{op: "list" | "new" | "close" | "switch" | "window"}`.
+  `switch` = default; add `show:true`; `new` never steals the view unless `show:true`.
 - `browse_quit` — shut the whole browser down and release the process.
 
 **Which door should you use?** Prefer the **CLI** unless the tool list already contains

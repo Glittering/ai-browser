@@ -194,7 +194,7 @@ small surface, since every tool schema is injected into your agent's context on 
 
 | Tool | One line |
 |---|---|
-| `browse_navigate` | Load a URL in the active (or given) tab. |
+| `browse_navigate` | Load a URL in your tab or the given tab. |
 | `browse_get_tree` | Read the page as a semantic tree + page context (modals, messages, stats). |
 | `browse_act` | `click` / `type` (append at caret) / `setContent` (replace all) / `clear` / `focus` / `hover` / `scroll_to` / `upload` / `get_value` (read-only) / `drag` / `press` / `wheel` on a `data-ai-id`. |
 | `browse_diff` | `snapshot` a baseline, then `diff` to get added / removed / changed paths with before/after values. **This is how you prove an action did anything.** |
@@ -205,7 +205,7 @@ small surface, since every tool schema is injected into your agent's context on 
 | `browse_evaluate` | Run a JS *expression* in page context (5000-char cap, Node identifiers rejected). |
 | `browse_scroll` | Scroll the page, or scroll an element into view. |
 | `browse_wait` | Poll until `button_enabled` / `modal_appeared` / `text_contains` / `url_contains`. |
-| `browse_tabs` | Tabs: `list` / `new` / `close` / `switch`. `switch` sets the default target for later calls. |
+| `browse_tabs` | Tabs: `list` / `new` / `close` / `switch` / `window`. `switch` = default; add `show:true`. `new` never steals the view unless `show:true`. |
 | `browse_network` | Chrome-DevTools-style network inspection: `list` (filter by method / URL / status / type), `get` (request + response headers and bodies), `clear`, `configure`. |
 | `browse_quit` | Shut the whole browser down and release the process. |
 
@@ -329,7 +329,7 @@ Notes that save round-trips:
 - `browse_network` captures requests from the moment a tab opens, **including POST request bodies** —
   no subscription needed. Request headers are redacted by default
   (`authorization` / `cookie` → `[REDACTED]`); pass `include_sensitive_headers: true` to see them.
-- Most tools take an optional `tab` for multi-tab work; without it they target the active tab.
+- Most tools take an optional `tab` for multi-tab work; omit `tab` to target your own session tab.
 
 ---
 
@@ -430,6 +430,10 @@ Each group is capped (8 by default, `AI_BROWSER_TAB_LIMIT`). Opening past the ca
 -32001 your tab group is full (8/8) — close one before opening another
 data: { reason: "group-full", limit: 8, tabs: [{tab, url}, ...] }
 ```
+
+Over MCP the agent receives this as a tool result with `isError: true` and the readable text
+`Error: your tab group is full (8/8) — close one before opening another` — a normal tool failure it
+acts on, not a JSON-RPC protocol error. The `data` fields above are the raw-WS detail.
 
 Popups cannot be refused (the page's script is waiting for the window), so in that one case the least
 recently used tab in the group — never the visible one, never one with a dialog open — is closed

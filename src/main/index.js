@@ -390,19 +390,94 @@ if (gotLock) {
 //
 // app.dock.setIcon 是 Electron 提供的运行时入口，不影响签名与打包。
 // Windows/Linux 走 BrowserWindow 的 icon 选项（见 createWindow）。
-function appIconPath() {
-  const p = path.join(__dirname, '..', '..', 'build', 'icon.png');
-  try { return fs.existsSync(p) ? p : null; } catch (_) { return null; }
+//
+// ⚠️ 这里必须用 build/icon-dock.png，不能用 build/icon.png。
+//    macOS 26/27 给 bundle 里的 icns 套了一层统一图标网格（内容缩到约 86.7%），
+//    而 dock.setIcon 的裸图**不套**这层网格 —— 直接塞满出血的 icon.png，Dock
+//    里就会比旁边所有图标大一圈。而打包版走的是 Info.plist 的 icns，正好是
+//    缩过的 86.7%。于是"从 /Applications 启动"和"npm start"画出来两个尺寸，
+//    用户看到的就是图标一会大一会小。icon-dock.png 由 render_icon.cjs 预先按
+//    86.7% 缩好，两条路径才落到同一个尺寸（契约见 tests/test_icon_geometry.js）。
+function appIconPath(kind = 'window') {
+  const base = path.join(__dirname, '..', '..', 'build');
+  const pick = (f) => {
+    const p = path.join(base, f);
+    try { return fs.existsSync(p) ? p : null; } catch (_) { return null; }
+  };
+  if (kind === 'dock') {
+    // 先要按网格缩过的；退而求其次用满出血那张（会偏大，但总比 Electron 火箭强），
+    // 并把 fallback 记进 appIconState —— 让"为什么偏大"能一眼看出来。
+    const dock = pick('icon-dock.png');
+    if (dock) return { file: dock, fallback: false };
+    const plain = pick('icon.png');
+    return plain ? { file: plain, fallback: true } : null;
+  }
+  return { file: pick('icon.png'), fallback: false };
 }
 
-function applyAppIcon() {
-  if (process.platform !== 'darwin') return false;   // 其他平台由窗口 icon 选项负责
-  const icon = appIconPath();
-  if (!icon) return false;   // 装的是精简包（没带 build/）→ 静默跳过，不值得启动失败
+// 把"实际设进去的图有多大"量出来报给外部（ui.server_info.icon）。
+// 只要这个数字偏离系统网格，"图标大小不对"就能被直接判定，而不是靠肉眼比。
+function measureIcon(file) {
   try {
-    if (app.dock && typeof app.dock.setIcon === 'function') { app.dock.setIcon(icon); return true; }
+    const img = nativeImage.createFromPath(file);
+    if (img.isEmpty()) return null;
+    // 不缩放：缩放会让边缘抗锯齿多出一两像素，量出来的占比偏高（实测 256px 时
+    // 86.7% → 87.5%）。这里要的是"这张图本身"的数字，1024² 全扫一遍也就几毫秒。
+    const { width, height } = img.getSize();
+    const bmp = img.toBitmap();            // BGRA，alpha 在第 4 字节
+    let minX = width, minY = height, maxX = -1, maxY = -1;
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        if (bmp[(y * width + x) * 4 + 3] > 2) {
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+        }
+      }
+    }
+    if (maxX < 0) return { content_ratio: 0 };
+    return {
+      pixels: `${width}x${height}`,
+      content_ratio: +((maxX - minX + 1) / width).toFixed(3),
+    };
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+let appIconState = null;
+
+function applyAppIcon() {
+  // 打包版：Info.plist 里已经是自定义 icns，系统会按图标网格渲染 —— 不要再动它。
+  // 反过来，源码启动时进程本体是 Electron.app，Dock 跟的是可执行文件，不设就是火箭。
+  if (process.platform !== 'darwin') {
+    appIconState = { source: 'none', reason: 'non-darwin' };
+    return false;
+  }
+  if (app.isPackaged) {
+    appIconState = { source: 'bundle', reason: 'packaged: Info.plist icns' };
+    return false;
+  }
+  const icon = appIconPath('dock');
+  if (!icon) {   // 装的是精简包（没带 build/）→ 静默跳过，不值得启动失败
+    appIconState = { source: 'none', reason: 'build/icon-dock.png missing' };
+    return false;
+  }
+  try {
+    if (app.dock && typeof app.dock.setIcon === 'function') {
+      app.dock.setIcon(icon.file);
+      appIconState = {
+        source: 'dock.setIcon',
+        file: path.basename(icon.file),
+        ...(icon.fallback ? { fallback: true, note: 'icon-dock.png 缺失，退回满出血图（会比系统图标大）' } : {}),
+        ...(measureIcon(icon.file) || {}),
+      };
+      return true;
+    }
   } catch (e) {
     console.error('[icon] dock.setIcon failed:', e && e.message);
+    appIconState = { source: 'error', error: e.message };
   }
   return false;
 }
@@ -416,7 +491,7 @@ function createWindow() {
     title: APP_DISPLAY_NAME,
     // Windows/Linux 的任务栏图标来自这里（macOS 走 app.dock.setIcon，
     // 见 applyAppIcon：Dock 跟的是进程可执行文件，不是窗口选项）。
-    icon: appIconPath() || undefined,
+    icon: (appIconPath('window') || {}).file || undefined,
     // 先不显示：如何显示由 showInitialWindow() 按焦点策略决定 —— 窗口必须真实可见
     // （产品承诺人可随时介入），但被 agent 拉起时不该把用户正在做的事打断。
     show: false,
@@ -1053,6 +1128,9 @@ function normalizeUrlInput(input) {
 app.whenReady().then(() => {
   applyAppIcon();
   createWindow();
+  // 图标这条链的"实际状态"挂到 pageManager 上，由 ui.server_info 报出去 ——
+  // "图标大小不对"否则只能靠肉眼比；有了 content_ratio 就能判定（期望 ≈0.867）。
+  if (pageManager) pageManager.appIcon = appIconState;
 
   // === 自检钩子：AI_BROWSER_SELFTEST=crash ===
   // 主动制造一次主进程未捕获异常，用来验证"崩溃时的日志与横幅"这条链路真的通。

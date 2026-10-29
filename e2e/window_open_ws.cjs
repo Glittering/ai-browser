@@ -21,6 +21,7 @@
 // 自带 fixture、不依赖外网。Run: npm run winopen
 //   AI_BROWSER_PORT=<port> npm run winopen     （run_all 会自动分配）
 
+const { windowEnv } = require('./_window_mode.cjs');
 const harness = require('./_harness.cjs');
 const http = require('node:http');
 const { spawn } = require('node:child_process');
@@ -81,7 +82,7 @@ function startServer() {
 
 async function spawnElectron(port) {
   const electronPath = require('electron');
-  const childEnv = { ...process.env, AI_BROWSER_PORT: String(port), AI_BROWSER_WATCHDOG: '0' };
+  const childEnv = { ...process.env, ...windowEnv('window_open'), AI_BROWSER_PORT: String(port), AI_BROWSER_WATCHDOG: '0' };
   delete childEnv.ELECTRON_RUN_AS_NODE;
   if (!childEnv.AI_BROWSER_USER_DATA) childEnv.AI_BROWSER_USER_DATA = require('node:path').join(require('node:os').tmpdir(), `ai-browser-e2e-winopen-${port}`);
   // stderr 收下来不丢：这条链路的失败几乎都发生在主进程侧（IPC 有没有收到、
@@ -286,6 +287,40 @@ async function main() {
       check('PX 普通弹窗目标地址正确', /\/l2\.html/.test(url), `url=${url}`);
     }
     await b.call('ui.close_tab', { tab: src });
+  }
+
+  // ---------------------------------------------------------------- Bug 1: window.open 派生 tab 的 group / show
+  // v2.3.0 修的是 setWindowOpenHandler 那条路（group + show），但窗口打开真正
+  // 生效的路径是 ai:window_open IPC（垫片主 world -> bridge -> IPC）：那条路漏掉
+  // opts，所以 agent 后台页弹窗会进人的组、且抢视野。本阶段钉死两条 invariant：
+  //   L3-1 派生 tab 归在 agent 组里（不是人的组）
+  //   L3-2 opener 是后台页时派生 tab 不抢视野（active 没被它顶掉）
+  console.log('\n[L3] window.open 派生 tab：归属 + 不抢视野（Bug 1）');
+  {
+    const bg1 = unwrap(await b.call('ui.new_tab', { url: `${HOST}/a.html` })).tab;
+    await sleep(3000);
+    const bg2 = unwrap(await b.call('ui.new_tab', { url: `${HOST}/a.html` })).tab;
+    // 等 /a.html 真实加载完再找“进入学习”—— 之前只等了 3s，链接树可能还没上树
+    await sleep(5000);
+    const tnow = await listTabs(b);
+    const bg2info = tnow.find((t) => t.id === bg2) || {};
+    check('L3 opener（第二个 agent tab）本身就在 agent 组', /^agent:/.test(String(bg2info.group || '')) && bg2info.group_kind === 'agent',
+      JSON.stringify({ id: bg2, group: bg2info.group, group_kind: bg2info.group_kind }));
+    const before = (await listTabs(b)).map((t) => t.id);
+    const act = await clickGo(b, bg2);
+    check('L3 后台 agent tab 点击打开成功', act && act.success !== false, JSON.stringify(act));
+    const fresh = await waitNewTab(b, before);
+    check('L3 window.open 从后台 agent tab 开了新 tab', !!fresh, '10s 内没有新 tab');
+    if (fresh) {
+      const ginfo = (await listTabs(b)).find((t) => t.id === fresh.id) || {};
+      check('L3 派生 tab 归在 agent 组里（不是人组）', /^agent:/.test(String(ginfo.group || '')) && ginfo.group_kind === 'agent',
+        JSON.stringify({ id: fresh.id, group: ginfo.group, group_kind: ginfo.group_kind }));
+      check('L3 后台 opener 的派生 tab 未抢视野（active 没被它顶掉）', ginfo.active === false,
+        JSON.stringify({ id: fresh.id, active: ginfo.active, group: ginfo.group }));
+      tab1 = fresh.id;
+    }
+    for (const t of [bg1, bg2]) { if (t) { try { await b.call('ui.close_tab', { tab: t }); } catch (_) {} } }
+    if (tab1) { try { await b.call('ui.close_tab', { tab: tab1 }); } catch (_) {} }
   }
 
   // ---------------------------------------------------------------- verdict

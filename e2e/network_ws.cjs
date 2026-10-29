@@ -6,6 +6,7 @@
 // 跑：AI_BROWSER_PORT=9333 node e2e/network_ws.cjs
 // （不改 package.json —— 用 node 直接跑。）
 
+const { windowEnv } = require('./_window_mode.cjs');
 const harness = require("./_harness.cjs");
 const http = require("node:http");
 const net = require("node:net");
@@ -149,7 +150,7 @@ async function main() {
   const electronPath = require("electron");
   console.log("spawn electron @", electronPath, "port", WS_PORT);
 const guard = require('./_spawn_guard.cjs');
-  const childEnv = { ...process.env, AI_BROWSER_PORT: String(WS_PORT), ...CHILD_ENV_LIMITS };
+  const childEnv = { ...process.env, ...windowEnv('network'), AI_BROWSER_PORT: String(WS_PORT), ...CHILD_ENV_LIMITS };
   // 铁律 2：ELECTRON_RUN_AS_NODE 会让 Electron 以纯 Node 模式启动 —— 不起窗口、
   // 不监听 WS，测试永远等不到端口。
   delete childEnv.ELECTRON_RUN_AS_NODE;

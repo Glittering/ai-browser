@@ -30,6 +30,7 @@
 
 'use strict';
 
+const { windowEnv } = require('./_window_mode.cjs');
 const harness = require('./_harness.cjs');
 const http = require('node:http');
 const fs = require('node:fs');
@@ -105,7 +106,7 @@ function appBinary(appPath) {
 
 async function spawnApp(port) {
   const bin = appBinary(APP);
-  const childEnv = { ...process.env, AI_BROWSER_PORT: String(port), AI_BROWSER_WATCHDOG: '0' };
+  const childEnv = { ...process.env, ...windowEnv('shipped'), AI_BROWSER_PORT: String(port), AI_BROWSER_WATCHDOG: '0' };
   // 这三个变量会直接让"启动 App"变成"启动别的东西"：
   //   ELECTRON_RUN_AS_NODE=1 → 打包后的二进制降级成 node REPL，秒退且只打印
   //                            "Welcome to Node.js"（2026-10-25 实测，

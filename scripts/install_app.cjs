@@ -78,16 +78,30 @@ if (fs.existsSync(TARGET)) {
 
 // ---- 替换 ----------------------------------------------------------------
 if (fs.existsSync(TARGET)) {
-  const backup = path.join(os.tmpdir(), `${APP_NAME}-${plistVersion(TARGET) || 'old'}-${Date.now()}.app`);
+  // ⚠️ 备份必须以 .bak 结尾，不能留成 .app。
+  //    .app 是一个 bundle，它的 Info.plist 里写着和 /Applications 那份**同一个
+  //    bundle id**（com.glittering.ai-browser）。每装一次就往 /tmp 里多一份同 id
+  //    的 bundle，LaunchServices 会把它们全登记下来；之后 Dock / Finder 解析这个
+  //    id 时可能拿到备份那份 —— 它的图标是旧版的，于是"图标一会大一会小"。
+  //    .bak 不是可执行 bundle，LS 不登记。回滚就是把它改回 .app 再拷回去。
+  const backup = path.join(os.tmpdir(), `${APP_NAME}-${plistVersion(TARGET) || 'old'}-${Date.now()}.app.bak`);
   fs.renameSync(TARGET, backup);
-  console.log(`旧包已移到 ${backup}（可回滚，未被删除）`);
+  console.log(`旧包已移到 ${backup}（可回滚，未被删除；改回 .app 结尾即可）`);
 }
 const r = spawnSync('ditto', [srcApp, TARGET], { encoding: 'utf8' });
 if (r.status !== 0) fail(`ditto 失败：${(r.stderr || '').trim()}`);
 ok(`已安装 ${srcVer} → ${TARGET}`);
 
+// 让 LaunchServices 认准新装这份 —— dist 里那份构建产物已由 build_dmg 注销，
+// 这里显式登记 /Applications 的正式副本，避免同 id 解析到别处的旧图标。
+spawnSync('/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister',
+  ['-f', TARGET], { encoding: 'utf8' });
+
 // ---- 启动 ----------------------------------------------------------------
 if (!process.argv.includes('--no-open')) {
-  spawnSync('open', [TARGET], { encoding: 'utf8' });
-  ok('已启动');
+  // -g：启动但**不激活**。装完自动把 App 顶到前台、抢走键盘焦点，对正在
+  // 用电脑的人来说就是一次打扰（2026-10-28 用户反馈"测试的时候还抢前台"）。
+  // 窗口照常出现，只是不是它抢在最前面 —— 想看的时候点一下就是了。
+  spawnSync('open', ['-g', TARGET], { encoding: 'utf8' });
+  ok('已启动（不抢前台：要切过去点一下 Dock 图标）');
 }
