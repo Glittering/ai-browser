@@ -482,6 +482,10 @@ CLI 发 `auto_workspace:false` —— 人坐在终端前敲命令时，"不传 t
 这正是上限存在的理由（后台运行时没人看得见它的标签页，不设限就会开到内存告急）。回执带
 `data.reason='group-full'`、`limit`、以及可关闭清单 `data.tabs`。
 
+MCP 层（`src/main/mcp_server.js` 的 tool handler）必须把这个执行期失败翻译成**工具结果**
+形式（`isError: true` + `Error: <message>`），不能让它逃成 JSON-RPC error —— 否则 agent
+收不到"请关掉一个"的提示，目录审核 / 客户端实际调用都把它当成 protocol failure 处理。
+
 页面自己弹的窗口（`window.open` / `target=_blank`）**不能拒绝**（站点脚本在等它），
 只能牺牲：本组里"最久没用、不在人眼前、没有挂着对话框"的那一页，并记进
 `ui.list_tabs` 的 `evicted`（回采一次即清空）—— 不说的话 agent 会以为那页自己消失了。
@@ -732,6 +736,15 @@ sheet**，因此它既不在语义树里，也不受页面点击控制；**而�
   —— 排查时唯一能看到的是"卡在某一步"，而真正的原因（连上了正在退出的实例）被吞掉了。
   新建套件必须同时加进 `e2e/run_all.cjs` 的 `SUITES` —— 加了但没进全量等于没加
   （`dialog`/`wrapper`/`paint`/`layout` 就这样在 v2.1.16–v2.1.19 期间从没被跑过）。
+- **跑测试不许抢用户的电脑**（2026-10-28 修）：所有套件必须经 `e2e/_window_mode.cjs`
+  的 `windowEnv(suite)` 取窗口策略 —— 默认 `AI_BROWSER_START_HIDDEN=1`，进程起来但
+  **不出窗口**（读树/点击/输入/截图/导航全部照常，`background` 套件 37 条钉住）。
+  只有 `focus` / `flicker` / `layout` / `paint` 四档可见，且走 `showInactive`
+  （窗口出现但**不夺焦点**）—— 这四个套件测的正是"看得见/几何/白屏"，隐藏就没得测。
+  以前 27 处 spawn 没一处设策略，`showInitialWindow` 里 `byAgent=false` →
+  `show()` → 每跑一个套件就把窗口拍在用户脸上（跑一次全量 = 22 次）。
+  `tests/test_e2e_window_mode.js` 的 WM-5 扫全目录，漏掉任何一个 spawn 都会红。
+  想临时看窗口：`AI_BROWSER_E2E_VISIBLE=1 npm run <suite>`。
 - `ui.wait` 的 `target` 先按元素 id 精确匹配、再退化为 label 子串匹配；
   新增动作或角色时必须同步核对执行器里真有对应 case（`audit` 套件逐条验）。
 - 测量类断言必须先验前提：锁屏时前台恒为 `loginwindow`，会造成假绿/假红；

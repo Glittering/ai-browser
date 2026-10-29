@@ -24,6 +24,7 @@
 //
 // Run: npm run background
 
+const { windowEnv } = require('./_window_mode.cjs');
 const harness = require('./_harness.cjs');
 const http = require('node:http');
 const fs = require('node:fs');
@@ -87,7 +88,7 @@ function startServer() {
 }
 
 async function spawnElectron(port, extraEnv) {
-  const env = { ...process.env, AI_BROWSER_PORT: String(port), AI_BROWSER_WATCHDOG: '0', ...extraEnv };
+  const env = { ...process.env, ...windowEnv('background'), AI_BROWSER_PORT: String(port), AI_BROWSER_WATCHDOG: '0', ...extraEnv };
   delete env.ELECTRON_RUN_AS_NODE;
   delete env.NODE_OPTIONS;
   if (!env.AI_BROWSER_USER_DATA) env.AI_BROWSER_USER_DATA = path.join(os.tmpdir(), `ai-browser-e2e-bg-${port}`);

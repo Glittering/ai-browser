@@ -19,9 +19,9 @@
 
 ## 多标签
 
-- `browse_tabs {op:"list"}` 看现状；`{op:"new", url}` 新开；`{op:"switch", tab}` 切换。
-- 默认动作落在 **active tab** 上，所以切换是隐式上下文，不用每次传 `tab`。
-- `window.open` / `target="_blank"` 打开的新标签会被自动接管为 active（想留在原地传 `keep_tab:true`）。
+- `browse_tabs {op:"list"}` 看现状；`{op:"new", url}` 新开；`{op:"switch", tab}` 切换（`switch` 可带 `show:true`：同时把这一页顶到用户眼前、并设为默认目标）。
+- 省略 `tab` 就打你自己的工作页（一个 agent = 一块自己的组）；只显式传 `tab` 才换目标。
+- `window.open` / `target="_blank"` 派生标签页跟**打开者**的组走；后台 agent 弹窗不抢视野（不显示），活跃才顶到眼前。想留在原地（不跟随新标签）传 `keep_tab:true`。
 
 ## 证明操作生效（`browse_diff`）
 

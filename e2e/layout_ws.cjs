@@ -11,6 +11,7 @@
 //
 // Run: npm run layout
 
+const { windowEnv } = require('./_window_mode.cjs');
 const harness = require('./_harness.cjs');
 const http = require('node:http');
 const { spawn } = require('node:child_process');
@@ -55,7 +56,7 @@ function startServer() {
 
 async function spawnElectron(port) {
   const electronPath = require('electron');
-  const childEnv = { ...process.env, AI_BROWSER_PORT: String(port), AI_BROWSER_WATCHDOG: '0' };
+  const childEnv = { ...process.env, ...windowEnv('layout'), AI_BROWSER_PORT: String(port), AI_BROWSER_WATCHDOG: '0' };
   delete childEnv.ELECTRON_RUN_AS_NODE;
   delete childEnv.NODE_OPTIONS;
   if (!childEnv.AI_BROWSER_USER_DATA) childEnv.AI_BROWSER_USER_DATA = require('node:path').join(require('node:os').tmpdir(), `ai-browser-e2e-layout-${port}`);

@@ -99,6 +99,9 @@ spawnSync('/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchSe
 
 // ---- 启动 ----------------------------------------------------------------
 if (!process.argv.includes('--no-open')) {
-  spawnSync('open', [TARGET], { encoding: 'utf8' });
-  ok('已启动');
+  // -g：启动但**不激活**。装完自动把 App 顶到前台、抢走键盘焦点，对正在
+  // 用电脑的人来说就是一次打扰（2026-10-28 用户反馈"测试的时候还抢前台"）。
+  // 窗口照常出现，只是不是它抢在最前面 —— 想看的时候点一下就是了。
+  spawnSync('open', ['-g', TARGET], { encoding: 'utf8' });
+  ok('已启动（不抢前台：要切过去点一下 Dock 图标）');
 }

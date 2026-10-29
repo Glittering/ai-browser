@@ -13,6 +13,7 @@
 //
 // 跑：AI_BROWSER_PORT=9333 node e2e/upload_ws.cjs   （或 npm run upload）
 
+const { windowEnv } = require('./_window_mode.cjs');
 const harness = require("./_harness.cjs");
 const http = require("node:http");
 const fs = require("node:fs");
@@ -159,7 +160,7 @@ async function main() {
   }
   const electronPath = require("electron");
   const guard = require("./_spawn_guard.cjs");
-  const childEnv = { ...process.env, AI_BROWSER_PORT: String(WS_PORT) };
+  const childEnv = { ...process.env, ...windowEnv('upload'), AI_BROWSER_PORT: String(WS_PORT) };
   delete childEnv.ELECTRON_RUN_AS_NODE;
   if (!childEnv.AI_BROWSER_USER_DATA) childEnv.AI_BROWSER_USER_DATA = require('node:path').join(require('node:os').tmpdir(), `ai-browser-e2e-${WS_PORT}`);
   console.log("spawn electron port", WS_PORT, "userData", childEnv.AI_BROWSER_USER_DATA);

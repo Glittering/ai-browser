@@ -22,6 +22,7 @@
 // Run:  npm run view
 //       AI_BROWSER_PORT=<port> npm run view
 
+const { windowEnv } = require('./_window_mode.cjs');
 const harness = require("./_harness.cjs");
 const http = require("node:http");
 const net = require("node:net");
@@ -122,7 +123,7 @@ const check = (name, cond, detail) => {
 
 async function spawnElectron(port) {
   const electronPath = require("electron");
-  const childEnv = { ...process.env, AI_BROWSER_PORT: String(port), AI_BROWSER_WATCHDOG: "0" };
+  const childEnv = { ...process.env, ...windowEnv('view'), AI_BROWSER_PORT: String(port), AI_BROWSER_WATCHDOG: "0" };
   delete childEnv.ELECTRON_RUN_AS_NODE;
   if (!childEnv.AI_BROWSER_USER_DATA) childEnv.AI_BROWSER_USER_DATA = require('node:path').join(require('node:os').tmpdir(), `ai-browser-e2e-view-${port}`);
   const child = spawn(electronPath, ["."], { cwd: ROOT, stdio: "ignore", detached: true, env: childEnv });

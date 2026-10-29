@@ -15,6 +15,7 @@
 // Run:  npm run audit
 //       AI_BROWSER_PORT=<port> npm run audit
 
+const { windowEnv } = require('./_window_mode.cjs');
 const harness = require("./_harness.cjs");
 const http = require("node:http");
 const net = require("node:net");
@@ -132,7 +133,7 @@ const defect = (sev, area, text) => DEFECTS.push({ sev, area, text });
 
 async function spawnElectron(port) {
   const electronPath = require("electron");
-  const childEnv = { ...process.env, AI_BROWSER_PORT: String(port) };
+  const childEnv = { ...process.env, ...windowEnv('audit'), AI_BROWSER_PORT: String(port) };
   delete childEnv.ELECTRON_RUN_AS_NODE;
   if (!childEnv.AI_BROWSER_USER_DATA) childEnv.AI_BROWSER_USER_DATA = require('node:path').join(require('node:os').tmpdir(), `ai-browser-e2e-${port}`);
   const child = spawn(electronPath, ["."], {

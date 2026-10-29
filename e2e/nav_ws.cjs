@@ -29,6 +29,7 @@
 //
 // 断言政策与其它套件一致：不信 success，回读真实 DOM / 真实截图。
 
+const { windowEnv } = require('./_window_mode.cjs');
 const harness = require("./_harness.cjs");
 const http = require("node:http");
 const net = require("node:net");
@@ -109,7 +110,7 @@ const defect = (sev, area, text) => DEFECTS.push({ sev, area, text });
 
 async function spawnElectron(port) {
   const electronPath = require("electron");
-  const childEnv = { ...process.env, AI_BROWSER_PORT: String(port) };
+  const childEnv = { ...process.env, ...windowEnv('nav'), AI_BROWSER_PORT: String(port) };
   delete childEnv.ELECTRON_RUN_AS_NODE;
   if (!childEnv.AI_BROWSER_USER_DATA) childEnv.AI_BROWSER_USER_DATA = require('node:path').join(require('node:os').tmpdir(), `ai-browser-e2e-nav-${port}`);
   const child = spawn(electronPath, ["."], {

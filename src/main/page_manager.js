@@ -425,7 +425,26 @@ class PageManager {
       if (!token) return;
       const sourceTabId = this._tabIdForContents(_event.sender);
       const url = typeof p.url === 'string' ? p.url : '';
-      const childId = this.newTab(url && url !== 'about:blank' ? url : null);
+      // Bug 1 修复：setWindowOpenHandler 那条路（v2.3.0 已补 group + show）之后，
+      // window.open 的真正生效路径是这条 IPC（垫片主 world -> bridge -> IPC），
+      // 这边此前漏掉 opts。现在两条路必须行为一致：
+      //   - group：派生 tab 跟 opening 者走（agent 后台页弹窗仍进 agent 组，而不是人组）
+      //   - show：opener 是后台页时不显示（登录/预览/下载弹窗不抢视野）
+      const parentGroup = sourceTabId !== null ? this.groupOfTab(sourceTabId) : tabGroup.HUMAN_GROUP;
+      const show = shouldShowChildTab({ openerIsVisible: sourceTabId !== null && sourceTabId === this.activeTab });
+      // 弹窗把组撑满时不能拒绝（站点的脚本在等这个窗口），只能牺牲一页：
+      // 最久没用、不在人眼前、没有挂着对话框的那一页。
+      if (!this.canOpenInGroup(parentGroup).allowed) {
+        const victim = this.pickEvictableInGroup(parentGroup, sourceTabId);
+        if (victim !== null) {
+          const deadUrl = (this._getView(victim) || {}).webContents
+            ? this._getView(victim).webContents.getURL() : '';
+          this.evictions.push({ tab: victim, url: deadUrl, at: Date.now(), reason: 'group-full' });
+          if (this.evictions.length > 20) this.evictions.shift();
+          this.closeTab(victim);
+        }
+      }
+      const childId = this.newTab(url && url !== 'about:blank' ? url : null, { show, group: parentGroup });
       this._windowOpenTokens.set(token, { tabId: childId, sourceTabId });
       // 与 setWindowOpenHandler 路径共用 _openedTabs：executeAction 的
       // auto-follow（点击后 Agent 视角跟到新 tab）对两种打开方式一致。

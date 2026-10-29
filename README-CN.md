@@ -124,6 +124,9 @@ agent 建连后自报家门（MCP 和 CLI 都会发 `ui.hello`）。此后它**�
 data: { reason: "group-full", limit: 8, tabs: [{tab, url}, ...] }
 ```
 
+过 MCP 这一层，它会以**工具结果** `isError: true` + `Error: your tab group is full (8/8) — close one before opening another`
+回到 agent —— 是 agent 该照着处理的正常工具失败，不是 JSON-RPC protocol error。上面的 `data` 是裸 WS 的细节。
+
 只有一种例外：页面自己弹的窗口（`window.open` / `target=_blank`）没法拒绝（站点脚本在等它），
 这时会关掉本组里"最久没用、不在人眼前、没有挂着对话框"的那一页，并在 `list` 的 `evicted`
 里告诉你。

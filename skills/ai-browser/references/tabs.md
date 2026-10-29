@@ -31,6 +31,9 @@
 data.tabs = [{tab, url}, ...]
 ```
 
+（MCP / 工具层收到的这次失败，会以工具结果 `isError: true` + `Error: your tab group is full (8/8) — close one before opening another`
+回到你 —— 照着执行就行，不是 JSON-RPC protocol error。）
+
 先把不用的关掉（`browse_tabs {"op":"close","tab":N}`）再开。上限存在的意义不是
 刁难：后台运行时没人看得见你的标签页，不设限就会一路开到内存告急。
 

@@ -27,6 +27,7 @@
 // Run:  npm run focus
 //       AI_BROWSER_PORT=<port> npm run focus
 
+const { windowEnv } = require('./_window_mode.cjs');
 const harness = require("./_harness.cjs");
 const http = require("node:http");
 const net = require("node:net");
@@ -174,7 +175,7 @@ async function runGroup({ label, port, extraEnv, expectStealOnBoot, expectStealO
   await sleep(1500);
   const bootBefore = frontApp();
 
-  const childEnv = { ...process.env, AI_BROWSER_PORT: String(port), ...(extraEnv || {}) };
+  const childEnv = { ...process.env, ...windowEnv('focus'), AI_BROWSER_PORT: String(port), ...(extraEnv || {}) };
   // ELECTRON_RUN_AS_NODE 会让 Electron 以纯 Node 模式启动（不起窗口、不监听 WS）。
   delete childEnv.ELECTRON_RUN_AS_NODE;
   // 独立 profile：~/.ai-browser 存着用户真实登录态，测试不该碰。
@@ -396,7 +397,11 @@ async function main() {
   await runGroup({
     label: "G3 人工启动(auto)",
     port: WS_PORT + 2,
-    extraEnv: {},
+    // G3 演的是**人自己**双击/`npm start` 启动 —— 不是 agent 拉起。
+    // 所以必须显式撤掉 windowEnv('focus') 给的 LAUNCHED_BY_AGENT=1，
+    // 否则这一组就变成"agent 启动"了，expectStealOnBoot 永远不会成立
+    // （2026-10-28 加窗口策略时踩到，G3 当场红一条）。
+    extraEnv: { AI_BROWSER_LAUNCHED_BY_AGENT: "0" },
     expectStealOnBoot: true,
     expectStealOnAction: false,
     HOST,

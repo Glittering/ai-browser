@@ -211,8 +211,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // 这是"多 agent / 无头式运行"的默认语义，见 shared/tab_route.cjs。
         const params = { url: args.url || null };
         if (args.show !== undefined) params.show = args.show === true;
-        const result = await wsClient.call('ui.new_tab', params);
-        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+        try {
+          const result = await wsClient.call('ui.new_tab', params);
+          return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+        } catch (e) {
+          // group-full 这类执行期错误必须回到 agent 为止，以 isError 工具结果
+          // 呈现（tool-result-form），而不是逃成 JSON-RPC protocol error。
+          return { content: [{ type: 'text', text: `Error: ${e.message}` }], isError: true };
+        }
       }
       if (op === 'close') {
         const result = await wsClient.call('ui.close_tab', { tab: args.tab });
@@ -220,8 +226,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
       if (op === 'switch') {
         // 只换目标、不抢视野：agent 说"切到这个标签页"通常只是想说
-        // "接下来都在这页上干活"，不该把人的窗口内容换掉。
-        const result = await wsClient.call('ui.set_active_tab', { tab: args.tab, show: false });
+        // "接下来都在这页上干活",不该把人的窗口内容换掉。但 agent 自己主动
+        // 要看（比如交代"请在浏览器里看这个"）时,可以传 show:true —— 这正是
+        // tasks.md 里 "switch tab show:true" 的用法:同时把这一页顶到用户眼前
+        // 并设为默认目标。
+        const result = await wsClient.call('ui.set_active_tab', {
+          tab: args.tab,
+          show: args.show === true,
+        });
         return { content: [{ type: 'text', text: JSON.stringify(result) }] };
       }
       if (op === 'window') {

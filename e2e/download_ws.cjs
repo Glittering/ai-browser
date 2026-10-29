@@ -14,6 +14,7 @@
 //
 // 自带 fixture、不依赖外网。Run: npm run download
 
+const { windowEnv } = require('./_window_mode.cjs');
 const harness = require('./_harness.cjs');
 const http = require('node:http');
 const fs = require('node:fs');
@@ -84,7 +85,7 @@ function startServer() {
 
 async function spawnElectron(port) {
   const electronPath = require('electron');
-  const childEnv = { ...process.env, AI_BROWSER_PORT: String(port), AI_BROWSER_WATCHDOG: '0' };
+  const childEnv = { ...process.env, ...windowEnv('download'), AI_BROWSER_PORT: String(port), AI_BROWSER_WATCHDOG: '0' };
   delete childEnv.ELECTRON_RUN_AS_NODE;
   delete childEnv.NODE_OPTIONS;
   if (!childEnv.AI_BROWSER_USER_DATA) {

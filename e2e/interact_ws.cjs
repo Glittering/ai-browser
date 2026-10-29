@@ -14,6 +14,7 @@
 // Run:  npm run interact
 //       AI_BROWSER_PORT=<port> npm run interact
 
+const { windowEnv } = require('./_window_mode.cjs');
 const harness = require("./_harness.cjs");
 const http = require("node:http");
 const net = require("node:net");
@@ -181,7 +182,7 @@ async function main() {
   const electronPath = require("electron");
   console.log("spawn electron @", electronPath, "port", WS_PORT);
   const guard = require("./_spawn_guard.cjs");
-  const childEnv = { ...process.env, AI_BROWSER_PORT: String(WS_PORT) };
+  const childEnv = { ...process.env, ...windowEnv('interact'), AI_BROWSER_PORT: String(WS_PORT) };
   // ELECTRON_RUN_AS_NODE 会让 Electron 以纯 Node 模式启动 —— 不起窗口、不监听 WS。
   delete childEnv.ELECTRON_RUN_AS_NODE;
   // 默认独立 profile：~/.ai-browser 是用户的真实 profile（带登录态），测试不该碰。
