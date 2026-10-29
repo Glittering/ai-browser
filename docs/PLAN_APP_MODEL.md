@@ -339,6 +339,49 @@ Width 输入框 100 → setContent "200" → Enter
 - **Figma 的开关键在"Adapt content for screen readers"**，而且是用户级偏好：
   重启实例后它仍然是开的（状态栏那句 disabled 没有再出现），Mirror DOM 直接可用。
 
+## 5.3 国内六个画图站实测（2026-10-30，同一实例 pid 76947）
+
+用户给的三个站，其中迅捷画图下面要拆成四个功能分别测：
+
+| 站点 / 功能 | 渲染 | 结构在哪 | 读 | 写 | 回读（独立通道） |
+|---|---|---|---|---|---|
+| draw.yunser.com | 4 张 2D canvas（`mycanvas-0/1/9/10`）+ 2 张图层预览 | **没有模型**（Vue 根 `$data` 为空；引擎不挂 window） | 工具栏语义树 + 图层 id | CDP 手势 | **只有帧指纹**（绘制计数 4→130） |
+| suxieban.com | 2 张 2D canvas（1036×612，2x DPR） | 无全局模型 | 37 个带 id 的按钮（`btnRect`/`btnUndo`…） | CDP 手势 | 帧指纹 + **按钮态** |
+| 迅捷白板 | 2 canvas（**Excalidraw 内核**） | `window.excalidraw.$excalidraw` | `getSceneElements()` | `updateScene({elements})` | 再 `getSceneElements()` |
+| 迅捷思维导图 | **0 canvas / 70 svg**（DOM 渲染） | `window.editor.minder`（**KityMinder**） | `getRoot()` / `exportJson()` | `execCommand('appendchildnode')` | 模型 + **界面「节点：N」计数器** |
+| 迅捷流程图 | **0 canvas / 335 svg**（**drawio 内核**） | `window.drawApp.editor.graph` | `getModel().getDescendants()` | `insertVertex` | 模型 + **SVG 里出现该文字** |
+| 迅捷 Markdown | **0 canvas**（CodeMirror） | `window.editor`（CM 实例） | `getValue()` | `setValue()` | 源码 + **右侧预览渲染出 `<h1>`/`<li>`** |
+
+### 实测数据（每条都可逆，已还原）
+
+- 白板：`0` → `updateScene` 加一个 160×100 矩形 → 回读 `{n:1, type:'rectangle', x:120, w:160}` → 还原 `0`
+- 思维导图：`kids 3 / nodes 4 / 节点：4` → `appendchildnode` → `kids 4 / nodes 5 / 节点：5` → `importJson(备份)` 回到 `3/4/4`
+- 流程图：`total 2` → `insertVertex('probe-flow')` → `total 3` 且 **DOM 里出现这段文字** → `removeCells` 回到 2
+- Markdown：`setValue('# probe-md\n\n- alpha\n- beta')` → 源码 26 字符 + **预览渲染出 H1 与 2 个 `<li>`** → `setValue('')` 清空
+
+### 五个必须记下的细节
+
+1. **同一个内核，读不读得到取决于站点是否暴露模型。** Excalidraw 官方站 `window` 上没有模型（只能靠帧指纹），
+   而迅捷白板把它放在 `window.excalidraw.$excalidraw` 上 —— 结论不是"Excalidraw 读不了"，而是**"这个站的 Excalidraw 有没有被包一层并暴露出来"**。
+   判路子的顺序应该是：先按结构签名扫 `window`，再谈内核。
+2. **模型挂载点四站四个名字**：`excalidraw`（还隔一层 `.$excalidraw`）、`editor.minder`、`drawApp.editor.graph`、`editor`（CodeMirror）。
+   按名字猜一定漏，必须按能力签名找（`getSceneElements` / `getModel`+`getDefaultParent` / `getValue`+`setValue`）。
+3. **迅捷白板/流程图都先落一个占位页**：`opened_tab.url` 最初是
+   `file://…/loading.html?url=https%3A%2F%2F…`，随后才换成真地址。这正是 P1 里 `show_url` 存在的价值。
+4. **drawio 的 `removeCells` 不能自己套 `beginUpdate/endUpdate`**。`insertVertex` 必须套，删除套了就**静默不生效**
+   （回执拿到 `cell-gone`/`removed`，模型里却还在）。而且 `editor.undoManager.undo()` 对我们用 API 做的改动**不记录**，
+   所以还原只能显式 `removeCells`。
+5. **yunser 与速写板都没有"撤销形状"**：yunser 连撤销按钮都没有（只有 `eraserWidth` 一个 localStorage 键，无持久化）；
+   速写板的 `btnUndo` 对**画笔笔画**有效（`n 207→221` 重绘、笔画消失），但对**形状工具画的矩形无效**。
+   → 这类站的写入**默认不可逆**，除非先证明撤销真的覆盖该操作。
+
+### 顺带验证到的两件事（不是推断）
+
+- **重绘页的判据在真实 Excalidraw 上成立**：白板一直 60fps 重绘（700ms 内绘制计数 6246→6288），
+  一次手势绘制得到 `canvas_changed:true, canvas_idle:false, canvas_repeat:true` —— 正是第 4.6 节那套四态模型。
+- **`drag` 传 `from` = `to` 等价于一次真实坐标点击**（用它点掉了迅捷白板那个没有 `data-ai-id` 的引导浮层，
+  三层 `.wan` 元素里两层是 0×0）。这类"没有 ref 的浮层关不掉"从此有解。
+
 ## 6. 明确承认做不到的
 
 - **浏览器内的远程桌面 / VM 控制台**：帧流，无 DOM、无模型、无 API。
