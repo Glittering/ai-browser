@@ -133,8 +133,9 @@ const HINT_CANVAS =
 const HINT_CANVAS_NOISY =
   'canvas signal unusable on this page: the canvas repainted during a 150ms idle window before '
   + 'the action, so a canvas change cannot be attributed to your action. page_changed reflects '
-  + 'the DOM only here. Verify through the app\'s own state (ui.capabilities route) or by '
-  + 'comparing two screenshots.';
+  + 'the DOM only here. If you need certainty, call ui.snapshot twice with NO action in between '
+  + 'and compare snapshot.canvas yourself — if it moves on its own, trust the app\'s own state '
+  + 'route (ui.capabilities) instead of the canvas.';
 
 // 画布变了、但**归因不了**：页面在空闲窗口里被后台节流冻住了（一次绘制都没有），
 // 于是既不能说是我的动作、也不能说不是。这时最容易被误读成"成功"，所以必须
