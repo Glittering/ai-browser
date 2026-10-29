@@ -226,7 +226,15 @@ guard.track(child);
   await sleep(4000); // Windows: local nav URLs need more time to commit
   const tabs = await listCount();
   check("adding 2 tabs grew list to " + (T0 + 2), tabs.length === T0 + 2, tabs.length);
-  const target = Array.isArray(tabs) && tabs.find((t) => (t.url || "").includes("/a"));
+  // 按 **pathname** 精确匹配，不要用 `url.includes("/a")`。
+  // 后者会命中默认起始页的占位 URL —— 那是
+  // `file:///Users/.../trae_projects/ai-browser/src/renderer/loading.html?url=...`，
+  // 路径里"projects/ai-browser"恰好含 "/a"。于是 set_active_tab 切到了那个占位页
+  // （外网不通时会一直停在那儿），断言读到 "正在打开…"，报出来的红信息指向
+  // "set_active_tab 坏了"，实际是匹配器的问题。这类误报会掩盖真回归。
+  const target = Array.isArray(tabs) && tabs.find((t) => {
+    try { return new URL(String(t.url || "")).pathname === "/a"; } catch { return false; }
+  });
   if (!target) {
     console.log("  [diagnostic]", tabs.map((t) => ({ url: t.url, title: t.title, active: t.active })));
   }
