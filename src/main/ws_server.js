@@ -590,6 +590,11 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
                 // 窗口状态：后台运行时要能问到"现在到底是不是隐藏的"，否则
                 // "我没看到窗口却以为它在显示"这类问题只能靠猜。
                 ...(pageManager.windowState ? { window: pageManager.windowState() } : {}),
+                // 应用图标：source 表明这次 Dock 图标来自 bundle 的 icns 还是运行时
+                // dock.setIcon（源码启动）。content_ratio 是实际设进去那张图的内容
+                // 占比 —— macOS 的图标网格约 0.867；两条路径不一致就会"一会大一会
+                // 小"，所以这里要能直接判定，而不是靠肉眼比。
+                ...(pageManager.appIcon ? { icon: pageManager.appIcon } : {}),
                 // 这个连接的工作标签页（多 agent 时用来核对自己绑到了哪一页）
                 ...(pageManager.sessionTabOf ? { session_tab: pageManager.sessionTabOf(sessionId) } : {}),
               },

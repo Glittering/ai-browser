@@ -342,6 +342,33 @@ window.devicePixelRatio ∈ {1,2}
 - `ui.server_info` 回执带 `render_path: {gpu, reason}`（`default` / `env` / `fallback`）——
   排查绘制类问题时，第一件事就是确认跑在哪条路上。
 
+### 应用图标：两条渲染路径必须同尺寸
+
+macOS 26 起，系统给 bundle 里的 icns 套了一层统一图标网格：内容缩到约 **86.7%**
+再套 squircle。而 `app.dock.setIcon()` 拿到的是裸 `NSImage`，**不套**这层网格 ——
+直接塞满出血的图，Dock 里就比旁边所有图标大一圈。
+
+结果是同一个应用出现两个尺寸：从 `/Applications` 启动（bundle icns）正常，`npm start`
+启动（`dock.setIcon`）偏大 16%。用户看到的正是"图标一会大一会小"。
+
+现在的约定：
+
+| 产物 | 用途 | 内容占比 |
+|---|---|---|
+| `build/icon.svg` | 母版 | — |
+| `build/icon.png`（1024，满出血） | icns 的源、Windows/Linux 窗口图标 | 100% |
+| `build/icon-dock.png`（1024） | `dock.setIcon` 专用，预先按网格缩好 | 86.7% ±1.5% |
+
+`npm run icons` 重建整条链；`npm run icon:check` 量这三个数字（`tests/test_icon_geometry.js`
+同口径钉住）。`ui.server_info` 带 `icon: {source, file, content_ratio}` —— `source` 是
+`bundle`（打包版，用 Info.plist）还是 `dock.setIcon`（源码启动），`content_ratio` 是
+实际设进去那张图的实测占比。两个数字对不上，就是又跑偏了，不用靠肉眼比。
+
+打包侧另有两个约束：`Resources` 里**只留一份 icns**（packager 自己拷的
+`electron.icns` 要删掉，否则 IconServices 建出重复表示）；构建目录里的 `.app` 打包后
+从 LaunchServices 注销，安装脚本的旧版备份用 `.app.bak` 结尾 —— 同一个 bundle id
+在 LS 里留多份记录时，Dock / Finder 可能解析到旧的那份图标。
+
 ## 帧级回归（`npm run flicker`）
 
 白屏有判据、几何有等式，但"闪一下"这两类**只有在窗口像素里才存在**：DOM 正常、

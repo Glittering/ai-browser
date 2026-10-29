@@ -28,10 +28,37 @@
 //   node scripts/build_dmg.cjs --skip-dmg   # 只出 .app，不压 dmg
 'use strict';
 
-const { spawnSync } = require('node:child_process');
+const { spawnSync, spawn } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+
+// # 为什么先把自己重启一遍（2026-10-29 实测）
+//
+// 某些 agent 运行环境会通过 NODE_OPTIONS 给 node 注入一个"文件系统代理"
+// （node-brokered-fs-shim.cjs），它对 createWriteStream 做 token 校验。@electron/asar
+// 打 app.asar 正是走 createWriteStream，于是**必然**失败，而且报错完全不提代理：
+//
+//     Error: Brokered file token refused: modify backup failed
+//         at createFilesystemWriteStream (…/@electron/asar/lib/disk.js:321)
+//
+// 看起来像"备份文件写失败"，会把人引去查磁盘/权限，方向全错（本脚本原来的注释
+// 也在猜这个）。代理只包 Node 的 fs，不拦外部命令 —— 所以正确做法是把 NODE_OPTIONS
+// 摘掉再跑自己一次，而不是在打包逻辑里绕。
+//
+// 只摘 NODE_OPTIONS、不动别的环境变量；用环境变量防重入。
+//
+// 注意判据要认 node-language-shim：brokered-fs 不是直接写在 NODE_OPTIONS 里的，
+// 而是由 language-shim 再 require 进来的。只匹配 "node-brokered-fs-shim" 会漏
+// （第一版就是这么漏的：日志里没有那行提示，直接失败）。
+if (/node-(language|brokered-fs)-shim/.test(process.env.NODE_OPTIONS || '') && !process.env.AIB_BUILD_NO_SHIM) {
+  const env = { ...process.env, AIB_BUILD_NO_SHIM: '1' };
+  delete env.NODE_OPTIONS;
+  console.log('[build] 检测到文件系统代理（NODE_OPTIONS 里的 fs-shim）—— 摘掉它重启打包，否则 asar 写不进去');
+  const r = spawn(process.execPath, [__filename, ...process.argv.slice(2)], { stdio: 'inherit', env });
+  r.on('exit', (code) => process.exit(code ?? 1));
+  return;
+}
 
 const root = path.resolve(__dirname, '..');
 const pkg = require('../package.json');
@@ -146,9 +173,31 @@ function installIcon(appPath) {
     '-c', 'Set :CFBundleIconFile icon.icns',
     path.join(appPath, 'Contents', 'Info.plist'),
   ]);
+  // packager 自己拷进来的 electron.icns 留着没用：plist 已经指向 icon.icns，
+  // 两份**内容相同的 icns** 会让 IconServices 建出重复的 NSImage 表示
+  // （实测 16 档各两份、共 32 个 rep），多一份缓存歧义没有任何好处。
+  // 只删主 bundle 这一份 —— Helper 们的 electron.icns 是它们自己的图标。
+  const dup = path.join(resources, 'electron.icns');
+  if (fs.existsSync(dup)) {
+    fs.rmSync(dup, { force: true });
+    console.log('[build] 已删除重复的 electron.icns（图标只留一份）');
+  }
   // touch 让 LaunchServices / Finder 重新读图标，否则换图后仍显示旧缓存
   run('touch', [appPath]);
   console.log('[build] 图标已安装：icon.icns');
+}
+
+// 让 LaunchServices 忘掉这个 bundle。
+//
+// 为什么必须做：dist 里的 .app 和 /Applications 里的 .app 是**同一个 bundle id**
+// 的两份拷贝。LS 数据库里同 id 多条记录时，Dock / Finder 有可能解析到构建目录
+// 那一份 —— 它的图标是上一版甚至上上版的，于是"图标一会大一会小"。
+// 卸载注册不影响 ditto 拷贝，也不影响用户手动双击（双击时会重新注册）。
+function unregisterBundle(appPath) {
+  const lsregister = '/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister';
+  const r = spawnSync(lsregister, ['-u', appPath], { encoding: 'utf8' });
+  if (r.status === 0) console.log(`[build] 已从 LaunchServices 注销构建目录副本：${path.basename(appPath)}`);
+  else console.log('[build] 注销构建目录副本失败（不致命，继续）');
 }
 
 function main() {
@@ -250,6 +299,7 @@ function build(packager, args) {
       console.log(`[build] app bundle: ${appPath}`);
       console.log(`[build] app size:   ${mb(size)}`);
       installIcon(appPath);
+      unregisterBundle(appPath);
 
       if (args.skipDmg) {
         console.log('[build] --skip-dmg，不压 dmg');

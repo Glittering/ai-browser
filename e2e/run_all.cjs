@@ -45,6 +45,9 @@ const SUITES = [
   // multiagent —— 多个 agent 并用：各自的目标、互不干扰、目标被关掉要报错
   // background —— 窗口隐藏/最小化时全能力可用（无头式无人值守）
   'multiagent', 'background',
+  // icon —— 应用图标的两条渲染路径必须同尺寸（bundle 的 icns vs 源码启动的
+  //         dock.setIcon）。用户报"图标一会大一会小"就是这条不一致（2026-10-29）。
+  'icon',
   // flicker（帧级：加载时画面不许缩成一小块）**故意不在这里**：它要屏幕录制权限、
   // 窗口必须真的在屏幕上、且一轮要录 7 秒 × 3 轮。单独跑：`npm run flicker`。
 ];
