@@ -6,12 +6,12 @@
     "url": "https://github.com/Glittering/ai-browser",
     "source": "github"
   },
-  "version": "2.4.0",
+  "version": "2.4.1",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@glittering0717/ai-browser",
-      "version": "2.4.0",
+      "version": "2.4.1",
       "runtimeHint": "npx",
       "runtimeArguments": [
         { "type": "positional", "value": "-y" }
