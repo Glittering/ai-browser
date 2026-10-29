@@ -129,12 +129,40 @@ const ANIM_PAGE = (mode) => `<!doctype html><html><head><meta charset="utf-8">
 </script>
 </body></html>`;
 
+// 稳定重绘页（2026-10-29 新增）：每 16ms 重绘**完全相同**的内容，只有第一次指针
+// 按下时多画一个方块，之后就再也不变。
+//
+// 为什么要这个夹具：这是"页面自己一直在画"的那一类（动画循环、协作光标、直播），
+// 之前工具对它的画布证据只能一律回答"不可判"。现在靠完整帧哈希（last）能判了：
+// 第一次按下 → 完整帧变了 → changed:true；第二次按下 → 完整帧没变 → changed:false。
+// **后者是这个夹具存在的理由**：在持续重绘的页面上说出"你这一手没反应"。
+const REPEAT_PAGE = `<!doctype html><html><head><meta charset="utf-8">
+<title>Repeat-Repaint</title>
+<style>html,body{margin:0;padding:0;overflow:hidden;background:#fff}canvas{display:block}</style>
+</head><body>
+<canvas id="cv" width="900" height="600"></canvas>
+<script>
+(function () {
+  var c = document.getElementById('cv'), x = c.getContext('2d'), extra = 0;
+  c.addEventListener('pointerdown', function () { extra = 1; });
+  window.__shapeCount = function () { return extra ? 2 : 1; };
+  setInterval(function () {
+    x.clearRect(0, 0, 900, 600);
+    x.fillStyle = '#ffffff'; x.fillRect(0, 0, 900, 600);
+    x.strokeStyle = '#000000'; x.lineWidth = 2; x.strokeRect(100, 100, 60, 60);
+    if (extra) { x.strokeStyle = '#cc0000'; x.strokeRect(400, 300, 60, 60); }
+  }, 16);
+})();
+</script>
+</body></html>`;
+
 function startServer() {
   return new Promise((resolve) => {
     const server = http.createServer((req, res) => {
       res.setHeader("Content-Type", "text/html; charset=utf-8");
       const u = String(req.url || "");
       if (u.startsWith("/anim")) res.end(ANIM_PAGE(/drift/.test(u) ? 'drift' : 'same'));
+      else if (u.startsWith("/repeat")) res.end(REPEAT_PAGE);
       else res.end(u.startsWith("/board") ? BOARD_PAGE : CANVAS_PAGE);
     });
     server.listen(0, "127.0.0.1", () => resolve(server));
@@ -377,13 +405,16 @@ async function main() {
     dr.canvas_idle === true, JSON.stringify(dr.canvas_idle));
 
   // ==========================================================================
-  // 9) 反面：画布自己在动的时候，工具必须闭嘴
+  // 9) 画布自己在动的时候：能判就判，判不了就说判不了（绝不许猜）
   //
   // 这一组是红队评审逼出来的。第一版把探针字段写成 `fp:n:frames`，而 n/frames
   // 单调递增 —— 于是"内容一模一样地重绘一遍"也会让 page_changed 为真，
   // 恰好把 page_probe 的原始动机（抓"点了没反应"）反过来废掉。
-  // 三条断言分别钉住：同内容重绘不算变、自漂页不谎称变了、而自漂这件事本身
-  // 确实存在（最后一组阴性对照，证明不是我们把眼睛闭上了）。
+  //
+  // 三个形态必须分开（用一个量回答两个问题就会错）：
+  //   same   每帧内容相同  → 完整帧哈希恒定 → **可判**（CB-14/15）
+  //   drift  每帧内容不同  → 不可归因       → **不可判**，且不谎称变了（CB-16..19）
+  //   repeat 第一次按下才变 → 持续重绘页上也能说出"你这一手没反应"（CB-20..22）
   // ==========================================================================
   console.log("\n[画布自己在动时：不能谎称『我这一手生效了』]");
   const sameTab = (await b.call("ui.new_tab", { url: HOST + "/anim?mode=same" }, 20000)).result.tab;
@@ -429,9 +460,15 @@ async function main() {
     spr.page_changed === false,
     `page_changed=${spr.page_changed} canvas_changed=${JSON.stringify(spr.canvas_changed)} ` +
     `canvas_idle=${JSON.stringify(spr.canvas_idle)}`);
-  check("CB-15 该页被标定为「自己在画」→ canvas_changed:null，不谎称变了也不谎称没变",
-    spr.canvas_changed === null && spr.canvas_idle === false,
-    `canvas_changed=${JSON.stringify(spr.canvas_changed)} canvas_idle=${JSON.stringify(spr.canvas_idle)}`);
+  // 这一条是 P2 的**能力提升**，不是回归：以前"页面自己在重绘"一律只能回答
+  // canvas_changed:null（不可判），现在这种**每帧内容相同**的重绘页可以判了 ——
+  // 靠完整帧哈希（hook 在帧边界提交的 last，与采样相位无关）。
+  // 按 Esc 什么都没变 → canvas_changed:false（有证据的"没变"），而
+  // canvas_repeat:true 告诉调用方"这一页在重绘，但判定仍然有效"。
+  check("CB-15 稳定重绘页现在可判：canvas_changed:false + canvas_repeat:true（不再是 null）",
+    spr.canvas_changed === false && spr.canvas_repeat === true && spr.canvas_idle === false,
+    `canvas_changed=${JSON.stringify(spr.canvas_changed)} repeat=${JSON.stringify(spr.canvas_repeat)} ` +
+    `idle=${JSON.stringify(spr.canvas_idle)}`);
 
   const driftTab = (await b.call("ui.new_tab", { url: HOST + "/anim?mode=drift" }, 20000)).result.tab;
   await sleep(2500);
@@ -465,6 +502,67 @@ async function main() {
     dpr.canvas_changed === null, JSON.stringify(dpr.canvas_changed));
   dcheck("CB-19 自漂页上 page_changed 不因画布自转而变成 true",
     dpr.page_changed === false, `page_changed=${dpr.page_changed} hint=${String(dpr.effect_hint || "").slice(0, 80)}`);
+
+  // ==========================================================================
+  // 10) 持续重绘的页面上，**说出"你这一手没反应"**
+  //
+  // 这是本次能力提升的正面：/repeat 页每 16ms 重绘完全相同的画面，只有在**第一次**
+  // 指针按下时多画一个方块。所以
+  //   第一次拖 → 完整帧换了 → canvas_changed:true
+  //   第二次拖 → 完整帧没变 → canvas_changed:false   ← 这一条才是重点
+  //
+  // 第二条以前是做不到的：这种页面上"画布变了"永远成立（每帧都在画），
+  // 判定只能一律回答"不可判"。agent 因此永远不知道自己那一下有没有生效。
+  // 现在靠完整帧哈希能判，而页面自述的 __shapeCount() 是**独立证据**——
+  // 不靠我们自己的探针证明"它真的没变"（否则就是自证）。
+  // ==========================================================================
+  console.log("\n[持续重绘的页面上：能不能说出『这一手没反应』]");
+  const repeatTab = (await b.call("ui.new_tab", { url: HOST + "/repeat" }, 20000)).result.tab;
+  await sleep(2500);
+  const rpN1 = await b.call("ui.evaluate", { js: "window.__aiCanvasFp().n", tab: repeatTab });
+  await sleep(400);
+  const rpN2 = await b.call("ui.evaluate", { js: "window.__aiCanvasFp().n", tab: repeatTab });
+  const rpAlive = (Number(rpN2.result.value) || 0) - (Number(rpN1.result.value) || 0) >= 3;
+  const rpLast = await b.call("ui.evaluate", { js: "window.__aiCanvasFp().last", tab: repeatTab });
+  check("CB-20 前提：重复绘页确实每帧在画，且已有完整帧可读",
+    rpAlive && rpLast && rpLast.result.value !== null,
+    `n ${rpN1.result.value} → ${rpN2.result.value}, last=${JSON.stringify(rpLast && rpLast.result && rpLast.result.value)}`);
+
+  const rcheck = (name, cond, detail) =>
+    rpAlive ? check(name, cond, detail) : note("SKIP(重复绘页没在动) " + name);
+
+  const shape0 = await b.call("ui.evaluate", { js: "window.__shapeCount()", tab: repeatTab });
+  const rpDrag1 = await b.call("ui.act", {
+    action: "drag",
+    params: { from: { x: 120, y: 120 }, to: { x: 380, y: 300 }, steps: 10 },
+    tab: repeatTab,
+  }, 40000);
+  const rd1 = (rpDrag1 && rpDrag1.result) || {};
+  const shape1 = await b.call("ui.evaluate", { js: "window.__shapeCount()", tab: repeatTab });
+  rcheck("CB-21 第一次拖（页面首次 pointerdown → 内容变化）→ canvas_changed:true",
+    rd1.canvas_changed === true,
+    `canvas_changed=${JSON.stringify(rd1.canvas_changed)} repeat=${JSON.stringify(rd1.canvas_repeat)} ` +
+    `page_changed=${rd1.page_changed}`);
+  check("CB-21b 页面自述确实多了一个图元（独立证据，不是靠我们自己的探针）",
+    shape0.result.value === 1 && shape1.result.value === 2,
+    `${shape0.result.value} → ${shape1.result.value}`);
+
+  const rpDrag2 = await b.call("ui.act", {
+    action: "drag",
+    params: { from: { x: 120, y: 120 }, to: { x: 380, y: 300 }, steps: 10 },
+    tab: repeatTab,
+  }, 40000);
+  const rd2 = (rpDrag2 && rpDrag2.result) || {};
+  const shape2 = await b.call("ui.evaluate", { js: "window.__shapeCount()", tab: repeatTab });
+  // 之前这种页面上只能是 null。现在能说出"没变"，而且这句"没变"有页面自述背书。
+  rcheck("CB-22 重复绘页上第二次拖（内容不再改变）→ canvas_changed:false（不再是 null）",
+    rd2.canvas_changed === false,
+    `canvas_changed=${JSON.stringify(rd2.canvas_changed)} repeat=${JSON.stringify(rd2.canvas_repeat)} ` +
+    `page_changed=${rd2.page_changed}`);
+  check("CB-22b 阴性对照：页面自述的图元数确实没再增加（所以 false 是对的，不是我们瞎了）",
+    shape2.result.value === 2, `shapeCount=${shape2.result.value}`);
+  rcheck("CB-23 该回执带 canvas_repeat:true（告诉调用方页在重绘但判定有效）",
+    rd2.canvas_repeat === true, JSON.stringify(rd2.canvas_repeat));
 
   // 9) 总开关：AI_BROWSER_CANVAS_HOOK=0 时不注入。顺带钉住"指纹只能来自 hook"——
   //    否则 CB-1..CB-10 可能测的是一个与 hook 无关的东西。

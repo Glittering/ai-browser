@@ -51,7 +51,7 @@ describe('canvas 帧指纹 — 暴露与初值', () => {
     expect(typeof sand.__aiCanvasFp).toBe('function');
     // 不可枚举：不能被页面自己的 Object.keys(window) 扫到
     expect(Object.prototype.propertyIsEnumerable.call(sand, '__aiCanvasFp')).toBe(false);
-    expect(sand.__aiCanvasFp()).toEqual({ n: 0, fp: 0, frames: 0, on: 1 });
+    expect(sand.__aiCanvasFp()).toEqual({ n: 0, fp: 0, frames: 0, last: null, on: 1 });
   });
 
   it('CF-02 mode=off 返回 null，而不是 {n:0} —— "没在录"≠"录了但空"', () => {
@@ -118,6 +118,69 @@ describe('canvas 帧指纹 — 内容相同就是同一个指纹', () => {
     c.fillRect(0, 0, 800, 600);
     c.fillRect(10, 10, 100, 50);
     expect(sand.__aiCanvasFp().fp).toBe(b.fp);
+  });
+
+  it('CF-13 静态页只画一帧 → last 仍是 null，fp 非 0（所以静态页必须用 fp）', () => {
+    const { sand, ctx } = bootHook('semantic');
+    const c = ctx();
+    c.clearRect(0, 0, 800, 600); c.fillRect(0, 0, 800, 600); c.fillRect(10, 10, 100, 50);
+    const v = sand.__aiCanvasFp();
+    // 这一条是"不要拿 last 做唯一判据"的护栏：一次写入只产生一帧，而 last 要等
+    // **下一个**帧边界才提交 —— 静态页面上那个边界永远不来。
+    expect(v.last).toBeNull();
+    expect(v.fp).not.toBe(0);
+  });
+
+  it('CF-14 稳定重绘 → last 与采样相位无关（两次采样都一样）', () => {
+    const { sand, ctx } = bootHook('semantic');
+    const c = ctx();
+    const frame = () => { c.clearRect(0, 0, 800, 600); c.fillRect(0, 0, 800, 600); c.fillRect(10, 10, 100, 50); };
+    frame(); frame();
+    const a = sand.__aiCanvasFp();
+    expect(a.last).not.toBeNull();
+    expect(typeof a.last).toBe('number');
+    // 再画一帧同样内容，并在**帧中间**采样（模拟真实采样落点）
+    c.clearRect(0, 0, 800, 600);
+    const midFrame = sand.__aiCanvasFp();
+    // fp 在帧中间是半成品（前缀），而 last 不受影响
+    expect(midFrame.fp).not.toBe(a.fp);
+    expect(midFrame.last).toBe(a.last);
+    c.fillRect(0, 0, 800, 600); c.fillRect(10, 10, 100, 50);
+    expect(sand.__aiCanvasFp().last).toBe(a.last);
+  });
+
+  it('CF-15 第二帧多画一个形状 → last 变（这就是"动画页也能判"的依据）', () => {
+    const { sand, ctx } = bootHook('semantic');
+    const c = ctx();
+    const frame = (extra) => {
+      c.clearRect(0, 0, 800, 600); c.fillRect(0, 0, 800, 600); c.fillRect(10, 10, 100, 50);
+      if (extra) c.fillRect(200, 200, 60, 60);
+    };
+    frame(false); frame(false);
+    const before = sand.__aiCanvasFp().last;
+    // last 描述的是"最近一个**已被取代**的帧"，所以新内容要等再走完一帧才可见。
+    // 这个滞后在持续重绘的页面上只有一帧（约 16ms），也正是我们只用它判"重绘页"的原因
+    // —— 静态页不许用它（CF-13 就是那条护栏）。
+    frame(true);
+    expect(sand.__aiCanvasFp().last).toBe(before); // 还没提交，仍是上一帧
+    frame(true);
+    expect(sand.__aiCanvasFp().last).not.toBe(before); // 走完一帧后可见
+  });
+
+  it('CF-16 清屏前那一帧有内容 → 提交成 last；清屏后 fp 归零（两件事分开表达）', () => {
+    const { sand, ctx } = bootHook('semantic');
+    const c = ctx();
+    c.clearRect(0, 0, 800, 600); c.fillRect(10, 10, 100, 50);
+    const drawn = sand.__aiCanvasFp();          // 画完这一帧：fp 有值，还没有完整帧
+    expect(drawn.fp).not.toBe(0);
+    expect(drawn.last).toBeNull();              // 还没走到下一个帧边界
+
+    c.clearRect(0, 0, 800, 600);                // 清屏 = 帧边界
+    const afterClear = sand.__aiCanvasFp();
+    // 上一帧被完整提交下来（last），当前帧是空的（fp=0）—— 两个事实各有各的字段，
+    // 混成一个值就会出现"清空了却看不出"或"提交了假空帧"这类假话。
+    expect(afterClear.last).toBe(drawn.fp);
+    expect(afterClear.fp).toBe(0);
   });
 
   it('CF-08 增量绘制（从不整屏清屏）也累积 —— 否则"画了新笔画"永远看不见', () => {

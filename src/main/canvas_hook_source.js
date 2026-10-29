@@ -52,7 +52,9 @@ export function buildCanvasHookSource(opts = {}) {
   // 帧指纹（见 push 里的注释）。n = 记录到的绘制调用总数，fp = 自上次清屏以来的
   // 绘制序列哈希，frames = 见过的清屏次数。三个数一起构成"画布上现在是什么"的
   // 廉价摘要 —— 用它回答"变了没有"，不用它回答"画的是什么"。
-  var FP = { n: 0, fp: 0, frames: 0 };
+  // last = 最近一个**完整帧**的内容哈希（帧边界时提交），hasLast 区分"提交过 0"（空帧）
+  // 与"还没提交过"。为什么要它，见 push 里的帧边界注释。
+  var FP = { n: 0, fp: 0, frames: 0, last: 0, hasLast: 0, dirty: 0 };
 
   // ---- 小工具 ----------------------------------------------------------
 
@@ -216,10 +218,33 @@ export function buildCanvasHookSource(opts = {}) {
       var fk = rec.k;
       if (fk !== "meta" && fk !== "state") {
         if (fk === "clear" || rec.fb === 1) {
-          FP.fp = 0;
+          // 提交上一帧（归零前）—— 这是"完整帧"的唯一来源。
+          //
+          // 为什么需要它：上面那个 fp 是"自上次清屏以来的前缀哈希"，采样落在帧中间
+          // 就读到半成品。对**一直在重绘**的页面（动画、直播、协作者光标），这意味着
+          // 两次采样可能因为相位不同而报"变了"，于是"这一手到底生效没有"永远判不了
+          // （只能老实回答"不可判"）。而完整帧的哈希与采样相位无关：稳定重绘的页面
+          // 每帧都得到同一个 last，内容真变了立刻不同。
+          //
+          // 代价与边界：last 只在**下一个**帧边界才更新，所以静态页面（画完就停）
+          // 的 last 会滞后 —— 那种页面必须继续用 fp，不能拿 last 判。谁用哪个由
+          // page_probe 按"这一页在不在画"决定，这里只负责如实提供两个值。
+          // 只有"这一帧真的画过东西"才提交（dirty）。为什么不用"这是第几次清屏"：
+          // 真实渲染器常常 clearRect + 整屏铺底连发两条记录（两条都是帧边界），
+          // 按次数提交会在**开帧时就**把"空的"提交上去 —— 实测静态页只画一帧时
+          // last 变成 0，看起来像空画布（CF-13 抓到的就是这个）。
+          //
+          // 一帧什么都没画就不提交：此刻"画布变空了"由 fp=0 表达，不需要 last。
           FP.frames++;
+          if (FP.dirty) {
+            FP.last = FP.fp;
+            FP.hasLast = 1;
+          }
+          FP.fp = 0;
+          FP.dirty = 0;
         } else {
           FP.fp = ((FP.fp * 33) ^ hash32(sig)) >>> 0;
+          FP.dirty = 1;
         }
       }
     } catch (e) {}
@@ -712,7 +737,9 @@ export function buildCanvasHookSource(opts = {}) {
   // 不会走到第二次定义。
   var fpApi = function () {
     if (!recording) return null;
-    return { n: FP.n, fp: FP.fp, frames: FP.frames, on: 1 };
+    // last 用 null 表示"还没有完整帧"（而不是 0）—— 0 是一个合法的空帧哈希，
+    // 两者混在一起会让"画布刚被清空"和"从没画过"长得一样。
+    return { n: FP.n, fp: FP.fp, frames: FP.frames, last: FP.hasLast ? FP.last : null, on: 1 };
   };
   try {
     Object.defineProperty(G, "__aiCanvasFp", {

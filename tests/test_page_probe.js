@@ -135,7 +135,16 @@ describe('probe 开关与等待', () => {
 //   3. 没有 canvas 指纹（c 缺失）→ 与加这个信号之前**逐字节一致**（旧行为不许漂移）
 // c = 帧指纹；k = 绘制计数（判断空闲窗口里"画过没有"）；v = visibilityState。
 // 后两个是空闲标定的正证据，缺了它们只能得到 canvasIdle:null（不可判）。
-const PC = (t, n, d, c, u = 'https://a.test/x', k = 0, v = 'visible') => ({ t, h: 'h' + t, n, d, u, c, k, v });
+// l = 完整帧哈希（hook 在帧边界提交的、与采样相位无关的那个值）。
+// 只有它能让"一直在重绘的页面"变得可判：fp 会因采样落在帧内不同位置而变，
+// last 只随内容变。
+const PC = (t, n, d, c, u = 'https://a.test/x', k = 0, v = 'visible', l) => ({ t, h: 'h' + t, n, d, u, c, k, v, l });
+// 造"稳定重绘"页面的三份空闲样本：计数在涨（在画），完整帧恒定（每帧一样）。
+const idleRepeat = (last, base = 10) => ([
+  PC(100, 500, 0, 'p1', undefined, base, 'visible', last),
+  PC(100, 500, 0, 'p2', undefined, base + 8, 'visible', last),
+  PC(100, 500, 0, 'p3', undefined, base + 16, 'visible', last),
+]);
 
 describe('diffProbe — canvas 帧指纹', () => {
   it('PP-17 DOM 一字未变、只有画布重绘 → changed:true 且 domChanged:false', () => {
@@ -226,7 +235,7 @@ describe('diffProbe — 空闲标定（画布会不会自己动）', () => {
     const out = applyProbe(
       { success: true, effect_state: 'committed' },
       PC(100, 500, 0, 'f1'), PC(100, 500, 0, 'f2'), 'drag',
-      { idleBaseline: PC(100, 500, 0, 'f0') }, // 空闲期指纹就在变
+      { idleSamples: [PC(100, 500, 0, 'f0')]}, // 空闲期指纹就在变
     );
     expect(out.page_changed).toBe(false);
     expect(out.canvas_changed).toBeNull();
@@ -242,7 +251,7 @@ describe('diffProbe — 空闲标定（画布会不会自己动）', () => {
     const out = applyProbe(
       { success: true, effect_state: 'committed' },
       PC(100, 500, 0, 'f1'), PC(100, 500, 0, 'f2'), 'paste',
-      { idleBaseline: PC(100, 500, 0, 'f0') },
+      { idleSamples: [PC(100, 500, 0, 'f0')]},
     );
     expect(out.canvas_changed).toBeNull();
     expect(out.canvas_idle).toBe(false);
@@ -255,7 +264,7 @@ describe('diffProbe — 空闲标定（画布会不会自己动）', () => {
       { success: true, effect_state: 'committed' },
       // 空闲窗口里一次绘制都没有（k 一直是 3）→ 页面确实静止，变化可归因给动作
       PC(100, 500, 0, 'f1', undefined, 3), PC(100, 500, 0, 'f2', undefined, 9), 'drag',
-      { idleBaseline: PC(100, 500, 0, 'f1', undefined, 3) },
+      { idleSamples: [PC(100, 500, 0, 'f1', undefined, 3)]},
     );
     expect(out.page_changed).toBe(true);
     expect(out.canvas_changed).toBe(true);
@@ -273,7 +282,7 @@ describe('diffProbe — 空闲标定（画布会不会自己动）', () => {
     const out = applyProbe(
       { success: true, effect_state: 'committed' },
       PC(100, 500, 0, 'f1', undefined, 5), PC(100, 500, 0, 'f2', undefined, 9), 'drag',
-      { idleBaseline: PC(100, 500, 0, 'f1', undefined, 2) }, // k 2→5，画了 3 笔
+      { idleSamples: [PC(100, 500, 0, 'f1', undefined, 2)]}, // k 2→5，画了 3 笔
     );
     expect(out.canvas_idle).toBe(false);
     expect(out.canvas_changed).toBeNull();
@@ -283,7 +292,7 @@ describe('diffProbe — 空闲标定（画布会不会自己动）', () => {
   it('PP-27 自漂页但 DOM 也变了 → 结论由 DOM 决定，画布仍标为不可用', () => {
     const out = applyProbe(
       { success: true }, PC(100, 500, 0, 'f1'), PC(100, 620, 0, 'f2'), 'click',
-      { idleBaseline: PC(100, 500, 0, 'f0') },
+      { idleSamples: [PC(100, 500, 0, 'f0')]},
     );
     expect(out.page_changed).toBe(true);   // DOM +120 节点，这是可信的
     expect(out.canvas_changed).toBeNull(); // 画布这一半不可用，如实说
@@ -299,12 +308,13 @@ describe('diffProbe — 空闲标定（画布会不会自己动）', () => {
       PC(100, 500, 0, 'f1', undefined, 3, 'hidden'),
       PC(100, 500, 0, 'f1', undefined, 3, 'hidden'),
       'click',
-      { idleBaseline: PC(100, 500, 0, 'f1', undefined, 3, 'hidden') },
+      { idleSamples: [PC(100, 500, 0, 'f1', undefined, 3, 'hidden')]},
     );
     expect(out.canvas_idle).toBeNull();
-    // canvas_changed 仍然是 false（画布确实没变，这是有价值的确定信息），
-    // 但 canvas_idle 必须是 null：能说"没变"，不能说"它不会自己变"。
-    expect(out.canvas_changed).toBe(false);
+    // canvas_changed 也必须是 null，不能是 false：这一页在后台被节流，我们**没有**
+    // 真的看见画布没变。旧版在这里报 false（"画布确实没变"），那是把"没观测到"
+    // 说成"观测到没变"—— 同一个"自述比事实好看"的坏习惯。
+    expect(out.canvas_changed).toBeNull();
     expect('canvas_idle' in out).toBe(true);
   });
 
@@ -317,7 +327,7 @@ describe('diffProbe — 空闲标定（画布会不会自己动）', () => {
       PC(100, 500, 0, 'f2', undefined, 9, 'hidden'),
       'click',
       {
-        idleBaseline: PC(100, 500, 0, 'f1', undefined, 3, 'hidden'),
+        idleSamples: [PC(100, 500, 0, 'f1', undefined, 3, 'hidden')],
         postBaseline: PC(100, 500, 0, 'f3', undefined, 24, 'hidden'), // 还在画
       },
     );
@@ -333,7 +343,7 @@ describe('diffProbe — 空闲标定（画布会不会自己动）', () => {
       PC(100, 500, 0, 'f2', undefined, 6, 'visible'),
       'drag',
       {
-        idleBaseline: PC(100, 500, 0, 'f1', undefined, 3, 'visible'),
+        idleSamples: [PC(100, 500, 0, 'f1', undefined, 3, 'visible')],
         postBaseline: PC(100, 500, 0, 'f2', undefined, 6, 'visible'), // 停了
       },
     );
@@ -350,7 +360,7 @@ describe('diffProbe — 空闲标定（画布会不会自己动）', () => {
       PC(100, 500, 0, 'f2', undefined, 9, 'visible'),
       'click',
       {
-        idleBaseline: PC(100, 500, 0, 'f1', undefined, 2, 'visible'), // 空闲期静止
+        idleSamples: [PC(100, 500, 0, 'f1', undefined, 2, 'visible')], // 空闲期静止
         postBaseline: PC(100, 500, 0, 'f3', undefined, 20, 'visible'), // 动作后仍在变
       },
     );
@@ -389,5 +399,128 @@ describe('shared/page_probe 导出形状', () => {
     expect(typeof v).toBe('number');
     expect(v).toBeGreaterThan(0);
     expect(Number.isFinite(v)).toBe(true);
+  });
+});
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 稳定重绘页（PP-32..38）：这一组是本次改动的产出 ——
+//
+// 之前凡是"页面自己一直在重绘"的画布应用（动画循环、同内容刷新、协作光标），
+// 画布证据一律是 null（不可判）。诚实，但没用：agent 在这种页面上永远不知道自己
+// 那一下有没有生效。
+//
+// 现在能判了，靠的是**完整帧哈希**（hook 在帧边界提交的 last）：它与采样相位无关，
+// 稳定重绘的页面每帧都得到同一个值，内容真变了立刻不同。判据分两边：
+//   在不在画  → 绘制计数 / 指纹变没变（与相位无关）
+//   变了没有  → 在画就比 last，静止就比 fp
+// ─────────────────────────────────────────────────────────────────────────────
+describe('diffProbe — 稳定重绘的页面也能判（不再一律"不可判"）', () => {
+  it('PP-32 每帧内容相同：fp 因相位变了，但完整帧没变 → 判"没变"', () => {
+    const out = applyProbe(
+      { success: true },
+      PC(100, 500, 0, 'p3', undefined, 26, 'visible', 777),
+      PC(100, 500, 0, 'p1', undefined, 30, 'visible', 777), // 采样落在帧开头，fp 不同
+      'click',
+      { idleSamples: idleRepeat(777) },
+    );
+    expect(out.page_changed).toBe(false);
+    expect(out.canvas_changed).toBe(false);
+    expect(out.canvas_repeat).toBe(true);   // 让调用方知道"这页在重绘，但判定仍然有效"
+    expect(out.canvas_idle).toBe(false);    // 它确实在画，不是静止
+  });
+
+  it('PP-33 同样的一页，动作真的改了画布 → 判"变了"', () => {
+    const out = applyProbe(
+      { success: true, effect_state: 'committed' },
+      PC(100, 500, 0, 'p3', undefined, 26, 'visible', 777),
+      PC(100, 500, 0, 'p2', undefined, 31, 'visible', 888), // 完整帧换了
+      'drag',
+      { idleSamples: idleRepeat(777) },
+    );
+    expect(out.page_changed).toBe(true);
+    expect(out.canvas_changed).toBe(true);
+    expect(out.canvas_repeat).toBe(true);
+    expect(out.effect_state).toBe('committed');
+    expect(out.effect_hint).toMatch(/do not redo/i);
+  });
+
+  it('PP-34 漂移页（完整帧每帧都不同）→ 仍然"不可判"，且不谎称变了', () => {
+    const out = applyProbe(
+      { success: true },
+      PC(100, 500, 0, 'p3', undefined, 26, 'visible', 900),
+      PC(100, 500, 0, 'p1', undefined, 30, 'visible', 950),
+      'click',
+      { idleSamples: [
+        PC(100, 500, 0, 'p1', undefined, 10, 'visible', 100),
+        PC(100, 500, 0, 'p2', undefined, 18, 'visible', 200),
+        PC(100, 500, 0, 'p3', undefined, 26, 'visible', 300),
+      ] },
+    );
+    expect(out.page_changed).toBe(false);
+    expect(out.canvas_changed).toBeNull();
+    expect(out.canvas_repeat).toBe(false);
+    expect(out.canvas_idle).toBe(false);
+    expect(out.effect_hint).toMatch(/unusable/i);
+  });
+
+  it('PP-35 在画但拿不到完整帧（增量渲染器）→ 不可判，不许猜', () => {
+    const out = applyProbe(
+      { success: true },
+      PC(100, 500, 0, 'p3', undefined, 26, 'visible'),
+      PC(100, 500, 0, 'p1', undefined, 30, 'visible'),
+      'drag',
+      { idleSamples: [
+        PC(100, 500, 0, 'p1', undefined, 10, 'visible', null),
+        PC(100, 500, 0, 'p2', undefined, 18, 'visible', null),
+        PC(100, 500, 0, 'p3', undefined, 26, 'visible', null),
+      ] },
+    );
+    expect(out.canvas_changed).toBeNull();
+    expect(out.canvas_repeat).toBe(false);
+    expect(out.canvas_idle).toBe(false); // 在画是确定的
+    expect(out.page_changed).toBe(false);
+  });
+
+  it('PP-36 稳定重绘页 + DOM 也变了 → 两条通路各自成立，不互相掩盖', () => {
+    const out = applyProbe(
+      { success: true },
+      PC(100, 500, 0, 'p3', undefined, 26, 'visible', 777),
+      PC(140, 500, 0, 'p3', undefined, 31, 'visible', 777), // DOM 变了，画布没变
+      'click',
+      { idleSamples: idleRepeat(777) },
+    );
+    expect(out.dom_changed).toBe(true);
+    expect(out.canvas_changed).toBe(false);
+    expect(out.page_changed).toBe(true);
+    expect(out.effect_hint).toBeUndefined(); // DOM 已经解释了变化，不再啰嗦
+  });
+
+  it('PP-37 稳定重绘页 + 写类动作但完整帧没变 → 真的没落地，降级成先验证', () => {
+    const out = applyProbe(
+      { success: true, effect_state: 'committed' },
+      PC(100, 500, 0, 'p3', undefined, 26, 'visible', 777),
+      PC(100, 500, 0, 'p1', undefined, 30, 'visible', 777),
+      'paste',
+      { idleSamples: idleRepeat(777) },
+    );
+    expect(out.page_changed).toBe(false);
+    expect(out.canvas_changed).toBe(false);
+    // 这里的"没变"是**有证据的**没变（不像 PP-34/35 是判不了），所以可以降级
+    expect(out.effect_state).toBe('unknown');
+    expect(out.retry).toBe('verify_first');
+    expect(out.effect_hint).toMatch(/payload/i);
+  });
+
+  it('PP-38 只有一个空闲样本 → 不许声称"稳定重绘"（证据不足）', () => {
+    const out = applyProbe(
+      { success: true },
+      PC(100, 500, 0, 'p3', undefined, 26, 'visible', 777),
+      PC(100, 500, 0, 'p1', undefined, 30, 'visible', 888),
+      'drag',
+      { idleSamples: [PC(100, 500, 0, 'p1', undefined, 10, 'visible', 777)] },
+    );
+    expect(out.canvas_repeat).toBe(false);
+    expect(out.canvas_changed).toBeNull();
   });
 });
