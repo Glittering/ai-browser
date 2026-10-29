@@ -119,3 +119,83 @@ describe('probe 开关与等待', () => {
     expect(() => new Function('return ' + PAGE_PROBE_JS)).not.toThrow();
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// canvas 指纹（2026-10-29）
+//
+// 为什么单独一组：上面 16 条全是 DOM 信号，而**纯 canvas 应用的写入在 DOM 上常常
+// 是零字节**。实测 Excalidraw：拖出一个矩形，DOM 节点数与文本哈希都不变，于是
+// page_changed 只能靠"选中后右侧属性面板出现"这种副作用偶然为真；动作一旦不产生
+// 面板变化（移动已有图元、画布空白处涂色），就会报 false 并附一句"payload 很可能
+// 没落地" —— 把成功的写入说成失败。
+//
+// 三条边界必须同时钉住，缺一条就会走向反面：
+//   1. 只 canvas 变 → changed:true（新增的能力）
+//   2. 有 canvas 但两边都不变 → changed:false（不能变成恒真）
+//   3. 没有 canvas 指纹（c 缺失）→ 与加这个信号之前**逐字节一致**（旧行为不许漂移）
+const PC = (t, n, d, c, u = 'https://a.test/x') => ({ t, h: 'h' + t, n, d, u, c });
+
+describe('diffProbe — canvas 帧指纹', () => {
+  it('PP-17 DOM 一字未变、只有画布重绘 → changed:true 且 domChanged:false', () => {
+    const d = diffProbe(PC(100, 500, 0, 'abc:40:2'), PC(100, 500, 0, 'def:44:2'));
+    expect(d.changed).toBe(true);
+    expect(d.domChanged).toBe(false);
+    expect(d.canvasChanged).toBe(true);
+  });
+
+  it('PP-18 有指纹但两边相同 → changed:false（阳性对照：不能恒真）', () => {
+    const d = diffProbe(PC(100, 500, 0, 'abc:40:2'), PC(100, 500, 0, 'abc:40:2'));
+    expect(d.changed).toBe(false);
+    expect(d.canvasChanged).toBe(false);
+    expect(d.domChanged).toBe(false);
+  });
+
+  it('PP-19 页面没有 canvas 指纹 → canvasChanged:null，结论仍由 DOM 决定', () => {
+    const same = diffProbe(P(100, 500, 0), P(100, 500, 0));
+    expect(same.canvasChanged).toBeNull();
+    expect(same.changed).toBe(false);
+    const moved = diffProbe(P(100, 500, 0), P(100, 501, 0));
+    expect(moved.canvasChanged).toBeNull();
+    expect(moved.changed).toBe(true);
+  });
+
+  it('PP-20 只有一侧有指纹（探针执行期间 hook 刚装上）→ 不下结论', () => {
+    expect(diffProbe(PC(100, 500, 0, 'abc:1:0'), P(100, 500, 0)).canvasChanged).toBeNull();
+    expect(diffProbe(P(100, 500, 0), PC(100, 500, 0, 'abc:1:0')).canvasChanged).toBeNull();
+  });
+
+  it('PP-21 仅画布变化时回执要说明"DOM 没动"，且不把写类动作判成没落地', () => {
+    const out = applyProbe(
+      { success: true, effect_state: 'committed' },
+      PC(100, 500, 0, 'abc:40:2'), PC(100, 500, 0, 'def:47:2'), 'drag',
+    );
+    expect(out.page_changed).toBe(true);
+    expect(out.canvas_changed).toBe(true);
+    expect(out.effect_hint).toMatch(/canvas/i);
+    // 关键：不能因为"DOM 没变"就把已经观测到画布变化的写操作降级成 unknown
+    expect(out.effect_state).toBe('committed');
+    expect(out.retry).toBeUndefined();
+  });
+
+  it('PP-22 DOM 正常变化时不多说一个字（不制造噪音）', () => {
+    const out = applyProbe({ success: true }, PC(100, 500, 0, 'a:1:0'), PC(120, 500, 0, 'b:2:0'), 'click');
+    expect(out.page_changed).toBe(true);
+    expect(out.canvas_changed).toBeUndefined();
+    expect(out.effect_hint).toBeUndefined();
+  });
+
+  it('PP-23 两边都不变时写类动作仍降级 effect_state（canvas 信号不掩盖真失败）', () => {
+    const out = applyProbe(
+      { success: true, effect_state: 'committed' },
+      PC(100, 500, 0, 'abc:40:2'), PC(100, 500, 0, 'abc:40:2'), 'paste',
+    );
+    expect(out.page_changed).toBe(false);
+    expect(out.effect_state).toBe('unknown');
+    expect(out.retry).toBe('verify_first');
+    expect(out.effect_hint).toMatch(/payload/i);
+  });
+
+  it('PP-24 探针脚本读的是固定名 window.__aiCanvasFp', () => {
+    expect(PAGE_PROBE_JS).toContain('__aiCanvasFp');
+  });
+});

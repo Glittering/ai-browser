@@ -50,11 +50,56 @@ const CANVAS_PAGE = `<!doctype html><html><head><meta charset="utf-8">
 </script>
 </body></html>`;
 
+// 纯 canvas 白板夹具：**整个文档就是一块 canvas**，图元存在闭包里。
+//
+// 存在的理由：本项目所有"动作是否生效"的判据都来自 DOM（文本哈希、节点数、
+// 焦点长度），而这类应用的写入在 DOM 上是**零字节**。实测 Excalidraw
+// （2026-10-29）：拖出一个矩形，DOM 一个节点都没多，page_changed 只能靠
+// "选中后右侧属性面板出现"这种副作用偶然为真。这个夹具把副作用全部去掉 ——
+// 页面上除了 canvas 什么都没有，除了绘制没有任何 DOM 动静 —— 于是"能不能看见
+// 画布变化"变成唯一决定成败的条件。
+//
+// 刻意不用 pointer 事件：夹具要测的是探针，不是浏览器的事件合成，
+// mousedown/mousemove/mouseup 是 CDP 一定会派发的。
+const BOARD_PAGE = `<!doctype html><html><head><meta charset="utf-8">
+<title>BoardFixture</title>
+<style>html,body{margin:0;padding:0;overflow:hidden;background:#fff}canvas{display:block}</style>
+</head><body>
+<canvas id="cv" width="900" height="600"></canvas>
+<script>
+(function () {
+  var c = document.getElementById('cv'), x = c.getContext('2d');
+  var shapes = [];       // 闭包内部状态：DOM 上看不见，正是本夹具的意义
+  var drawing = null;
+  function paint() {
+    x.fillStyle = '#ffffff'; x.fillRect(0, 0, 900, 600);
+    x.strokeStyle = '#000000'; x.lineWidth = 2;
+    for (var i = 0; i < shapes.length; i++) {
+      var s = shapes[i];
+      x.strokeRect(s.x, s.y, s.w, s.h);
+    }
+  }
+  c.addEventListener('mousedown', function (e) {
+    drawing = { x: e.offsetX, y: e.offsetY, w: 0, h: 0 };
+    shapes.push(drawing); paint();
+  });
+  c.addEventListener('mousemove', function (e) {
+    if (!drawing) return;
+    drawing.w = e.offsetX - drawing.x; drawing.h = e.offsetY - drawing.y; paint();
+  });
+  c.addEventListener('mouseup', function () { drawing = null; paint(); });
+  paint();
+  // 仅供测试自证："动作真的改变了页面内部状态"，而不是只看我们自己的探针。
+  window.__shapeCount = function () { return shapes.length; };
+})();
+</script>
+</body></html>`;
+
 function startServer() {
   return new Promise((resolve) => {
     const server = http.createServer((req, res) => {
       res.setHeader("Content-Type", "text/html; charset=utf-8");
-      res.end(CANVAS_PAGE);
+      res.end(String(req.url || "").startsWith("/board") ? BOARD_PAGE : CANVAS_PAGE);
     });
     server.listen(0, "127.0.0.1", () => resolve(server));
   });
@@ -224,7 +269,76 @@ async function main() {
     JSON.stringify(afterClear && afterClear.result && afterClear.result.retention));
   void cleared;
 
-  // 7) 总开关：默认不注入，必须显式 AI_BROWSER_CANVAS_HOOK=1
+  // ==========================================================================
+  // 8) 纯 canvas 白板：写入必须被"看见"
+  //
+  // 这一组是本套件里唯一断言"**验证能力**"而不是"读取能力"的部分。前面 C-01..C-12
+  // 都在问"能不能读到页面画了什么"；这一组问的是"我做了一个动作，工具能不能证明
+  // 它发生了"。后者才是产品唯一的赌注 —— 读取可以退化成截图，验证不能。
+  //
+  // 判据刻意分成两层，缺一层就自欺：
+  //   我们自己观测到的（page_changed / canvas_changed / ui.diff）
+  //   页面自己说的（window.__shapeCount()）
+  // 只有两层一致，"看见了"才算成立。
+  // ==========================================================================
+  console.log("\n[纯 canvas 白板：写入的可验证性]");
+  const boardTab = await b.call("ui.new_tab", { url: HOST + "/board" }, 20000);
+  const boardId = boardTab.result.tab;
+  await sleep(2500);
+  const fpShape = await b.call("ui.evaluate", { js: "typeof window.__aiCanvasFp", tab: boardId });
+  check("CB-1 页面暴露了 canvas 帧指纹（hook 接线）",
+    fpShape && fpShape.result && fpShape.result.value === "function",
+    JSON.stringify(fpShape && fpShape.result && fpShape.result.value));
+  const n0 = await b.call("ui.evaluate", { js: "window.__shapeCount()", tab: boardId });
+  check("CB-2 初始没有图元", n0 && n0.result && n0.result.value === 0,
+    JSON.stringify(n0 && n0.result && n0.result.value));
+
+  const boardSnap = await b.call("ui.snapshot", { tab: boardId, label: "board-before" });
+  const dragRes = await b.call("ui.act", {
+    action: "drag",
+    params: { from: { x: 120, y: 120 }, to: { x: 380, y: 300 }, steps: 10 },
+    tab: boardId,
+  }, 40000);
+  const dr = (dragRes && dragRes.result) || {};
+  // 这是核心断言：DOM 一个字没变（页面上只有一块 canvas），但动作成功了。
+  check("CB-3 drag 成功且 DOM 零变化也判定为 page_changed",
+    dr.success === true && dr.page_changed === true,
+    `success=${dr.success} page_changed=${dr.page_changed} delta=${JSON.stringify(dr.page_delta)}`);
+  check("CB-4 回执明确说明变化来自 canvas（canvas_changed）",
+    dr.canvas_changed === true, JSON.stringify(dr.canvas_changed));
+  check("CB-5 仅画布变化时不给 page_delta（DOM 确实没动）",
+    dr.page_delta === undefined, JSON.stringify(dr.page_delta));
+  check("CB-6 回执解释了'为什么 DOM 没变却算变了'",
+    typeof dr.effect_hint === "string" && /canvas/i.test(dr.effect_hint),
+    String(dr.effect_hint || "").slice(0, 120));
+
+  // 页面自证：动作真的落地了
+  const n1 = await b.call("ui.evaluate", { js: "window.__shapeCount()", tab: boardId });
+  check("CB-7 页面内部状态真的变了（自证，不只看自己的探针）",
+    n1 && n1.result && n1.result.value === 1,
+    JSON.stringify(n1 && n1.result && n1.result.value));
+
+  const boardDiff = await b.call("ui.diff", { snapshot: boardSnap.result.snapshot, tab: boardId }, 40000);
+  const bd = (boardDiff && boardDiff.result) || {};
+  // 字段名注意：`changed` 是布尔（本轮判定的结论），差异条目在 `changed_paths` /
+  // `added` / `removed` 里。混用会得到 "changed is not iterable"。
+  const touchedCanvas = [...(bd.added || []), ...(bd.changed_paths || []), ...(bd.removed || [])]
+    .some((e) => String(e.path || "").startsWith("canvas"));
+  check("CB-8 ui.diff 对画布写入给出 changed", bd.changed === true,
+    `verdict=${bd.verdict} counts=${JSON.stringify(bd.counts)}`);
+  check("CB-9 diff 的差异条目里出现 canvas 字段（不是靠别的巧合报 changed）",
+    touchedCanvas, JSON.stringify((bd.changed_paths || []).slice(0, 3)));
+
+  // 阳性对照：什么都不做，指纹不能自己动 —— 否则 CB-8 是假绿。
+  const still1 = await b.call("ui.snapshot", { tab: boardId, label: "board-still-1" });
+  await sleep(600);
+  const still2 = await b.call("ui.diff", { snapshot: still1.result.snapshot, tab: boardId }, 40000);
+  const st = (still2 && still2.result) || {};
+  check("CB-10 静止不动时 diff 判 unchanged（画布指纹不会自己漂）",
+    st.changed === false, `verdict=${st.verdict} counts=${JSON.stringify(st.counts)}`);
+
+  // 9) 总开关：AI_BROWSER_CANVAS_HOOK=0 时不注入。顺带钉住"指纹只能来自 hook"——
+  //    否则 CB-1..CB-10 可能测的是一个与 hook 无关的东西。
   const offPort = WS_PORT + 1;
   console.log("\n[总开关：AI_BROWSER_CANVAS_HOOK=0 时关闭]");
   await spawnElectron(offPort, { AI_BROWSER_CANVAS_HOOK: "0" });
@@ -237,6 +351,10 @@ async function main() {
     check("C-13 AI_BROWSER_CANVAS_HOOK=0 时不注入 hook",
       !!(l2 && l2.result && l2.result.hook_installed === false),
       JSON.stringify(l2 && l2.result && l2.result.warnings));
+    const noFp = await b2.call("ui.evaluate", { js: "typeof window.__aiCanvasFp" });
+    check("C-14 hook 关闭时页面上没有帧指纹（证明指纹只来自 hook）",
+      noFp && noFp.result && noFp.result.value === "undefined",
+      JSON.stringify(noFp && noFp.result && noFp.result.value));
   } finally {
     try { b2.close(); } catch {}
   }

@@ -49,6 +49,10 @@ export function buildCanvasHookSource(opts = {}) {
   var scheduled = false;
   var lastSig = null;
   var lastEntry = null;
+  // 帧指纹（见 push 里的注释）。n = 记录到的绘制调用总数，fp = 自上次清屏以来的
+  // 绘制序列哈希，frames = 见过的清屏次数。三个数一起构成"画布上现在是什么"的
+  // 廉价摘要 —— 用它回答"变了没有"，不用它回答"画的是什么"。
+  var FP = { n: 0, fp: 0, frames: 0 };
 
   // ---- 小工具 ----------------------------------------------------------
 
@@ -176,6 +180,24 @@ export function buildCanvasHookSource(opts = {}) {
     var sig;
     try { sig = JSON.stringify(rec); } catch (e) { return; }
     if (!sig) return;
+    // ---- 帧指纹 ----------------------------------------------------------
+    // 用途是**变化检测**，不是重建场景：一个纯 canvas 应用（Excalidraw / 白板 /
+    // 数据网格）的写入在 DOM 上常常零字节变化，于是 page_probe 与 ui.diff 会
+    // 回答 unchanged —— 对"我真的画了一条线"这种事实给出假绿的反面（假阴性），
+    // 而这正是本工具唯一的赌注。
+    //
+    // 累积方式是"自上次清屏以来的**绘制序列**哈希"：
+    //   clear  → frames+1，fp 归零（一帧的边界通常就是清屏）
+    //   其它   → fp = fp*33 ^ hash(sig)，顺序敏感
+    // 于是"内容没变的一帧"得到同一个 fp，"多画了一个形状"得到不同的 fp。
+    // 连续同签名调用在下面会被合并成 repeat_count，但**指纹按合并后的 sig 算**，
+    // 所以 100 次相同填充与 1 次相同填充会得到不同的 fp —— 这是有意的：
+    // 重复次数本身就是"这一帧画了多少东西"的一部分。
+    try {
+      if (rec.k === "clear") { FP.frames++; FP.fp = 0; }
+      else FP.fp = ((FP.fp * 33) ^ hash32(sig)) >>> 0;
+      FP.n++;
+    } catch (e) {}
     if (mode !== "trace" && lastEntry && lastSig === sig) {
       lastEntry.n += 1;
       pendingBytes += sig.length;
@@ -640,6 +662,22 @@ export function buildCanvasHookSource(opts = {}) {
   try {
     Object.defineProperty(G, KEY, { value: bridge, configurable: true, enumerable: false, writable: false });
   } catch (e) { try { G[KEY] = bridge; } catch (e2) {} }
+
+  // 固定名字的只读指纹口，给 page_probe / DEFAULT_SNAPSHOT_JS 用。
+  // 必须与 bridge 的 KEY 分开：KEY 是动态的、只有主进程知道，而这两处探针
+  // 是**页面内**执行的脚本，只能靠一个约定名字找到它。
+  // 不可枚举，避免被页面自己的 for-in / Object.keys(window) 扫到；
+  // recording=false 时返回 null（不是 0）—— "没在录"和"录了但什么都没画"
+  // 是两件事，用 0 表示前者会让调用方以为画布是空的。
+  try {
+    Object.defineProperty(G, "__aiCanvasFp", {
+      value: function () {
+        if (!recording) return null;
+        return { n: FP.n, fp: FP.fp, frames: FP.frames, on: 1 };
+      },
+      configurable: true, enumerable: false, writable: false,
+    });
+  } catch (e) { try { G.__aiCanvasFp = function () { return recording ? { n: FP.n, fp: FP.fp, frames: FP.frames, on: 1 } : null; }; } catch (e2) {} }
 
   try {
     if (typeof G.addEventListener === "function") {

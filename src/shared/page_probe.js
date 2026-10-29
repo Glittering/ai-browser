@@ -40,6 +40,16 @@
 //       最该抓的场景（点了没反应）全丢掉。实测于 2026-10-22 的 fixture 回归。
 //   n = DOM 元素总数（粗粒度结构变化：弹窗、列表插入）
 //   u = location.href（SPA 路由跳转）
+//   c = canvas 帧指纹 "fp:n:frames"，来自页面里的 canvas hook（canvas_hook_source.js
+//       暴露的 window.__aiCanvasFp）。null = 这个页面没装 hook / hook 关着。
+//
+// 为什么必须加 c：上面四个信号全部只看 DOM，而**纯 canvas 应用的写入在 DOM 上
+// 常常是零字节**。实测（2026-10-29，Excalidraw）：在白板上拖出一个矩形，DOM 节点
+// 数与文本哈希都不变（画布是 <canvas>，图元不是 DOM 节点），于是 page_changed
+// 只能靠"选中图元后右侧属性面板出现"这种副作用偶然为真；一旦动作不产生面板
+// 变化（移动已存在的图元、在画布空白处涂色、连续调参），就会报 false，并附上一句
+// "payload 很可能没落地" —— 把一次成功的写入说成失败，比不报更糟。
+// 同一个指纹也进了 DEFAULT_SNAPSHOT_JS，所以 ui.diff 对画布写入同样能报 changed。
 export const PAGE_PROBE_JS = `(function(){
   try{
     var b=document.body||document.documentElement;
@@ -59,7 +69,9 @@ export const PAGE_PROBE_JS = `(function(){
     }catch(_e){}
     var n=0;
     try{ n=document.getElementsByTagName('*').length; }catch(_e){}
-    return {t:t.length,h:(h>>>0).toString(36),d:(dv||'').replace(/\\s+/g,'').length,n:n,u:String(location.href)};
+    var cf=null;
+    try{ var fpFn=window.__aiCanvasFp; if(typeof fpFn==='function'){var v=fpFn(); if(v)cf=v.fp+':'+v.n+':'+v.frames;} }catch(_e){}
+    return {t:t.length,h:(h>>>0).toString(36),d:(dv||'').replace(/\\s+/g,'').length,n:n,u:String(location.href),c:cf};
   }catch(e){ return {__err:String((e&&e.message)||e)}; }
 })()`;
 
@@ -101,24 +113,42 @@ const HINT_CLICK =
   + 'expected inside an out-of-process iframe, this probe cannot see it — verify with '
   + 'get_tree/screenshot instead.';
 
+// DOM 一字未动、画布重绘了。这是 canvas 应用上"写入成功"的**常态**外观：图元不是
+// DOM 节点，画一笔只会让 <canvas> 重新绘制一次。措辞必须把"证据"与"可能只是动画"
+// 分开说 —— 这个信号本身分不清这两者，而分不清就不能让调用方当成铁证。
+const HINT_CANVAS =
+  'page_changed=true via canvas only: the DOM is byte-identical but the canvas draw sequence '
+  + 'changed, which is what a successful write looks like on a canvas-rendered surface (shapes '
+  + 'are not DOM nodes). Caveat: a page that repaints continuously (animation, live cursor, '
+  + 'clock) will also change this fingerprint without any action of yours — if you are unsure, '
+  + 'take two snapshots with no action in between; if the canvas fingerprint moves on its own, '
+  + 'treat it as unusable evidence and verify with ui.canvas_read or a page-provided export.';
+
 /**
  * 比较前后两次探针。纯函数，无 Electron 依赖，可直接单测。
- * @returns {{changed: boolean|null, delta: object|null}}
+ * @returns {{changed: boolean|null, delta: object|null,
+ *            domChanged: boolean, canvasChanged: boolean|null}}
  *          changed=null 表示数据不可比（某次探针失败），调用方应忽略而不是当成 false。
+ *          canvasChanged=null 表示这一页没有 canvas 指纹（没装 hook / hook 关着），
+ *          此时 changed 完全由 DOM 决定 —— 与加这个信号之前的行为逐字节一致。
  */
 export function diffProbe(before, after) {
   const ok = (p) => p && typeof p === 'object' && !p.__err && typeof p.h === 'string';
-  if (!ok(before) || !ok(after)) return { changed: null, delta: null };
+  if (!ok(before) || !ok(after)) return { changed: null, delta: null, domChanged: false, canvasChanged: null };
   const delta = {
     text_chars: (Number(after.t) || 0) - (Number(before.t) || 0),
     dom_nodes: (Number(after.n) || 0) - (Number(before.n) || 0),
     focused_chars: (Number(after.d) || 0) - (Number(before.d) || 0),
   };
-  const changed = before.h !== after.h
+  const domChanged = before.h !== after.h
     || (Number(before.n) || 0) !== (Number(after.n) || 0)
     || (Number(before.d) || 0) !== (Number(after.d) || 0)
     || before.u !== after.u;
-  return { changed, delta };
+  // 两边都有指纹才比较：只有一边有时（探针执行期间 hook 刚好装上/关掉）不能下结论。
+  const cb = typeof before.c === 'string' ? before.c : null;
+  const ca = typeof after.c === 'string' ? after.c : null;
+  const canvasChanged = (cb && ca) ? cb !== ca : null;
+  return { changed: domChanged || canvasChanged === true, delta, domChanged, canvasChanged };
 }
 
 /**
@@ -126,13 +156,21 @@ export function diffProbe(before, after) {
  *
  * 只在 changed === false 时附加 page_delta 和 effect_hint：
  * 正常路径（changed:true）不多说一个字，避免每步回执都多两行噪音。
+ * 唯一的例外是"仅 canvas 变化"：那正是纯 canvas 应用上成功写入的样子，而调用方
+ * 从 succcess:true 里看不出这一手到底落到了哪里，所以给一句 canvas_changed 说明。
  */
 export function applyProbe(res, before, after, action) {
   if (!res || typeof res !== 'object') return res;
   const d = diffProbe(before, after);
   if (d.changed === null) return res;
   const out = { ...res, page_changed: d.changed };
-  if (d.changed) return out;
+  if (d.changed) {
+    if (d.canvasChanged === true && !d.domChanged) {
+      out.canvas_changed = true;
+      if (!out.effect_hint) out.effect_hint = HINT_CANVAS;
+    }
+    return out;
+  }
   out.page_delta = d.delta;
   const isWrite = MUST_HAVE_EFFECT.has(String(action || ''));
   if (!out.effect_hint) {

@@ -263,6 +263,20 @@ export function safeByteLength(value) {
  *    Reading is strictly read-only: `loadGraphData` is a LOADER and is never
  *    called, and a throwing `serialize()` or a circular `_nodes` is caught and
  *    simply yields no fingerprint.
+ *
+ * 5. THE CANVAS DRAW SEQUENCE IS FINGERPRINTED TOO (property 4 only covers
+ *    apps that HANG A MODEL OFF WINDOW).
+ *    Measured 2026-10-29 on Excalidraw: a whiteboard whose entire document is
+ *    canvas-drawn and whose window exposes no model at all. Dragging out a
+ *    rectangle changed zero DOM bytes, so a model-less canvas app fell straight
+ *    through every signal above and `ui.diff` answered "unchanged" to a write
+ *    that visibly happened. The canvas hook already records every draw call, so
+ *    it also maintains a per-frame sequence hash (see canvas_hook_source.js
+ *    `push`) and exposes it as `window.__aiCanvasFp`. Reading it costs ~110
+ *    chars here and gives the diff its only view into a model-less canvas.
+ *    `on:0` / absent means the hook is not installed (it is only installed
+ *    after first load, and can be switched off) — absent is reported as
+ *    "no canvas signal", never as "canvas unchanged".
  */
 export const DEFAULT_SNAPSHOT_JS = `(function(){
   try {
@@ -363,6 +377,10 @@ export const DEFAULT_SNAPSHOT_JS = `(function(){
         var p = cd[0];
         out.model = { global: p.k, kind: p.f.kind, count: p.f.count, fp: p.f.fp };
       }
+    } catch (_) {}
+    try {
+      var cfp = window.__aiCanvasFp;
+      if (typeof cfp === 'function') { var cv = cfp(); if (cv) out.canvas = cv; }
     } catch (_) {}
     return out;
   } catch (e) {
