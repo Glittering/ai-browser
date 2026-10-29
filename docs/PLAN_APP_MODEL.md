@@ -120,7 +120,30 @@ REST 没有任何改设计内容的端点。
 |---|---|---|
 | **P0-3 Notion** | `data-block-id` 是否稳定、是否与 API block id 一致 | ✅ **确认对齐**。13 个 `[data-block-id]`，全是标准 UUID；第一个是 `143577fc-cb06-80b0-9824-e994473b9754`，而 URL 的页面 id 是 `143577fccb0680b09824e994473b9754` —— **同一个 id**（去横线后逐字符相同）。页面 0 个 canvas、3 个 contenteditable。`ui.get_tree` 给出真实角色树（link/generic/button/tablist/tab/tabpanel/tree） |
 | **P0-2 Miro** | 有没有可用的（非 OAuth）读写通道 | ✅ **比预期好得多：`window.miro.board` 是活的 Web SDK**。`getInfo()` 返回 `{id:"uXjVETk2bVU="}`，与 URL 的 board id 一致；`get()` / `getSelection()` 可用（该 board 为空，返回 `[]`）；写方法齐全（createStickyNote / createShape / createText / remove / sync / viewport），还多一个 `getAiContext`。**用的是用户自己的 session，不需要 OAuth token** |
-| **P0-1 Figma** | 不启用屏幕阅读器时 Mirror DOM 是否默认渲染 | ⏳ **未验证 —— 被卡住**：该账号是新建 Free 团队，recents 里**一个文件都没有**，页面里也提取不到任何 `/design/<key>`。没有文件就没有画布，也就没有 Mirror DOM 可看 |
+| **P0-1 Figma** | 不启用屏幕阅读器时 Mirror DOM 是否默认渲染 | ✅ **答案是否**（这是坏消息里最有用的一个）。编辑器里有一条常驻 status：`Screenreader support for the board is currently disabled. To enable it via Accessibility settings, press ⌘K, type Accessibility Settings, and press Enter.` 也就是说 **Mirror DOM 不默认渲染，要显式开启**。⚠️ 开启之后能不能当真结构用，**仍未验证**（见下） |
+
+### Figma 另外三个决定性事实（都是实测）
+
+1. **画布是 WebGPU，我们的绘制 hook 完全看不见它。**
+   实测：`canvas.getContext` 返回 `webgpu`；hook 已装上但 `{n:32, frames:0}` 且这 32 条
+   不是画布的。**后果**：Figma 里的写入无法用帧指纹验证 —— 这比 Excalidraw 更糟
+   （Excalidraw 至少是 2D canvas，能看见"画了东西"）。这是必须写进产品说明的能力边界。
+2. **编辑器的界面是真 DOM，而且很规整。** 178 个节点 / 45 个带名字的 button：
+   `Main menu`、`File`、`Layers`、`Pages`、`Rectangle`、`Text`、`Export`、`Share`、
+   `100%, zoom and view options`，画布本身是 `role=canvas`。所以「按名字选工具、开菜单、
+   点导出」这类操作**不需要坐标**，和普通网页一样。已实测点开主菜单并读到
+   `Preferences`、`Actions… ⌘K` 等项。
+3. **新建账号的首次引导会挡住画布**（5 步向导，第 1 步要求填姓名与角色）。
+   这期间点画布**什么都没发生，而探针如实报 `page_changed:false`** —— 工具是对的。
+
+### ⚠️ 我自己的一个错判（必须记下来）
+
+我一度写下"矩形创建成功" —— 依据是 `get_tree` 里出现了两个 `Rectangle`。
+复查发现那两个节点是**工具栏的矩形工具按钮**（`e:div-90` group / `e:button-91` button），
+不是图层。文件里 `Rectangle \d+` 一次都没匹配到，图层数是 0。
+这正是我记忆里那条判据的反面教材：**用字符串匹配代替观测**。
+（同时它反证了另一件事：探针报 `page_changed:false` 是对的 —— 引导弹窗挡住画布，
+点击真的没有产生任何变化。）
 
 ### 实测中的两个附带发现
 
