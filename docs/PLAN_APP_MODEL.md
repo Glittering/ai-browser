@@ -116,13 +116,27 @@ REST 没有任何改设计内容的端点。
 
 ### P0（决定性实验，先做这三个，否则后面全是猜）
 
-| 编号 | 实验 | 它决定什么 |
+| 编号 | 实验 | 结果（2026-10-30 实测，用户已登录的真实会话） |
 |---|---|---|
-| **P0-1** | 登录 Figma 后，`ui.get_tree` 里能不能看到 Mirror DOM 的图层节点（不启用屏幕阅读器） | Figma「读」这条路是否免费。看不到就得走 REST（要 token）或键盘 |
-| **P0-2** | 在 Miro 里手动拖一张便签，network monitor 里它调了哪些端点；带 cookie 重放 `GET` 能不能读到 items | Miro 除了官方 OAuth 之外有没有可用的内部只读通道（有的话降级更容易） |
-| **P0-3** | 在 Notion 页面里 `ui.get_tree`，看 `data-block-id` 是否稳定、是否与 API block id 一致 | Notion 能不能做「DOM 定位 ↔ API 写入」的对齐（能对齐就几乎全自动） |
+| **P0-3 Notion** | `data-block-id` 是否稳定、是否与 API block id 一致 | ✅ **确认对齐**。13 个 `[data-block-id]`，全是标准 UUID；第一个是 `143577fc-cb06-80b0-9824-e994473b9754`，而 URL 的页面 id 是 `143577fccb0680b09824e994473b9754` —— **同一个 id**（去横线后逐字符相同）。页面 0 个 canvas、3 个 contenteditable。`ui.get_tree` 给出真实角色树（link/generic/button/tablist/tab/tabpanel/tree） |
+| **P0-2 Miro** | 有没有可用的（非 OAuth）读写通道 | ✅ **比预期好得多：`window.miro.board` 是活的 Web SDK**。`getInfo()` 返回 `{id:"uXjVETk2bVU="}`，与 URL 的 board id 一致；`get()` / `getSelection()` 可用（该 board 为空，返回 `[]`）；写方法齐全（createStickyNote / createShape / createText / remove / sync / viewport），还多一个 `getAiContext`。**用的是用户自己的 session，不需要 OAuth token** |
+| **P0-1 Figma** | 不启用屏幕阅读器时 Mirror DOM 是否默认渲染 | ⏳ **未验证 —— 被卡住**：该账号是新建 Free 团队，recents 里**一个文件都没有**，页面里也提取不到任何 `/design/<key>`。没有文件就没有画布，也就没有 Mirror DOM 可看 |
 
-三个都是**只读**实验，不会改用户任何数据。P0-1/P0-2 需要用户已登录的窗口。
+### 实测中的两个附带发现
+
+- **Miro 还有一条纯读路径**：画布上有 `aria-label="Accessible Board Overview"` 的层，
+  但它的文案是「点击 'Enhance accessibility support' 以启用**只读**的 board 大纲」——
+  **需要一次点击**。这条比 SDK 弱（只读、要人点），可以作为没有 SDK 权限时的降级。
+- **Notion 内部端点确认存在**（cookie 鉴权）：`POST app.notion.com/api/v3/loadCachedPageChunkV2`、
+  `syncRecordValuesSpaceInitial` 等 —— 这就是它前端自己加载块树的接口。
+  ⚠️ 私有接口，会在改版时静默失效，只能当**降级**，不能当主路径。
+
+### 我自己的一个失误（记下来，免得复现）
+
+探 `getAiContext` 时脚本报 `Cannot read properties of undefined (reading 'slice')`。
+那是**我的错**：`getAiContext()` 返回 `undefined`，而我写了 `JSON.stringify(ai).slice(0,400)`，
+`JSON.stringify(undefined)` 是 `undefined`，`.slice` 当场抛。不是 Miro 的问题。
+教训还是那条：**测试脚本自己的异常，不能被读成被测对象的行为**。
 
 ### 随后（P1）：三件基础件
 
