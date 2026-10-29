@@ -257,6 +257,34 @@ Width 输入框 100 → setContent "200" → Enter
    上层把 `canvas_changed` / `canvas_idle` 一律降级为 `null`（PP-39/39b/40、
    PE-01..03、CF-17/18/19）。
 
+### 操作手册（全部实测通过，2026-10-30）
+
+| 目标 | 怎么做 | 回读（必须做） |
+|---|---|---|
+| 读结构 | Mirror DOM：`[data-nodeid]` 的 `aria-label`="名字, 类型"、`data-parentid` 给层级、子节点文本 `Dimensions W H` | — |
+| 列出图层 | 图层面板 `role=treegrid` 下的 `role=row` | row 文本 |
+| 选中某层 | 点那一行（**按 bounds 挑 `height≈32` 的 row**） | 右侧栏从 Page 变成该节点的属性 |
+| 改尺寸/位置 | 右侧栏 `Width`/`Height`/`X-position`/`Y-position` 输入框 `setContent` → `Enter` | ①输入框值 ②Mirror 的 `Dimensions` 自述 |
+| 新建形状 | 点工具栏同名按钮（`Rectangle` 等）→ 点画布 | 图层行 +1、Mirror 节点 +1 |
+| 删除 | `Delete` | 图层行 −1 |
+| 重命名 | `⌘R` → 出现内联 textbox → `setContent` → `Enter` | 图层行文本 + Mirror `aria-label` |
+| 撤销 | `⌘Z` | 行数复原 |
+
+**两个新踩的坑：**
+
+1. **`R` 这类画布快捷键会失效**。开了无障碍后，Figma 给每个镜像节点加了
+   `class="focus-target"`，焦点很容易停在某个镜像节点上（实测
+   `document.activeElement` = `DIV#3:1858.focus-target`），于是键盘事件被它吃掉，
+   工具根本没切；而**点画布并不会把焦点挪开**（点完 focus 仍是那个镜像节点）。
+   判据：读工具栏按钮的 `aria-pressed`（`Rectangle` 按钮选中时是 `"true"`，
+   class 含 `selectedButton`），不要靠"按了 R 就当切好了"。
+   → **用工具栏按钮，不用快捷键。**
+
+2. **浮层挡住画布，点击静默落空**。实测画布中心被一个
+   `role=dialog`（"Code, now on canvas … Got it"，545,346 处 256×288）挡住，
+   点击 `success:true` 但什么都没发生。判据：动手前先
+   `document.elementFromPoint(画布中心)`，看到 `role=dialog` 就先关掉它。
+
 ### 还剩什么
 
 - **新建节点**仍要画布手势（`R` + 点击，实测可行，但需要坐标：画布 rect 已知、
