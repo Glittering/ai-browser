@@ -232,8 +232,20 @@ export async function probeCapabilities(pageManager, opts = {}) {
  * canvas sites and would bury the actual API list.
  */
 async function collectEndpoints(pageManager, tid, limit) {
+  // 参数名是 `tab`，不是 `tabId`。
+  //
+  // 这里曾经写成 `{ tabId: tid, limit }`，而 NetworkMonitor.list 读的是
+  // `filter.tab` —— 于是**过滤条件静默失效**，返回的是所有标签页的请求。
+  // 实测（2026-10-29）：在一条刚打开 excalidraw.com 的空白 profile 上，
+  // ui.capabilities 的 endpoints 里出现了 `/ztbox`、`/sugrec`（百度的接口），
+  // 而这个实例当时只有这一个页面。agent 会照着这份清单去 fetch 一个与本页
+  // 无关的接口，然后得到一份"看起来有数据"的错误结论。
+  //
+  // 同类错误在本项目已出现三次（`ui.evaluate` 的 js/expr、`read` 的
+  // uris/uri、这里的 tab/tabId）：**同一个概念在两层用了不同名字，而调用方
+  // 不会报错，只会拿到别人的数据**。钉住它的是 CAP-EP-01..03。
   const res = await pageManager.networkMonitor.list
-    ? await pageManager.networkMonitor.list({ tabId: tid, limit })
+    ? await pageManager.networkMonitor.list({ tab: tid, limit })
     : null;
   const reqs = (res && (res.requests || res.items || res)) || [];
   const seen = new Set();

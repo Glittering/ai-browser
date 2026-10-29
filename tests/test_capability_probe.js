@@ -7,7 +7,7 @@
 // usable data model was downgraded to a generic "check the endpoints" answer.
 // A table test turns that class of mistake into an instant local failure.
 import { describe, it, expect } from 'vitest';
-import { rankAppGlobals, PROBE_JS } from '../src/main/capability_probe.js';
+import { rankAppGlobals, PROBE_JS, probeCapabilities } from '../src/main/capability_probe.js';
 import { JSDOM } from 'jsdom';
 
 const g = (key, hint, where = 'iframe[0]') => ({ where, key, hint, type: 'object' });
@@ -213,5 +213,69 @@ describe('recommend() — 内容藏在 iframe 里时不能给出空建议', () =
     const l2 = r.routes.find((x) => x.route === 'L2_semantic_tree');
     expect(l2.preferred).toBe(true);
     expect(l2.why).toContain('distinct roles');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// probeCapabilities 的取数边界（CAP-EP-*）
+//
+// 之前这个函数**没有任何单测**（表驱动测试只覆盖了 rankAppGlobals 与 PROBE_JS
+// 这两块纯逻辑），于是它的一个硬伤一直没被发现：它调 NetworkMonitor.list 时传的是
+// `{ tabId }`，而那个函数读的是 `filter.tab` —— 过滤静默失效，返回的是**所有标签页**
+// 的请求。实测证据：在只有 excalidraw.com 一个页面的实例上，endpoints 里出现了
+// /ztbox 与 /sugrec（百度的接口）。agent 会拿着这份清单去 fetch 与本页无关的接口。
+//
+// 这组用例用一个会**真的按 filter.tab 过滤**的假 monitor，所以传错参数名就会红。
+function fakePM({ endpoints = [], globals = [] } = {}) {
+  const seen = [];
+  return {
+    seen,
+    activeTab: 7,
+    _getView: () => ({ webContents: { getURL: () => 'https://a.test/' } }),
+    getTree: async () => ({ tree: { role: 'root', label: '', children: [] }, context: {} }),
+    evaluate: async () => ({
+      url: 'https://a.test/', title: 'T', topDom: 5, topCanvas: 0,
+      iframes: [], globals, canvases: [],
+    }),
+    networkMonitor: {
+      // 关键：像真的一样按 filter.tab 过滤。参数名错 → 全部返回 → 断言红。
+      list: async (filter) => {
+        seen.push(filter);
+        const rows = endpoints.filter((r) => filter.tab == null || r.tab_id === filter.tab);
+        return { requests: rows };
+      },
+    },
+  };
+}
+
+describe('probeCapabilities — 只能看到自己这个 tab 的网络请求', () => {
+  it('CAP-EP-01 传给 NetworkMonitor.list 的过滤键是 tab', async () => {
+    const pm = fakePM();
+    await probeCapabilities(pm, { tab: 7 });
+    expect(pm.seen.length).toBeGreaterThan(0);
+    expect(pm.seen[0].tab).toBe(7);
+    expect(pm.seen[0].tabId).toBeUndefined();
+  });
+
+  it('CAP-EP-02 别的 tab 的请求不能出现在 endpoints 里', async () => {
+    const pm = fakePM({
+      endpoints: [
+        { tab_id: 7, method: 'GET', url: 'https://a.test/api/doc', status: 200 },
+        { tab_id: 99, method: 'GET', url: 'https://baidu.com/sugrec', status: 200 },
+        { tab_id: 99, method: 'POST', url: 'https://baidu.com/ztbox', status: 200 },
+      ],
+    });
+    const r = await probeCapabilities(pm, { tab: 7 });
+    const paths = r.endpoints.map((e) => e.path);
+    expect(paths).toContain('/api/doc');
+    expect(paths.join(',')).not.toMatch(/sugrec|ztbox/);
+  });
+
+  it('CAP-EP-03 显式给 tab 时不能退化成不过滤', async () => {
+    const pm = fakePM({
+      endpoints: [{ tab_id: 42, method: 'GET', url: 'https://other.test/x', status: 200 }],
+    });
+    const r = await probeCapabilities(pm, { tab: 7 });
+    expect(r.endpoints).toEqual([]);
   });
 });
