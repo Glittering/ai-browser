@@ -45,6 +45,7 @@ import tabRoute, { shouldShowChildTab } from '../shared/tab_route.cjs';
 import tabGroup from '../shared/tab_group.cjs';
 import placeholder from '../shared/placeholder.cjs';
 import { probeCapabilities } from './capability_probe.js';
+import { buildAppModelSource, summarize as summarizeAppModel } from './app_model_source.js';
 import valueContract from '../shared/value_contract.cjs';
 // 输入成功与否的判定口径（纯函数，独立模块便于单测）。详见文件内注释：
 // 富文本编辑器会把一个语义换行渲染成一串 \n，逐字比对会把成功的输入误判成失败。
@@ -842,6 +843,39 @@ class PageManager {
    */
   async capabilities(opts = {}) {
     return probeCapabilities(this, opts);
+  }
+
+  /**
+   * ui.app_model —— 「这个画布应用的对象模型在哪、里面有什么」。
+   *
+   * capabilities 回答"走哪条路"，但它扫的是 **window 上的对象**。两次实测
+   * （suxieban / yunser）证明这条路会给出**假阴性**：实例在闭包里，window 上
+   * 只有库本身或构造器，于是探针报"no app object on window"，agent 据此降级
+   * 成"只能帧指纹"，而站点其实有完整的 getObjects / toJSON / loadFromJSON。
+   *
+   * 这里补的是那一步：按库指纹认库 → 在原型上挂只记 this 的 tee → 派发一条
+   * 合成 mousemove 让页面自己走一趟 → 拿到实例再读。读取只调 getter，写入不封装
+   * （写法每库都不同，强行统一只会造出第二个"广告了却没有实现"的契约）。
+   */
+  async appModel(opts = {}) {
+    const tid = opts.tab !== undefined && opts.tab !== null ? opts.tab : this.activeTab;
+    const view = this._getView(tid);
+    if (!view) return { ok: false, error: 'no-such-tab', tab: tid };
+    let raw;
+    try {
+      raw = await this.evaluate(buildAppModelSource({ maxItems: opts.max_items }), tid);
+    } catch (e) {
+      return { ok: false, error: e && e.message ? e.message : String(e), tab: tid };
+    }
+    const out = summarizeAppModel(raw, { include_items: opts.include_items });
+    return {
+      ...out,
+      tab: tid,
+      url: view.webContents.getURL(),
+      // 这一步是给调用方判断"要不要相信 read_expr"的：
+      // 钩子和实例引用都活在当前文档里，导航之后照抄上一条 read_expr 只会拿到 null。
+      read_expr_scope: 'current document only',
+    };
   }
 
   /**

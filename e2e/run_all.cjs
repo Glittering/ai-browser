@@ -48,6 +48,11 @@ const SUITES = [
   // icon —— 应用图标的两条渲染路径必须同尺寸（bundle 的 icns vs 源码启动的
   //         dock.setIcon）。用户报"图标一会大一会小"就是这条不一致（2026-10-29）。
   'icon',
+  // app_model —— 「实例关在闭包里」：capabilities{deep} 能不能把 fabric/Konva
+  // 的模型挖出来并改正路线。单测跑在 jsdom 上，而 jsdom 的 getBoundingClientRect
+  // 恒 0、没有真实事件链路 —— 「派发一条合成 mousemove 就能走到 tee」这个核心
+  // 假设在那里是被 mock 兜住的，只有真浏览器能证伪它（2026-10-30）。
+  'app_model',
   // flicker（帧级：加载时画面不许缩成一小块）**故意不在这里**：它要屏幕录制权限、
   // 窗口必须真的在屏幕上、且一轮要录 7 秒 × 3 轮。单独跑：`npm run flicker`。
 ];

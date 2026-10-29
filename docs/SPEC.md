@@ -165,6 +165,12 @@ input"这类位置猜测** —— 猜出来的对应关系比没有更糟。
 
 1. **L1 结构化数据 / API** —— 应用挂在 window 上的数据模型（ComfyUI 的
    `iframe[0].graph`）、或页面已在调用的 JSON 接口。读整张图、写完回读比对。
+   模型**不在 window 上**时（画布应用常把实例关在闭包里）用
+   `ui.capabilities{deep:true}`：它按库指纹认出 fabric / Konva / paper /
+   Excalidraw / CodeMirror / Monaco，在原型某个方法上挂一个只记 `this` 的 tee，
+   再派发一条合成 mousemove 让页面自己走一趟 —— 实例就回来了。返回的
+   `app_model.libs[].read_expr` 可直接喂 `ui.evaluate`，但只在**当前文档**有效
+   （导航后失效，那时它返回 `null` 而不是抛错）。
 2. **L2 语义树** —— 按 role/label 找目标，用 `data-ai-id` 操作，**不用坐标**。
    懒渲染的面板要先点开才进树里（两段式：先点选 → 再 `get_tree` → 再操作其控件）。
 3. **L3 坐标手势** —— 只在没有结构化通路时用（拖节点、拖连线、滚轮平移缩放），
@@ -723,12 +729,13 @@ sheet**，因此它既不在语义树里，也不受页面点击控制；**而�
 
 ## 测试基线
 
-- 单元：`npm test` —— Vitest，73 文件 / 1024 条，0 skip。
+- 单元：`npm test` —— Vitest，82 文件 / 1152 条，0 skip。
 - 端到端：各 `npm run <suite>` 自起 Electron（隔离 profile）：
   `smoke` / `capabilities` / `richtext` / `network` / `value` / `canvas` / `modeldiff` /
   `audit` / `focus` / `interact` / `view` / `readcov` / `window_open` /
-  `dialog` / `wrapper` / `paint` / `layout` / `download` / `multiagent` / `background`。
-  **改动不得破坏任何一项。** 一次跑全部：`npm run e2e:all`（22 套件 / 745 断言）。
+  `dialog` / `wrapper` / `paint` / `layout` / `download` / `multiagent` / `background` /
+  `app_model`。
+  **改动不得破坏任何一项。** 一次跑全部：`npm run e2e:all`（24 套件 / 805 断言）。
   另外两个**不进全量**：`npm run flicker`（要屏幕录制权限 + 窗口真的在屏幕上）、
   `npm run realsites`（依赖外网）。
   测试客户端（`tools/browser.cjs`）**不许永久等**：连接断开/回包超时都要把挂起的

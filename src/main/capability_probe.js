@@ -195,6 +195,61 @@ export async function probeCapabilities(pageManager, opts = {}) {
   }
 
   const route = recommend({ flat, dom, endpoints, coverage: (treeCtx && treeCtx.page_coverage) || null });
+
+  // ---- deep：window 上没有模型 ≠ 没有模型 ----
+  //
+  // 这一步存在的唯一理由是**两次假阴性**：suxieban（fabric 5.2.1）与
+  // yunser（window.DrawBoard）都被这个探针报成 "no app object on window"，
+  // agent 于是降级到 L3 指针手势 + 帧指纹 —— 而两个站都有完整读写能力。
+  // 实例在闭包里，扫 window 永远扫不到。
+  //
+  // 只在**没有 window 模型时**才往下挖：已经有 L1_structured_data 的页面
+  // 再挖一遍只是重复劳动，还会平白派发一次合成鼠标。
+  let appModel = null;
+  if (opts.deep) {
+    const hasWindowModel = route.routes.some((r) => r.route === 'L1_structured_data');
+    if (hasWindowModel) {
+      appModel = { ok: true, skipped: 'window already exposes an app object — see L1_structured_data' };
+    } else if (typeof pageManager.appModel !== 'function') {
+      appModel = { ok: false, error: 'app_model probe unavailable in this build' };
+    } else {
+      try {
+        appModel = await pageManager.appModel({ tab: tid, max_items: opts.max_items });
+      } catch (e) {
+        appModel = { ok: false, error: e && e.message ? e.message : String(e) };
+      }
+      const hits = (appModel && appModel.ok && Array.isArray(appModel.libs))
+        ? appModel.libs.filter((l) => l && l.acquired) : [];
+      if (hits.length) {
+        const first = hits[0];
+        // 命中之后把其它首选全部降级。
+        //
+        // 实测（suxieban，179 个 DOM 元素 + fabric 画布）：L2_semantic_tree
+        // 基于 "!graphObj && rich" 也把自己标成 preferred，于是 recommended
+        // 变成 ["L1_app_object_model","L2_semantic_tree"] 两个并列首选 ——
+        // 调用方看不出哪个更省力。既然模型读得到，就走模型那条，L2 保留在
+        // routes 里（它仍然可用，只是不是第一选择）。
+        for (const rt of route.routes) if (rt.route !== 'L1_app_object_model') rt.preferred = false;
+        route.routes.unshift({
+          route: 'L1_app_object_model',
+          preferred: true,
+          why: `${first.lib}${first.version ? ' ' + first.version : ''} instance found holding ${first.count} ${first.kind || 'item'}(s), even though window exposes no app object — the instance is closed over, so the plain-window scan was a false negative on this page`,
+          evidence: {
+            libs: hits.map((l) => `${l.lib}${l.version ? '@' + l.version : ''} `
+              + `(${l.count} ${l.kind || 'items'}; supports: ${(l.supports || []).slice(0, 6).join('/') || 'none probed'})`),
+            read_expr: first.read_expr,
+            // 探针自己干了什么要说出来：合成鼠标会让页面跑一遍 hover 逻辑。
+            side_effect: appModel.side_effect || null,
+          },
+          how: `ui.evaluate "${first.read_expr}" to read the scene; write through `
+            + `${first.write_hint || "the library's own API"}, then read the same expression again — `
+            + 'a library call returning without throwing is not evidence that the scene changed',
+        });
+        route.recommended = ['L1_app_object_model'];
+      }
+    }
+  }
+
   return {
     ok: true,
     tab: tid,
@@ -223,6 +278,9 @@ export async function probeCapabilities(pageManager, opts = {}) {
     app_globals: (dom && dom.globals) || [],
     endpoints,
     route,
+    // null = 没有要求 deep；{skipped} = 有 window 模型不必挖；
+    // 其余见 app_model_source.js 的 summarize 契约。
+    app_model: appModel,
   };
 }
 

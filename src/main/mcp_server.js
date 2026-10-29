@@ -341,6 +341,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     case 'browse_capabilities': {
       const result = await wsClient.call('ui.capabilities', {
         tab: args.tab, include_network: args.include_network, network_limit: args.network_limit,
+        // deep: 「实例在闭包里」那一类。作为参数而不是独立工具 —— capability
+        // 探测本来就是一件事，拆成两个工具等于让 agent 多付一次往返，
+        // 还会让它在「no app object on window」之后不知道该不该再问一句。
+        deep: args.deep,
       });
       return { content: [{ type: 'text', text: JSON.stringify(result) }] };
     }

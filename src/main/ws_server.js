@@ -379,6 +379,20 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
               tab: tabId,
               include_network: params.include_network,
               network_limit: params.network_limit,
+              // deep：扫完 window 之后，再补一层「实例关在闭包里」的模型探测。
+              deep: params.deep,
+              max_items: params.max_items,
+            });
+            send({ jsonrpc: '2.0', id, result: r });
+            break;
+          }
+          case 'ui.app_model': {
+            // capabilities 的补集：它扫 window，这里补「实例藏在闭包里」那一类。
+            // 两次实测把 A 档站点判成「只能帧指纹」，原因就是少了这一步。
+            const r = await pageManager.appModel({
+              tab: tabId,
+              include_items: params.include_items,
+              max_items: params.max_items,
             });
             send({ jsonrpc: '2.0', id, result: r });
             break;

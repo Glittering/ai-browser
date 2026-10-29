@@ -406,3 +406,80 @@ Mirror DOM 可读、属性写入可回读验证**。三个都不需要截图当�
 
 两个被这轮实测抓出来的缺陷（两个 id 空间互相作废、GPU 画布上的假阴性）证明：
 这条路上真正的风险不是"读不到"，而是**读到了假证据还当成证据**。
+
+## 8. 推翻上一版：「纯 canvas 没有模型」是错的（2026-10-30 复测）
+
+第 5.3 节把 yunser 与速写板归为"无应用模型"。**这个判断是错的**，错因不是站点，是找法：
+它们把实例关在闭包里，`window` 上只留了库本身（`window.fabric`）或构造器（`window.DrawBoard`），
+按"扫 window 上的对象"扫不到，就误以为不存在。这是第 4 条"同一个概念在两层形状不同"的第 5 次复发。
+
+### 抓闭包实例的通用三步
+
+1. **看库指纹**：DOM class 里有 `lower-canvas` / `canvas-container` → fabric（`window.fabric.version` 印证）。
+   `window` 上有大写构造器（`DrawBoard`）且带 `prototype.fn/plugins` → jQuery 插件风格。
+2. **hook 原型方法，只记 `this`**：`fabric.Canvas.prototype` 上取 `__onMouseMove` / `_onMouseMove` /
+   `renderAll` / `requestRenderAll` / `renderTopLayer` / `add`，包一层 `window.__fc = this`。
+   ⚠️ fabric 5 的事件入口是**双下划线**的 `__onMouseMove`，只 hook `_onMouseMove` 抓不到（实测无效）。
+3. **轻触发一次**：向目标 canvas 派发一条合成的 `mousemove`。fabric 的原型方法没被 bind 成实例属性，
+   所以合成事件也能走到 hook。抓不到时再升格为真实 CDP 鼠标。
+
+实测两个站各一次就拿到了：`__fc`（fabric.Canvas）、`__db`（DrawBoard）。
+
+### 结果：速写板是完整 A 档，yunser 是位图层
+
+| | 读 | 写 | 回读 | 可逆 |
+|---|---|---|---|---|
+| suxieban（fabric 5.2.1） | `getObjects()` | `add()` / `loadFromJSON()` | `toJSON()` / `toSVG()` | ✅ 实测 |
+| yunser（DrawBoard） | 无矢量对象，只有 `layers[]` 的 canvas/ctx | 只能 CDP 手势或 `loadDataUrl()` 贴图 | 位图快照 | 位图级 |
+
+速写板往返实测：`add(rect) + add(textbox)` → `toJSON()` 拿到
+`{version, objects:[{type:'rect',left:60,top:60,width:100,height:60},{type:'textbox',text:'hello'}]}`
+→ `clear()` 归 0 → `loadFromJSON(snap)` → `getObjects()` 回到 2 个、`types:['rect','textbox']`、
+文本 "hello" 读回。`toSVG()` 另给一份完整 SVG（1036×612）。
+**"导出得到完整结构"不需要点站点按钮，库自带 `toJSON` / `toSVG`。**
+
+yunser 的 `getDataUrl()` 把每层 `toDataURL('image/png')` 塞进 localStorage，`loadStorage` 反过来
+`drawImage` 解码，`history[t].data` 也是 dataURL；`log` 只记工具状态（`type` / `lineWidth` / `eraserWidth`），
+**不含笔画坐标**。所以 yunser 的边界是"完整的位图快照可导出、可恢复"，不是"完全不可读"——
+但也确实**读不出"哪几个形状"**，不能编辑已有元素。
+
+### 附带钉住的一条帧指纹特性
+
+fabric 的 `renderAll` 是**一次性同步绘制**（clearRect + 整屏画完就结束，没有下一帧）：
+`frames 19→21`、`fp 0→2113470169`，而 **`last` 停在空画布的 `2546269777` 不动**。
+这就是"`last` 滞后一帧"在同步绘制上的极端形态——**静态页、以及事件驱动的一次性重绘都不能用
+`last` 判变化**，只有持续 rAF 循环的重绘页才有意义（CF 系列需补一条这个形态）。
+
+### 8.1 已落地：`ui.app_model` / `capabilities{deep:true}`
+
+上面的三步不再靠手写。`src/main/app_model_source.js` 把它固化成表 + 页面内探针：
+
+| 库 | 认法 | 实例从哪来 |
+|---|---|---|
+| fabric | `canvas.lower-canvas` + `window.fabric.Canvas` | hook `Canvas.prototype.__onMouseMove` 等（**双下划线**）+ 一条合成 mousemove |
+| Konva | `Konva.stages.length` | 全局注册表，**不碰原型** |
+| paper.js | `paper.projects.length` | 全局注册表，**不碰原型** |
+| Excalidraw | `window.excalidraw.$excalidraw.getSceneElements` | 现成对象，**不碰原型** |
+| CodeMirror 5 | `.CodeMirror` 宿主属性 | 官方约定，**不碰原型** |
+| Monaco | `monaco.editor.getModels` | 全局 API，**不碰原型** |
+
+只有 1/6 需要 hook。能用注册表/DOM 属性/全局 API 的一律不包装原型 —— 没有副作用，
+也不需要卸载。
+
+实测（真 Electron）：
+
+- suxieban：空板 `count=0` → 加 160×100 矩形 → `count=1` 且回读
+  `{type:'rect', x:200, y:150, w:160, h:100, fill:'#22c55e'}` → 删除 → `count=0`
+- 迅捷白板：`L2_semantic_tree` → `L1_app_object_model`（`window` 扫描认不出
+  `window.excalidraw`，因为 `APP_KEY_RE` 里没有这个 key —— deep 补上了这个洞）
+- yunser：`no known library matched`，如实给出两条可执行下一步，不假装成功
+
+两条落地时才暴露的坑，都已成为判据：
+
+1. **`read_expr` 必须是能在页面顶层求值的完整表达式。** 最初 hook 类只给了后缀
+   `.getObjects()`，交出去就是这 14 个字符 —— 喂给 `ui.evaluate` 时 `this` 是
+   `undefined`，当场 TypeError，而探针一路 PASS。e2e `AM-E13` 真的把 `read_expr`
+   喂给 `ui.evaluate`，单测 `AM-21` 真的 `eval` 它。
+2. **"可卸载"不能只是删账本。** 原写法 `delete window.__aiAppModel` 丢掉了 hits，
+   但 tee 仍挂在原型上。现在 `window.__aiAppModel.restore()` 逐个还原原函数，
+   `AM-09` / `AM-22` 钉住"卸载后 read_expr 返回 null 而不是抛错"。

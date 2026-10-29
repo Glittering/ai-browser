@@ -77,6 +77,11 @@ export const VALID_METHODS = [
   'ui.snapshot',
   'ui.diff',
   'ui.capabilities',
+  // 「这个画布应用的对象模型在哪、里面有什么」。
+  // capabilities 扫的是 window：实例关在闭包里时它会给出**假阴性**（实测
+  // suxieban=fabric、yunser=DrawBoard 都被判成"没有模型"）。这条补那一步，
+  // 也作为 capabilities{deep:true} 的实现。
+  'ui.app_model',
   'ui.evaluate',
   'ui.subscribe',
   'ui.unsubscribe',

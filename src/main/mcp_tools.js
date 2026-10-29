@@ -328,13 +328,14 @@ export const MCP_TOOLS = [
   {
     name: 'browse_capabilities',
     title: 'Probe capabilities',
-    description: 'Probe what a page affords and which route to take: DOM vs canvas, same-origin iframes, app objects on window, JSON endpoints, plus a recommended plan with evidence.',
+    description: 'Probe how to operate a page: DOM vs canvas, iframes, app objects on window, JSON endpoints, plus a plan. deep=true also probes closure-hidden models (canvas editors that report none).',
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     inputSchema: {
       type: 'object',
       properties: {
         include_network: { type: 'boolean', description: 'Include observed JSON-ish endpoints (default true).' },
         network_limit: { type: 'integer', description: 'How many captured requests to scan.' },
+        deep: { type: 'boolean', description: 'Probe closure-hidden models too.' },
         tab: { type: 'integer', description: 'Tab id; omit → session default.' }
       }
     }
