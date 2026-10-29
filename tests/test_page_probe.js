@@ -523,4 +523,45 @@ describe('diffProbe — 稳定重绘的页面也能判（不再一律"不可判"
     expect(out.canvas_repeat).toBe(false);
     expect(out.canvas_changed).toBeNull();
   });
+
+  // ---- GPU 绘制层：钩子看不见用户看的那张画布 ----
+  //
+  // 实测（Figma，2026-10-30）：DOM 里 1 张 canvas 是 webgpu、2D 画布 0 张，而钩子照样
+  // 记到 41 帧 —— 来自页面自己建的**离屏** 2D 画布。一次真实的 100→200 宽度修改，
+  // fp 一动不动。旧逻辑此时报 canvas_changed:false，那是**假阴性**：写入成功了却
+  // 告诉 agent "证明没变"。false 比 null 坏，因为它看起来有证据。
+  const PCG = (t, n, d, c, u = 'https://a.test/x', k = 0, v = 'visible', l) =>
+    ({ t, h: 'h' + t, n, d, u, c, k, v, l, g: 1 });
+
+  it('PP-39 GPU 页 + 指纹没动 → 不许报 false，只能报"判不了"', () => {
+    const d = diffProbe(PCG(100, 500, 0, 'p1'), PCG(100, 500, 0, 'p1'));
+    expect(d.hasCanvas).toBe(true);
+    expect(d.mode).toBe('gpu');
+    // 断言本体：三种结论都必须是"不知道"，不能有任何一种是"没变"
+    expect(d.canvasChanged).toBeNull();
+    expect(d.canvasIdle).toBeNull();
+    expect(d.canvasRepeat).toBe(false);
+    // 而且不能因为画布就给 page_changed 加戏
+    expect(d.changed).toBe(false);
+  });
+
+  it('PP-39b GPU 页上的回执必须解释清楚 null ≠ 没发生', () => {
+    const out = applyProbe(
+      { success: true, effect_state: 'committed' },
+      PCG(100, 500, 0, 'p1'),
+      PCG(100, 500, 0, 'p1'),
+      'setContent',
+    );
+    expect(out.canvas_changed).toBeNull();
+    expect(out.effect_hint).toMatch(/WebGPU/i);
+    expect(out.effect_hint).toMatch(/cannot be judged|NOT/);
+  });
+
+  it('PP-40 阳性对照：没有 GPU 标记的同一页，仍然如实报 false', () => {
+    // 这条防止把"GPU 判定"写成"凡是 false 都改 null"——那会废掉整个 canvas 信号。
+    const d = diffProbe(PC(100, 500, 0, 'p1'), PC(100, 500, 0, 'p1'));
+    expect(d.mode).toBe('static');
+    expect(d.canvasChanged).toBe(false);
+    expect(d.canvasIdle).toBe(true);
+  });
 });

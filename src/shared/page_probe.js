@@ -71,10 +71,11 @@ export const PAGE_PROBE_JS = `(function(){
     try{ n=document.getElementsByTagName('*').length; }catch(_e){}
     var cf=null,cn=null;
     var cl=null;
-    try{ var fpFn=window.__aiCanvasFp; if(typeof fpFn==='function'){var v=fpFn(); if(v){cf=String(v.fp);cn=v.n;cl=(v.last==null?null:v.last);}} }catch(_e){}
+    var cg=0;
+    try{ var fpFn=window.__aiCanvasFp; if(typeof fpFn==='function'){var v=fpFn(); if(v){cf=String(v.fp);cn=v.n;cl=(v.last==null?null:v.last);cg=(v.g===1?1:0);}} }catch(_e){}
     var vis='';
     try{ vis=String(document.visibilityState||''); }catch(_e){}
-    return {t:t.length,h:(h>>>0).toString(36),d:(dv||'').replace(/\\s+/g,'').length,n:n,u:String(location.href),c:cf,k:cn,v:vis,l:cl};
+    return {t:t.length,h:(h>>>0).toString(36),d:(dv||'').replace(/\\s+/g,'').length,n:n,u:String(location.href),c:cf,k:cn,v:vis,l:cl,g:cg};
   }catch(e){ return {__err:String((e&&e.message)||e)}; }
 })()`;
 
@@ -147,6 +148,18 @@ const HINT_CANVAS_UNKNOWN =
   + 'page_changed reflects the DOM only here. If you need certainty, call ui.snapshot twice with '
   + 'NO action in between and compare snapshot.canvas yourself; if it moves on its own, trust the '
   + 'app state route in ui.capabilities instead of the canvas.';
+
+// **看不见看得见的东西**：页面用 WebGPU/WebGL 画，而我们的钩子只挂得到 2D 上下文。
+// 实测（Figma，2026-10-30）：DOM 里 1 张 canvas 是 webgpu、2D 画布 0 张，而钩子照样
+// 记到 41 帧 —— 那些来自页面自己建的**离屏** 2D 画布（缩略图/排版缓存），用户看不见。
+// 于是一次真实的 100→200 宽度修改，fp 一动不动，回执报 canvas_changed:false。
+// 那是**假阴性**：写入成功了却说"证明没变"，比 null 坏得多，所以这里宁可全给 null。
+const HINT_CANVAS_GPU =
+  'canvas signal unusable on this page: the visible surface is drawn with WebGPU/WebGL, which the '
+  + 'draw hook cannot see (it only wraps 2D contexts; the frames it counts come from offscreen 2D '
+  + 'canvases). canvas_changed/canvas_idle are null here — that means "cannot be judged", NOT '
+  + '"nothing happened". page_changed reflects the DOM only. Verify the write by reading the app\'s '
+  + 'own state (ui.capabilities): a property panel, a layer list or a mirror DOM, not pixels.';
 
 // 动作前用于标定"这一页画布会不会自己动"的空闲窗口。150ms 覆盖 60fps 下 9 帧，
 // 足够看出持续重绘；再长就会让 canvas 页上每次动作都多等一截。只在页面确实有
@@ -249,9 +262,14 @@ export function diffProbe(before, after, opts = {}) {
   const hasCanvas = !!(cb && ca);
 
   const verdict = hasCanvas ? canvasVerdict(before, after, opts) : { mode: 'unknown', active: false };
-  const mode = verdict.mode;
+  const mode0 = verdict.mode;
+  // GPU 绘制层：钩子记到的是**离屏 2D 画布**，不是用户看的那张（Figma 实测）。
+  // 这种页面上 fp 与可见画布无关，任何结论（包括 false）都是编的 —— 一律给 null。
+  // 注意方向：这里唯一可接受的错是"多说几个不知道"，绝不允许再说 false。
+  const gpuBlind = !!(hasCanvas && (before.g === 1 || after.g === 1));
+  const mode = gpuBlind ? 'gpu' : mode0;
   let canvasChanged = null;
-  if (hasCanvas) {
+  if (hasCanvas && !gpuBlind) {
     if (mode === 'static') {
       canvasChanged = cb !== ca;
     } else if (mode === 'repeat') {
@@ -265,8 +283,8 @@ export function diffProbe(before, after, opts = {}) {
   // canvas_idle: true=静止 / false=自己在画 / null=判不了。'unknown' 既可能是
   // "在画但拿不到完整帧"，也可能是"根本没证据"（隐藏页），所以下面按 active 给值 ——
   // 让一个 50% 把握的结论长得像 100% 把握的结论，是这类字段最常见的坏法。
-  const canvasIdle = mode === 'static' ? true : (verdict.active ? false : null);
-  const canvasRepeat = mode === 'repeat';
+  const canvasIdle = gpuBlind ? null : (mode === 'static' ? true : (verdict.active ? false : null));
+  const canvasRepeat = gpuBlind ? false : (mode === 'repeat');
   return {
     changed: domChanged || canvasChanged === true,
     delta, domChanged, canvasChanged, canvasIdle, canvasRepeat, mode, hasCanvas,
@@ -307,7 +325,8 @@ export function applyProbe(res, before, after, action, opts = {}) {
   out.page_delta = d.delta;
   const isWrite = MUST_HAVE_EFFECT.has(String(action || ''));
   if (!out.effect_hint) {
-    if (d.mode === 'drift') out.effect_hint = HINT_CANVAS_NOISY;
+    if (d.mode === 'gpu') out.effect_hint = HINT_CANVAS_GPU;
+    else if (d.mode === 'drift') out.effect_hint = HINT_CANVAS_NOISY;
     else if (d.mode === 'unknown' && d.hasCanvas) out.effect_hint = HINT_CANVAS_UNKNOWN;
     else out.effect_hint = isWrite ? HINT_WRITE : HINT_CLICK;
   }

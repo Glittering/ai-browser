@@ -401,6 +401,49 @@ describe('data-ai-id 写入纪律', () => {
     const withId = flat.filter((n) => n.id && document.querySelector('[data-ai-id="' + n.id + '"]'));
     expect(withId.length).toBeGreaterThan(0);
   });
+
+  // SE-ID-002 只能证明"树里的 id 当场找得到" —— 两条路径在同一瞬间当然一致，
+  // 它证伪不了"下一趟把上趟的 id 改掉"。下面两条才是真正的守卫。
+
+  it('SE-ID-003: 元素既有 id 又有 data-ai-id 时，必须保留后者（不被元素 id 改写）', () => {
+    // Figma Mirror DOM 的真实形态：元素自带 id="3:1858"，同时已被 AX 路径赋过
+    // data-ai-id="ax-4293"。旧实现按元素 id 改写成 "3:1858"，下一次 AX 又改回去，
+    // 两条路径互相作废对方的 ref —— 现象是 ui.act 报 "Target not found for ref"。
+    const el = document.createElement('div');
+    el.id = '3:1858';
+    el.setAttribute('data-ai-id', 'ax-4293');
+    el.setAttribute('role', 'group');
+    el.setAttribute('aria-label', 'Rectangle 1, Rectangle');
+    document.body.appendChild(el);
+    try {
+      extractTree();
+      // 断言本体：权威句柄被保留
+      expect(el.getAttribute('data-ai-id')).toBe('ax-4293');
+      // 且 get_tree 报出的 id 必须就是它（能被 act 消费的那个值）
+      const flat = [];
+      (function walk(n) { if (!n) return; flat.push(n); (n.children || []).forEach(walk); })(extractTree());
+      const node = flat.find((n) => n.label && String(n.label).startsWith('Rectangle 1'));
+      expect(node).toBeDefined();
+      expect(node.id).toBe('ax-4293');
+    } finally {
+      el.remove();
+    }
+  });
+
+  it('SE-ID-004: 没有已有 data-ai-id 时仍用元素自身的 id（不回归）', () => {
+    // 阳性对照：普通网页靠原生 id 稳定定位，这条不能被上面的改动顺手废掉。
+    const el = document.createElement('div');
+    el.id = 'native-only-42';
+    el.setAttribute('role', 'group');
+    el.setAttribute('aria-label', 'native only');
+    document.body.appendChild(el);
+    try {
+      extractTree();
+      expect(el.getAttribute('data-ai-id')).toBe('native-only-42');
+    } finally {
+      el.remove();
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -737,9 +737,35 @@ export function buildCanvasHookSource(opts = {}) {
   // 不会走到第二次定义。
   var fpApi = function () {
     if (!recording) return null;
+    // g = "用户看的这张画布，我们的钩子看不见"（1/0）。
+    //
+    // 实测依据（Figma，2026-10-30）：DOM 里只有 1 张 canvas，上下文是 **webgpu**，
+    // 而 2D 画布 0 张。可我们的钩子照样记到 41 个"帧"、125 次绘制 —— 那些调用
+    // 来自页面自己创建的**离屏 2D 画布**（缩略图/文字排版缓存之类），不在 DOM 里，
+    // 用户根本看不见。于是"改宽度 100→200"这种真实改动，fp 一动不动，回执报
+    // canvas_changed:false —— 一个**假阴性**：写入其实成功了，却告诉 agent
+    // "证明没变"。这和"null 说成 false"是同一个错误方向，而且更坏：false 看起来
+    // 有证据。
+    //
+    // 判定只看**已挂到文档上**的画布，且只用 canvasMap 里已经记下的 kind：
+    // 绝不在这里调 getContext —— 对一张页面还没初始化上下文的画布抢先调
+    // getContext('2d') 会把它**锁死**成 2D，那就从"读取打扰页面"升级成"读取毁页面"。
+    var g = 0;
+    try {
+      var list = document.getElementsByTagName("canvas");
+      var d2 = 0, dgpu = 0, dunknown = 0;
+      for (var i = 0; i < list.length && i < 200; i++) {
+        var m = canvasMap.get(list[i]);
+        if (!m) { dunknown++; continue; } // 页面还没取过上下文 —— 不知道就是不知道
+        if (m.kind === "2d") d2++;
+        else if (m.kind === "webgl" || m.kind === "webgpu") dgpu++;
+      }
+      if (dgpu > 0 && d2 === 0) g = 1;
+      else if (d2 === 0 && dgpu === 0 && dunknown > 0) g = 0;
+    } catch (e) {}
     // last 用 null 表示"还没有完整帧"（而不是 0）—— 0 是一个合法的空帧哈希，
     // 两者混在一起会让"画布刚被清空"和"从没画过"长得一样。
-    return { n: FP.n, fp: FP.fp, frames: FP.frames, last: FP.hasLast ? FP.last : null, on: 1 };
+    return { n: FP.n, fp: FP.fp, frames: FP.frames, last: FP.hasLast ? FP.last : null, on: 1, g: g };
   };
   try {
     Object.defineProperty(G, "__aiCanvasFp", {

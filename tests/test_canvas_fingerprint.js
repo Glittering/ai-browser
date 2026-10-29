@@ -51,7 +51,7 @@ describe('canvas 帧指纹 — 暴露与初值', () => {
     expect(typeof sand.__aiCanvasFp).toBe('function');
     // 不可枚举：不能被页面自己的 Object.keys(window) 扫到
     expect(Object.prototype.propertyIsEnumerable.call(sand, '__aiCanvasFp')).toBe(false);
-    expect(sand.__aiCanvasFp()).toEqual({ n: 0, fp: 0, frames: 0, last: null, on: 1 });
+    expect(sand.__aiCanvasFp()).toEqual({ n: 0, fp: 0, frames: 0, last: null, on: 1, g: 0 });
   });
 
   it('CF-02 mode=off 返回 null，而不是 {n:0} —— "没在录"≠"录了但空"', () => {
@@ -285,5 +285,85 @@ describe('接入层 — 被比较的值只含帧指纹', () => {
     expect(p.c).toBeNull();
     const s = vm.runInContext(DEFAULT_SNAPSHOT_JS, probeSandbox(null));
     expect('canvas' in s).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GPU 绘制层：钩子只挂得到 2D 上下文，看不见 WebGPU/WebGL 画的可见画布。
+//
+// 实测背景（Figma，2026-10-30）：DOM 里 1 张 canvas 是 webgpu、2D 画布 0 张，
+// 而钩子照样记到 41 帧 —— 那些来自页面自己建的**离屏** 2D 画布。于是一次真实的
+// "宽度 100→200" 修改，fp 一动不动，回执报 canvas_changed:false（假阴性）。
+// 所以 hook 必须自述 g=1，让上层把结论降级成 null。
+// ---------------------------------------------------------------------------
+describe('canvas hook — 可见画布是 GPU 画的时候必须自述（g）', () => {
+  const proto2d = {
+    fillRect() {}, clearRect() {}, strokeRect() {}, fillText() {}, strokeText() {},
+    drawImage() {}, beginPath() {}, moveTo() {}, lineTo() {}, arc() {}, closePath() {},
+    stroke() {}, fill() {}, save() {}, restore() {}, translate() {}, scale() {}, rotate() {},
+    setTransform() {}, getTransform() { return { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 }; },
+    isPointInPath() { return false; },
+  };
+
+  function bootGpuHook(domCanvases) {
+    const elProto = {
+      getContext(type) {
+        const t = String(type || '').toLowerCase();
+        if (t === 'webgpu' || t === 'webgl2' || t === 'webgl') return { __gpu: t };
+        if (t === '2d') return Object.create(proto2d);
+        return null;
+      },
+    };
+    const sand = {
+      document: {
+        createElement() { const o = Object.create(elProto); o.width = 300; o.height = 150; return o; },
+        getElementsByTagName(tag) { return String(tag).toLowerCase() === 'canvas' ? domCanvases : []; },
+      },
+      HTMLCanvasElement: { prototype: elProto },
+      CanvasRenderingContext2D: { prototype: proto2d },
+      setTimeout: (fn) => { fn(); return 0; },
+      __report: () => {},
+      console,
+    };
+    sand.window = sand;
+    sand.top = sand;
+    vm.createContext(sand);
+    const src = buildCanvasHookSource({ bindingName: '__report', bridgeKey: '__bridge', mode: 'semantic' });
+    vm.runInContext(src, sand);
+    const mk = () => Object.create(elProto);
+    return { sand, mk };
+  }
+
+  it('CF-17 DOM 里唯一的画布是 webgpu → g=1', () => {
+    const { sand, mk } = bootGpuHook([]);
+    const c = mk(); c.width = 1402; c.height = 1396;
+    c.getContext('webgpu'); // 页面自己初始化上下文
+    sand.document.getElementsByTagName = (t) => (String(t).toLowerCase() === 'canvas' ? [c] : []);
+    expect(sand.__aiCanvasFp().g).toBe(1);
+  });
+
+  it('CF-18 有离屏 2D 画布也不算数 —— 用户看不见它（Figma 的真实形态）', () => {
+    // 这条是本体：曾以为"钩子记到绘制 = 能观测"，实测那次记到的全是离屏画布。
+    const { sand, mk } = bootGpuHook([]);
+    const visible = mk(); visible.width = 1402; visible.height = 1396;
+    visible.getContext('webgpu');
+    const offscreen = sand.document.createElement('canvas'); // 不在 DOM 里
+    offscreen.getContext('2d');
+    offscreen.getContext('2d').fillRect(0, 0, 10, 10);
+    sand.document.getElementsByTagName = (t) => (String(t).toLowerCase() === 'canvas' ? [visible] : []);
+    const v = sand.__aiCanvasFp();
+    expect(v.g).toBe(1);
+    // 阳性对照：确实有绘制记录（否则上面这条 g=1 可能只是因为完全没东西）
+    expect(v.n).toBeGreaterThan(0);
+  });
+
+  it('CF-19 可见画布是 2D → g=0，且照常记绘制（不回归）', () => {
+    const { sand, mk } = bootGpuHook([]);
+    const c = mk(); c.width = 800; c.height = 600;
+    c.getContext('2d').fillRect(0, 0, 20, 20);
+    sand.document.getElementsByTagName = (t) => (String(t).toLowerCase() === 'canvas' ? [c] : []);
+    const v = sand.__aiCanvasFp();
+    expect(v.g).toBe(0);
+    expect(v.n).toBeGreaterThan(0);
   });
 });

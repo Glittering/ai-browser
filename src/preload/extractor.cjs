@@ -797,8 +797,18 @@ function extractTree() {
     // success，却打在了别的东西上（静默错打；实测插入 1 个元素后 4/4 元素 id 全变）。
     // 修法两条：① 元素已有 data-ai-id 就沿用，id 不再随遍历顺序变化；
     //          ② 新元素用模块级只增不减的序号，保证生成出来的 id 不重号。
+    //
+    // ①的优先级必须高于元素自己的 id 属性。曾经写成 `nativeId || existingAiId`，
+    // 与上面这句注释正好相反，后果在 Figma 的 Mirror DOM 上实测到（2026-10-30）：
+    // 那类元素**同时**带 `id="3:1858"` 和 `data-ai-id="ax-4293"`（后者由 AX 路径
+    // 的 ensureHandles 写入）。抽取器按元素 id 把它改写成 `3:1858`，下一次 AX
+    // 路径又改回 `ax-…` —— 两条路径轮流改写同一个属性，各自报出的 ref 都被对方
+    // 作废。现象不是报错，而是 `ui.act` 拿 get_tree 给的 id 去点，得到
+    // "Target not found for ref"，或者更糟：拿 AX 那次读到的 id 去点另一棵树。
+    // data-ai-id 一旦写进 DOM 就是**权威句柄**；元素自己的 id 只是"第一次分配时
+    // 的偏好"。冷读（页面没被我们碰过）两者等价，所以这个改动对普通网页行为不变。
     var existingAiId = el.getAttribute("data-ai-id");
-    var aiId = nativeId || existingAiId || "e:" + el.tagName.toLowerCase() + "-" + (AI_ID_SEQ++);
+    var aiId = existingAiId || nativeId || "e:" + el.tagName.toLowerCase() + "-" + (AI_ID_SEQ++);
     // ③ 只在值**真的变了**时才写。
     //
     // 实测（tools/_oneoff/mutation_microtest.cjs，真实 Chromium）：setAttribute 把属性
