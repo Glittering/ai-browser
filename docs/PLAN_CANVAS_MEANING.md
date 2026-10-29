@@ -105,8 +105,9 @@ C 层能可靠回答的只有两件事：
 1. **画了什么**（调用记录）—— 对绘图型应用信息量大，对「整帧重绘」型应用密度低。
 2. **变了没有**（帧指纹）—— 对所有 canvas 应用都成立，且不依赖理解语义。
 
-第 2 件事今天已经落地（第 4 节）。它不试图理解画布，只回答「这一帧和上一帧是不是
-同一帧」，这正是验证需要的粒度。
+第 2 件事今天已经落地（第 4 节）。它不试图理解画布，只回答「画的东西和刚才一样不一样」，
+这正是验证需要的粒度。准确说法是**「自上次整屏清屏以来的绘制序列哈希」**，而不是
+「这一帧的哈希」—— 因为采样可以落在帧中间，读到的是一个前缀（第 4 节有代价分析）。
 
 ### D 层：诚实边界
 
@@ -130,18 +131,20 @@ Glide DataGrid 和所有还没被想到的 canvas 白板。
 
 ---
 
-## 4. 今天落地的改动（含可证伪证据）
+## 4. 落地的改动（含可证伪证据）
 
 ### 改了什么
 
 | 文件 | 改动 |
 |---|---|
-| `src/main/canvas_hook_source.js` | `push()` 里累积**帧指纹**：`clear` 时 `frames+1`、`fp` 归零；其它绘制按顺序 `fp = fp*33 ^ hash(rec)`。暴露不可枚举的 `window.__aiCanvasFp()`，返回 `{n, fp, frames, on}`；`mode=off` 时返回 `null`（「没在录」≠「录了但空」） |
-| `src/shared/page_probe.js` | `PAGE_PROBE_JS` 增加 `c` 字段读该指纹；`diffProbe` 拆出 `domChanged` 与 `canvasChanged`；仅画布变化时回执给 `canvas_changed:true` + 一句说明，**且不把写类动作降级成 unknown** |
-| `src/main/snapshot_diff.js` | 默认快照增加 `out.canvas`（+148 字符，4621→4769 / 5000），`ui.diff` 因此能看见画布写入 |
-| `e2e/canvas_ws.cjs` | 新增纯 canvas 白板夹具（DOM 只有一个 canvas、图元在闭包）+ CB-1..CB-10 |
-| `tests/test_page_probe.js` | PP-17..PP-24 |
-| `tests/test_canvas_hook_source.js` | 5 条**执行**真实 hook 源码的用例（不是字符串断言） |
+| `src/main/canvas_hook_source.js` | `push()` 里累积**帧指纹**：整屏清屏 / 整屏铺底时 `frames+1`、`fp` 归零；其它绘制按顺序 `fp = fp*33 ^ hash(rec)`。`meta`/`state` 类调用**不进**指纹（`getContext`/`save`/`translate` 不改变像素）。暴露不可枚举、不可重定义的 `window.__aiCanvasFp()` → `{n, fp, frames, on}`；`mode=off` 返回 `null`（「没在录」≠「录了但空」） |
+| `src/shared/page_probe.js` | `PAGE_PROBE_JS` 读 `c`（**只取 fp**）、`k`（绘制计数）、`v`（visibilityState）；`diffProbe` 拆出 `domChanged` / `canvasChanged` / `canvasIdle`；回执在仅画布变化时给 `canvas_changed` + 三种不同措辞的 hint |
+| `src/main/page_manager.js` | 动作前多采一次、隔 `IDLE_WINDOW_MS(150ms)` 再采一次做空闲标定；动作后再隔 150ms 补采一次（只对确实有 canvas 指纹的页面付这个代价） |
+| `src/main/snapshot_diff.js` | 默认快照增加 `out.canvas`，**存 fp 标量**（+148 字符，4621→4769 / 5000），`ui.diff` 因此能看见画布写入 |
+| `src/main/capability_probe.js` | `NOTE_canvas_rendered` 的 `how` 不再承诺「fillText 能读到文字」（见 4.5-⑤）；`collectEndpoints` 的过滤参数名修正 |
+| `e2e/canvas_ws.cjs` | 纯 canvas 白板夹具（DOM 只有一个 canvas、图元在闭包）+ CB-1..CB-19；新增 `/anim?mode=same\|drift` 两个**自漂夹具** |
+| `tests/test_canvas_fingerprint.js` | 新增文件：**执行**真实 hook 源码 + 真实 `PAGE_PROBE_JS` / `DEFAULT_SNAPSHOT_JS` |
+| `tests/test_page_probe.js` | PP-17..PP-31 |
 
 ### 证据链
 
@@ -158,23 +161,36 @@ PASS | CB-7 页面内部状态真的变了（自证）— 1
 **2. 修复后**（同一夹具）：
 
 ```
-PASS | CB-3 … success=true page_changed=true delta=undefined
-PASS | CB-4 … canvas_changed=true
+PASS | CB-3 … success=true page_changed=true canvas_changed=true
 PASS | CB-8 ui.diff → verdict=changed
-PASS | CB-9 差异条目 [{"path":"canvas.fp","from":0,"to":452990307},{"path":"canvas.n","from":0,"to":36}]
+PASS | CB-9 差异条目 [{"path":"canvas","from":0,"to":2070172678,"reason":"value"}]
 PASS | CB-10 静止不动时 verdict=unchanged（指纹不会自己漂）
 ```
 
 **3. 两条通路各自独立**（回退快照里的 `out.canvas`）：CB-8/CB-9 红，CB-3..CB-7 绿。
-说明 `ui.act` 与 `ui.diff` 是两条独立的观测口，不是同一条断言换了个名字。
 
-**4. 指纹本身的稳定性**（单测，`node:vm` 里执行真实 hook 源码）：同一帧内容重放两次
-得到同一个 `fp`；多画一个矩形 `fp` 变；`mode=off` 返回 `null`。
+**4. 反面（这一组才是关键）**：回退空闲标定 → 动画页上**按一个什么都不做的键**：
 
-### 数字
+```
+FAIL | CB-18 自漂页上 canvas_changed 降为 null — true
+FAIL | CB-19 自漂页上 page_changed 不因画布自转而变成 true — page_changed=true
+```
 
-- 单测 **1071 / 78 文件**全绿（改动前 1058）
-- `npm run canvas` **24 项**全绿（改动前 13 项，+CB-1..CB-10、+C-14）
+也就是说，没有标定时，「点了没反应」会重新变成「永远报告有反应」——
+恰好把 `page_probe` 存在的意义（B 站投稿事故：点中外层容器，页面一字节没变，回执一片绿）
+反过来废掉。这是这次改动最危险的方向，被红队指出来并已钉死。
+
+### 4.5 四位评审（架构 / 产品 / 红队 / 实现）提出的问题与处置
+
+| # | 问题 | 处置 |
+|---|---|---|
+| ① | **计数器进了被比较的值**。接入层把指纹写成 `fp:n:frames` 拼接串，而 `n`/`frames` 单调递增 → 「内容逐字节相同的重绘」也报变化 → `page_changed` 恒真 | 改回**只比 fp**。新增 CF-10/CF-11 **执行**真实探针/快照脚本断言这一点；回退后两条转红 |
+| ② | **「只暴露已完成的帧」（双缓冲）能消掉采样相位的假阳性**，但静态页面上一次写入只产生一帧、要等下次清屏才算「完成」→ **刚画的矩形永远看不见**，正好是本改动要修的缺陷 | 试过，**退回**。理由写进 `canvas_hook_source.js` 注释：可见的错误方向必须是「假阳性」（由空闲标定兜住），不能是「假阴性」（没有任何兜底） |
+| ③ | **空闲标定不能用「指纹差」**判断页面是否自己在画：同内容 60fps 重绘时两次采样有相当概率取到同一个前缀哈希 → 漏判 → 把页面动画算成我的功劳（放行方向） | 改用**绘制计数**（单调递增，与采样相位无关）。由 PP-26b / CB-15 钉住 |
+| ④ | **默认导出对象漏了 `IDLE_WINDOW_MS`**（`page_manager` 用的是 `import pageProbe from …`）。`setTimeout(r, undefined)` = 0ms → 标定退化成「立刻再采一次」，两次计数完全相同 → 页面被判静止 | 补进默认导出 + **PP-30 逐键核对**（以后加具名导出忘了同步默认导出就会红）+ PP-31 断言它是有限正数。这是本项目第 4 次「同一概念两层形状不同、调用方不报错」 |
+| ⑤ | `ui.capabilities` 里 `NOTE_canvas_rendered` 的 `how` 承诺「`ui.canvas_read` 能提取 fillText 画出的文字」——**Excalidraw 实测是 2D 且没有 fillText**，这句是假的 | 改文案：不承诺能读文本，改为「先按 route 找应用自己的状态/导出接口；整帧重绘的渲染器不会有 texts」 |
+| ⑥ | 为什么不用 `getImageData` / 像素采样做变化检测？ | 会**打扰页面**（读回是同步的、大画布几百 ms）、WebGL 需要 `preserveDrawingBuffer`、跨域污染 canvas 会抛异常。帧指纹只读「应用自己发起的绘制调用」，零侵入。代价是它证明「画了不同的东西」，不证明「画对了」 |
+| ⑦ | 长度预算 4769/5000 只剩 231 | 已确认这是硬约束（SD-031）。这次让 `out.canvas` 存标量而不是整个对象，就是为它省字符；再要加东西必须先腾 |
 
 ---
 
@@ -198,12 +214,31 @@ PASS | CB-10 静止不动时 verdict=unchanged（指纹不会自己漂）
 
 1. **B 层结构发现**：把 `APP_KEY_RE` 的名字匹配换成「结构签名优先、名字只作提示」，
    再补 React fiber / Yjs 两条运行时通路。这是 Figma / Miro / Notion 这类站点的
-   唯一出路，也是 `ui.capabilities` 从「猜」变成「查」的关键。
-2. **idle 检测**：动画页面（时钟、光标、进度条）的画布指纹会自己变，此时它不能当作
-   「我的操作生效了」的证据。做法：动作前后各多读一次，空闲期也在动就标
-   `canvas_animating:true`，让 agent 知道这个信号不可用。
+   唯一出路，也是 `ui.capabilities` 从「猜」变成「查」的关键。**前置条件：拿到
+   可复现样本**（本地起一个带 `store` 的 canvas 应用，或登录后的固定账号），
+   否则等于把猜测固化成产品。
+
+2. **动画页上把「不可判」变成「可判」**（当前最大的能力缺口）。
+   现在的行为是：页面自己一直在画 → `canvas_idle:false` → `canvas_changed:null`
+   → 只依赖 DOM。诚实，但凡是带动画/直播/协作光标的画布应用就完全失去画布证据。
+   可行的下一步：在空闲窗口里收集**一组**基线指纹（而不是一个），动作后取值若落在
+   基线集合之外才判「变了」。实现上只是把 `idleBaseline` 从单点改成 `idleSamples[]`，
+   已有采样通路够用。风险是慢速动画（1fps 时钟）在 150ms 窗口里仍采不到差别 ——
+   那时必须如实返回 null，不许猜。
+
 3. **C 层的场景级读取**（谨慎）：只有确认渲染器确实用 `fillText` 时才提供文本列表，
    否则如实报「这个画布是整帧重绘，只有帧指纹可信」。**不做 OCR。**
+
 4. **Flutter Web 的专门判断**：先把「可复现样本」拿到（本地起一个 Flutter Web demo），
    再决定是归 D 层还是有一条 `flt-semantics` 的旁路（Flutter 本身有语义树，
    只是挂在 shadow DOM 里，值得单独验一次）。
+
+**明确不做（讨论过，理由在此，避免重复提案）**
+
+- **像素采样 / `getImageData` 变化检测**：会打扰页面（同步读回、大画布几百 ms），
+  WebGL 要 `preserveDrawingBuffer`，跨域污染 canvas 直接抛异常。零侵入的绘制调用
+  记录已经够回答「有没有变」。
+- **从绘制记录重建场景**：Excalidraw 实测证明「2D canvas → fillText → 读到文字」
+  不成立（整帧 `clearRect` + `Path2D` + 离屏合成）。帧指纹只回答「是不是同一帧」，
+  不承诺「画了什么」。
+- **截图 + 视觉模型**：那是把工具退化成不可验证的视觉猜测，与本产品的赌注相反。
