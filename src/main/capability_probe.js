@@ -511,8 +511,12 @@ const rich = flat.length >= 60 && roleSet.size >= 4 && actionable >= 10;
       how: 'ui.canvas_read lists draw calls; texts[] holds only strings drawn with fillText. '
         + 'Full-frame repaint renderers (Excalidraw-class) log only clearRect/fillRect, so an '
         + 'EMPTY texts[] does NOT mean an empty canvas. Canvas is write-verifiable (ui.act '
-        + 'canvas_changed / canvas_idle, ui.diff canvas); to READ content go to the L1 route or '
-        + 'the app\'s own export',
+        + 'canvas_changed / canvas_idle / canvas_repeat, ui.diff canvas); to READ content go to '
+        + 'the L1 route or the app\'s own export. Read canvas_changed carefully: false means '
+        + '"proven unchanged", null means "this page cannot be judged" (it repaints different '
+        + 'content every frame, or the hook has no whole frame) — never treat null as false. '
+        + 'canvas_repeat:true means the page repaints identical content, so the verdict is '
+        + 'still trustworthy',
     });
   }
 
