@@ -294,6 +294,51 @@ Width 输入框 100 → setContent "200" → Enter
   产品上必须：检测到"开了才有效"时**如实告诉 agent**，而不是让 agent 在关掉的
   状态下以为"这页没有图层"。
 
+## 5.2 三站一次性联调（2026-10-30，同一实例 pid 76947，全部实测）
+
+三个站点各自的形态差异极大，这里把"能不能读、能不能写、能不能证明"放在一张表里：
+
+| | Notion | Miro | Figma |
+|---|---|---|---|
+| 画布 | **0 张**，纯 DOM | **7 张**（1 全屏 WebGL + 1 全屏 2D + 5 个离屏） | **1 张 WebGPU** |
+| 结构来源 | 真 DOM，块带 `data-block-id`（UUID，首个=页面 id） | `window.miro.board`（活的 Web SDK） | Mirror DOM（需开无障碍）+ 图层 treegrid |
+| 读 | `ui.get_tree` 角色树；块 id 与 API 对齐 | `board.get()` / `getById` | Mirror 的 `data-nodeid`/`data-parentid`/`Dimensions` |
+| 写 | 点块 → `type` | `createStickyNote` / `sync` / `remove` | 右侧栏属性框、工具栏按钮、`⌘R`、`Delete` |
+| 回读 | 块 `innerText` | `board.get()` 二次读 | 输入框值 + Mirror 自述 |
+| `canvas_changed` | 无画布，不给该字段 | **`true`（可信）** | **`null`（GPU 致盲，已修）** |
+
+### 这一轮抓到的三个缺陷（都修了）
+
+1. **句柄来自元素原生 id，查找却只认 `data-ai-id`**（`find_ref.cjs` / `actions.cjs`）。
+   抽取器在没有 `data-ai-id` 时用元素自己的 `id` 当句柄（`existingAiId || nativeId`），
+   而 `data-ai-id` 只是页面里的一个普通属性 —— React 重渲染子树时会被一起抹掉，
+   元素却还在。实测 Notion：空段落 `id=":r6:"`、`data-ai-id` 刚写就被抹空，
+   于是 `get_tree` 报 `:r6:`、`type` 报 `Target not found for ref: :r6:`（读得到、打不进）。
+   修法：属性查不到时按 `getElementById` 兜底（穿透 shadow 的同一递归里做，ShadowRoot 也有这个方法）。
+   判据 SD-10/11/12（含"不会把不存在变成乱命中"的阴性对照）。
+
+2. **`focus()` 不等于"可输入"**（`page_manager._inputViaCdp`）。
+   contenteditable 调 `focus()` 之后 `document.activeElement` **确实等于它** ——
+   所以"焦点坐上没有"这个判据看不出任何问题 —— 但 Notion 的块编辑器没进编辑态，
+   受信按键全部落空，校验读到空。真人点一下之后 activeElement 会交给编辑器自己的容器。
+   修法：contenteditable 一律先来一次真实指针点击（input/textarea 不加，避免把光标挪到中段）。
+   ⚠️ 踩过第二次：点完又补了个 `ed.focus()`，把焦点从编辑器容器抢回叶子，编辑态当场打断，
+   症状与"没点"一模一样。
+
+3. **校验读错了对象 → 假阴性**（同上）。清空空段落之后 Notion 把焦点交还页面
+   （`activeElement` 变 BODY），`deepActive` 读到的成了整页文本，于是明明成功却报
+   `Input not verified`。这是**危险方向**：agent 会重试，对 `type` 就是写两份重复内容。
+   修法：失败时再按"解析出来的那个可编辑元素"复核一次，命中就如实给成功并标
+   `verified_by: 'target-element'`。它不会掩盖真错位 —— 文字若落进别的输入框，目标元素里就没有它。
+
+### 顺带确认的两件事
+
+- **Miro 的指纹是可信的**：SDK 造一张便签让 `fp` 从 793187922 → 96237963、`frames` 8→12，
+  删除后又变 —— 那张全屏 2D canvas 确实跟着板面重绘。所以 Miro 保留 `g=0`，
+  不像 Figma 那样降级成 `null`。这条不是推断，是 A/B 测出来的。
+- **Figma 的开关键在"Adapt content for screen readers"**，而且是用户级偏好：
+  重启实例后它仍然是开的（状态栏那句 disabled 没有再出现），Mirror DOM 直接可用。
+
 ## 6. 明确承认做不到的
 
 - **浏览器内的远程桌面 / VM 控制台**：帧流，无 DOM、无模型、无 API。

@@ -3408,9 +3408,37 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
       `var editable=(ed.contentEditable==='true')||(ed.tagName==='TEXTAREA')||(ed.tagName==='INPUT');` +
       `if(!editable)return {ok:false,err:'not-editable'};` +
       `ed.focus();` +
-      `return {ok:true};`
+      // focus() 到底有没有生效，必须当场读，不能假设。
+      // 实测（Notion，2026-10-30）：空段落的 contenteditable 拿到 focus() 之后
+      // document.activeElement 仍是 BODY —— 它要一次真实点击才进入编辑态。
+      // 于是后续的受信按键全打到页面上，而校验读到"没写进去"，报 Input not verified。
+      // 那不是"打字失败"，是"没坐上光标"。
+      `var a=document.activeElement;` +
+      `var took=(a===ed)||(ed.contains&&ed.contains(a))||(a&&a.contains&&a.contains(ed));` +
+      `var isCE=(ed.contentEditable==='true');` +
+      `return {ok:true,focus_took:!!took,kind:isCE?'ce':'input'};`
     );
     if (!prep || !prep.ok) return null;
+    // contenteditable **一律**先来一次真实指针点击，不能只 focus()。
+    //
+    // 实测（Notion，2026-10-30）：空段落的 contenteditable 调 focus() 之后
+    // document.activeElement 确实等于它（所以"焦点有没有坐上"这个判据看不出问题），
+    // 但编辑器**没进入编辑态** —— 随后的受信按键全部落空，校验读到空，报
+    // Input not verified。真人点一下之后 activeElement 会交给编辑器自己的容器，
+    // 按键才生效。也就是说：对这一类块编辑器，"焦点"不等于"可输入"。
+    //
+    // ⚠️ 点完**不要**再对叶子 focus()。踩过：点开之后补一个 ed.focus() 把焦点从
+    // 编辑器容器抢回叶子，编辑态当场被打断，症状与没点一模一样（实测两次）。
+    // 点完保持原样，让编辑器自己放光标；type 的 at 定位在后面的选区块里做。
+    //
+    // input/textarea 不加这一步：原生控件 focus 就够，多点一下反而会把光标
+    // 挪到中段（type 的 at:'end' 语义会变）。
+    if (prep.kind === 'ce' || prep.focus_took === false) {
+      try {
+        await this._cdpPointerTarget(view, 'click', aiId, tid);
+        await new Promise((r) => setTimeout(r, 150)); // 等编辑器切进编辑态
+      } catch (e) { /* 点不到就按原路径继续，后面的校验会如实报错 */ }
+    }
     // 清空收尾：拆掉残留的空块外壳。selectAll + 受信 Delete 只删文本不删外层块
     // 标签，浏览器会保留至少一个空块承载光标 —— 清一个 H2 段落得到的是
     // `<h2><br></h2>` 而不是空。残留外壳会让随后的排版一层层嵌进旧外壳（实测出现
@@ -3575,6 +3603,33 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     if (ok) {
       return { success: true, method: 'cdp-input', chars: (after && after.text) ? after.text.length : 0 };
     }
+    // 焦点复核：**焦点不等于我们写的那个编辑器**。
+    //
+    // 实测（Notion，2026-10-30）：清空一个空段落之后，Notion 把焦点交还给页面
+    // （activeElement 变回 BODY），于是 deepActive 读到的是整页文本；而目标块其实
+    // 已经空了 —— 明明成功却报 Input not verified。这是**假阴性**，比失败更危险：
+    // agent 会重试，对 type 就是写入两份重复内容。
+    //
+    // 所以失败时再按"我们解析出来的那个可编辑元素"读一次。命中就如实给成功并标明
+    // 依据来源。它不会掩盖真错位：文字若落到别的输入框，目标元素里就不会有它。
+    try {
+      const tgt = await run(
+        `var el=${findRefExpr(JSON.stringify(aiId))};if(!el)return {ok:false};` +
+        `var ed=el;if(ed.querySelector){var inner=${findDescExpr('ed', JSON.stringify('[contenteditable=true],input,textarea'))};if(inner)ed=inner;}` +
+        `return {ok:true,text:(ed.innerText||ed.value||'')};`
+      );
+      const tText = norm(tgt && tgt.text);
+      const okTgt = tgt && tgt.ok && (want ? tText.includes(want) : skeletal(tText) === '');
+      if (okTgt) {
+        return {
+          success: true,
+          method: 'cdp-input',
+          verified_by: 'target-element',
+          chars: (tgt && tgt.text) ? tgt.text.length : 0,
+          note: 'verified against the target element because focus moved away after the input (common in block editors after clear).',
+        };
+      }
+    } catch (e) { /* 复核只是加分项，出错不影响下面的如实报错 */ }
     // 诊断：忽略全部空白后再比一次。相等说明东西其实打进去了、只是被编辑器
     // 重新排了版；不等说明大概率压根没落上去。两者的处置方式完全相反。
     const landed = want ? skeletal(after && after.text) === skeletal(text) : false;

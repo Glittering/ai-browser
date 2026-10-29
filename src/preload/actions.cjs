@@ -17,6 +17,12 @@ function findRef(root, elementId) {
   var el = null;
   try { el = root.querySelector('[data-ai-id="' + elementId + '"]'); } catch (e) { el = null; }
   if (el) return el;
+  // 原生 id 兜底。抽取器在没有 data-ai-id 时用元素自己的 id 当句柄
+  // （`existingAiId || nativeId`），所以报出去的 id 有时就是 el.id；而 data-ai-id 只是
+  // 页面里的一个普通属性，React 类应用重渲染子树时会被一起抹掉，元素却还在。
+  // 实测（Notion，2026-10-30）：空段落叶子 id=":r6:"、data-ai-id 刚写就被抹成空，
+  // 于是 get_tree 报 :r6:、type 报 "Target not found for ref: :r6:" —— 读得到、打不进。
+  try { if (root.getElementById) { var byId = root.getElementById(elementId); if (byId) return byId; } } catch (e) {}
   var all;
   try { all = root.querySelectorAll("*"); } catch (e) { return null; }
   for (var i = 0; i < all.length; i++) {

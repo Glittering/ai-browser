@@ -20,6 +20,14 @@
 function findRefExpr(idJsExpr) {
   return "(function(id){var f=function(r){var e=null;"
     + "try{e=r.querySelector('[data-ai-id=\"'+id+'\"]')}catch(x){e=null}"
+    // 原生 id 兜底：抽取器在没有 data-ai-id 时用元素自己的 id 当句柄（`existingAiId ||
+    // nativeId`），所以我们**报出过**的 id 有时就是 el.id。而 data-ai-id 是页面里的一个
+    // 普通属性 —— React 类应用重渲染那个子树时会把它一起抹掉，元素本身还在（id 还在）。
+    // 实测（Notion，2026-10-30）：空段落叶子 id=":r6:"、data-ai-id 读到后立刻变空，
+    // 于是 get_tree 报 :r6: 而 type 报 "Target not found for ref: :r6:" —— 读得到、打不进。
+    // getElementById 不受特殊字符影响（`:r6:` 用属性选择器也行，但元素 id 里带引号就不行），
+    // 且 ShadowRoot 也有这个方法。找不到就是 null，不会误命中。
+    + "if(!e){try{if(r.getElementById)e=r.getElementById(id)}catch(x){}}"
     + "if(e)return e;"
     + "var a;try{a=r.querySelectorAll('*')}catch(x){return null}"
     + "for(var i=0;i<a.length;i++){var s=a[i].shadowRoot;if(!s)continue;var h=f(s);if(h)return h}"

@@ -131,4 +131,35 @@ describe('SD 影子 DOM —— 动作（findRef）', () => {
     expect(el).toBeTruthy();
     expect(el.textContent).toBe('深层');
   });
+
+  // ---- 句柄来自元素原生 id 时，查找必须认 getElementById ----
+  //
+  // 实测（Notion，2026-10-30）：空段落叶子 id=":r6:"、data-ai-id 写上去立刻被
+  // React 重渲染抹成空。抽取器没有 data-ai-id 时用原生 id 当句柄
+  // （`existingAiId || nativeId`），于是 get_tree 报 :r6:，而 type 报
+  // "Target not found for ref: :r6:" —— 读得到、打不进。
+  it('SD-10: 只有原生 id（data-ai-id 被抹掉）时仍能找到', () => {
+    document.body.innerHTML = '<div id=":r6:" contenteditable="true">段落</div>';
+    // 前提：属性确实不在（模拟被框架抹掉的真实状态），不能靠 data-ai-id 侥幸命中
+    expect(document.querySelector('[data-ai-id=":r6:"]')).toBeNull();
+    expect(actions.findRef(document, ':r6:')).toBeTruthy();
+    const el = new Function('document', 'return ' + findRefExpr(JSON.stringify(':r6:')))(document);
+    expect(el).toBeTruthy();
+    expect(el.textContent).toBe('段落');
+  });
+
+  it('SD-11: 两种命中方式都成立时不冲突（data-ai-id 优先，值不同也能各找各的）', () => {
+    document.body.innerHTML = '<div id="native-1" data-ai-id="e:div-9">x</div>';
+    expect(actions.findRef(document, 'e:div-9').id).toBe('native-1');
+    expect(actions.findRef(document, 'native-1')).toBe(actions.findRef(document, 'e:div-9'));
+    const el = new Function('document', 'return ' + findRefExpr(JSON.stringify('native-1')))(document);
+    expect(el && el.id).toBe('native-1');
+  });
+
+  it('SD-12: 原生 id 兜底不会把"不存在"变成"乱命中"', () => {
+    document.body.innerHTML = '<div id="other">x</div>';
+    expect(actions.findRef(document, 'native-1')).toBeNull();
+    const el = new Function('document', 'return ' + findRefExpr(JSON.stringify('native-1')))(document);
+    expect(el).toBeNull();
+  });
 });
