@@ -38,6 +38,12 @@ import blankPage from '../shared/blank_page.cjs';
 // .cjs 用默认导入（全项目约定，且 tests/test_imports.js 的静态分析只认 ESM export）。
 import viewLiveness from '../shared/view_liveness.cjs';
 const { isAlive, liveness } = viewLiveness;
+// "关掉一个 tab 时哪些 per-tab 容器必须跟着消失"的唯一清单（纯函数）。
+// 为什么是表而不是逐行 delete：这类清理历史上漏过两轮（Bug 5 补了 4 个字段，
+// 2026-10-30 评估又查出 3 个漏网）。清单数据化 + 完整性闸门单测之后，
+// "新增一个 per-tab Map 忘了清"会变成构建失败而不是半年后的一次泄漏。
+// 见 shared/tab_state.cjs 顶部与 docs/AUDIT-2026-10-30.md P1-2。
+import tabState from '../shared/tab_state.cjs';
 import { diffValues, previewOf, safeByteLength, DEFAULT_SNAPSHOT_JS, DIFF_MAX_ENTRIES, evictOldest } from './snapshot_diff.js';
 import { withDeadline, actionDeadlineMs } from '../shared/deadline.js';
 import { DownloadMonitor } from './download_monitor.js';
@@ -4725,16 +4731,12 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     for (const [token, entry] of this._windowOpenTokens) {
       if (entry.tabId === tabId) this._windowOpenTokens.delete(token);
     }
-    this._windowOpenShimTabs.delete(tabId);
-    this._windowOpenShimReady.delete(tabId);
-    this._tabNavState.delete(tabId);
-    // 对话框状态跟着 tab 走：留着会让下次同 id 的 tab 继承一个不存在的对话框。
-    this._lastDialog.delete(tabId);
-    this._openDialogs.delete(tabId);
-    this._dialogWatched.delete(tabId);
-    // Release per-tab network resources so a closed tab can never leak its
-    // debugger attachment or cached request entries / stale monitors.
+    // per-tab 纯容器的清理由 shared/tab_state.cjs 的 PER_TAB 表统一执行
+    // （唯一清单）。这里不再逐行 delete：两处清单一定会分叉 —— Bug 5 与
+    // 2026-10-30 评估各漏一次，就是这么漏的。有副作用的步骤（detach 调试器、
+    // 释放抓包内存、canvas 账本）也在同一个函数里，但**晚于**纯删除。
     this._cleanupTabResources(tabId);
+
     if (this.activeTab === tabId || this.activeTab === null) {
       // switch to first remaining tab — must re-addBrowserView
       const first = this.tabs.keys().next();
@@ -4758,6 +4760,13 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
   //    unaffected — each tab owns its own webContents debugger)
   //  - drop cached request entries made on that tab
   _cleanupTabResources(tabId) {
+    // 第一件事：把纯数据容器全部清掉。
+    // 放在最前面是因为它是**纯删除、不会抛**，而后面几步都有副作用（detach 调试器、
+    // 释放抓包内存）——万一哪一步抛了，至少 tabId 不会带着上一任的状态被复用。
+    // 清单只有一份：shared/tab_state.cjs 的 PER_TAB（新增 per-tab 容器必须登记，
+    // 否则 tests/test_tab_state_reset.js 的完整性闸门会红）。
+    tabState.clearPerTab(this, tabId);
+
     const entry = this._cdpTabs.get(tabId);
     if (entry) {
       try { entry.wc.debugger.detach(); } catch(e) {}
@@ -4780,21 +4789,10 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     // tabId 会被复用，媒体文档记录跟着一起清 —— 否则新 tab 一打开就带着
     // 上一个 tab 的「下载」按钮状态（地址对不上时 recordOf 会兜住，但别依赖兜底）。
     if (this.mediaInline) this.mediaInline.forget(tabId);
-    // tabId 会被新 tab 复用 → 旧 tab 的 ref tracker / 增量 diff 快照 / 错误页守卫 /
-    // canvas 抓取状态都要清掉，否则新 tab 会带着上一任的 state 活着（Bug 5：关 tab
-    // 不清这些，长会话下按 tabId 持续累积，属于真正的内存泄漏）。
-    if (this._refTrackers) this._refTrackers.delete(tabId);
-    this._axDiffCache.delete(tabId);
-    if (this._failureGuard) this._failureGuard.delete(tabId);
-    this.canvasMonitor.clear(tabId);
-    // 白屏自检 / 崩溃自救的 per-tab 状态。不清的话 tabId 会被新 tab 复用，
-    // 新 tab 一开就继承上一任的"已经救过两步"，白屏时直接被判定成 give-up。
-    this._paintState.delete(tabId);
-    this._paintSteps.delete(tabId);
-    this._paintSelfReload.delete(tabId);
-    this._crashReloadAt.delete(tabId);
-    const pt = this._paintTimers.get(tabId);
-    if (pt) { clearTimeout(pt); this._paintTimers.delete(tabId); }
+    // canvas 抓取状态有自己的配额账本与 hook 句柄，需要连带释放；用 forget 而不是
+    // clear —— clear 是"重记"（canvas_configure{clear:true} 用），会保留 mode/hook，
+    // 关 tab 要的是连那个空壳一起删，否则 tabs Map 无界累积（没有淘汰上限）。
+    this.canvasMonitor.forget(tabId);
   }
 
   /** 白屏相关的"值得报出去的结论"；正常页面返回 null（listTabs 不带这个字段）。 */

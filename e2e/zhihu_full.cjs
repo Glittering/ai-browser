@@ -1,4 +1,10 @@
 // e2e/zhihu_full.cjs — 知乎富文本发布流程端到端验证（附着 9223 实例）
+//
+// ⚠️ 这是**手工脚本**，不属于自动化测试套件：它不 spawn 自己的 Electron，
+//    而是附着到已经在 9223 上跑着的实例，且依赖一个已登录的知乎账号。
+//    所以它不在 e2e/run_all.cjs 的 SUITES 里、也没有 npm script —— 这是**故意的**，
+//    不是"加了套件忘了进全量"（docs/SPEC.md 里那条规矩管的是自动化套件）。
+//    要跑：先 `npm start`，然后 `node e2e/zhihu_full.cjs`。
 // 步骤：首页 → 创作 → 写文章(新tab) → 编辑器 → 标题 → 加粗输入 → 正文多段落 → 清空 → 发布按钮
 const path = require('node:path');
 const fs = require('node:fs');

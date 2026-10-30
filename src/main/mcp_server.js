@@ -148,7 +148,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // 都会实际调用一次工具，不透明的 internal error 会被当成"坏了"。
         return { content: [{ type: 'text', text: `Error: ${guardErr}` }], isError: true };
       }
-      const result = await wsClient.call('ui.evaluate', { js, tab: args.tab });
+      // frame_ref 必须转发：旧版这里只传 js/tab，schema 却承诺了"显式指定运行帧"，
+      // 于是 agent 传了也照样在顶层帧跑、对 iframe 内元素返回 null —— 不报错、
+      // 只是拿不到（同类事故第 5 次，见 docs/AUDIT-2026-10-30.md P1-1）。
+      // tests/test_mcp_forwarding.js 用表驱动钉住"声明即转发"。
+      const result = await wsClient.call('ui.evaluate', {
+        js,
+        tab: args.tab,
+        frame_ref: args.frame_ref || undefined,
+      });
       return { content: [{ type: 'text', text: JSON.stringify(result) }] };
     }
 

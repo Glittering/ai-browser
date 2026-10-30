@@ -722,14 +722,32 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
           // === ui.wait — poll until condition or timeout ===
           case 'ui.wait': {
             // params: { condition: 'button_enabled'|'modal_appeared'|'text_contains', target, text, timeout_ms }
-            const timeoutMs = params.timeout_ms || 10000;
+            //
+            // timeout_ms 必须钳制：调用方写 600000 会让这条 RPC 和一次 500ms 一轮的
+            // 树抽取循环一直跑着，而 agent 那边通常早就超时放弃了。
+            const timeoutMs = Math.max(100, Math.min(120000, Number(params.timeout_ms) || 10000));
             const pollMs = 500;
             const startTime = Date.now();
             let satisfied = false;
+            let attempts = 0;
+            // 最后一次"这一轮没读成"的原因。仅仅不满足**不是**错误，但读失败
+            // 必须如实报出来 —— 否则调用方分不清"条件没出现"和"我一直在读空"。
+            let lastError = null;
 
             const poll = async () => {
               while (Date.now() - startTime < timeoutMs) {
-                const result = await pageManager.getTree(false, tabId);
+                attempts++;
+                // ⚠️ 单次抽取失败不是"等待失败"。导航之后的几百毫秒里文档正在换，
+                // preload 的 ai:extract 会因为旧文档已拆而超时（getTree 硬 5s 后
+                // reject）。此前这里没有 try/catch → `browse_wait({url_contains})`
+                // 这个最典型的用法直接变成 -32603 internal error，而调用方看到
+                // "内部错误"的合理反应是**重试导航**，把已经成功的导航重做一遍。
+                let result = null;
+                try {
+                  result = await pageManager.getTree(false, tabId);
+                } catch (e) {
+                  lastError = String((e && e.message) || e);
+                }
                 const tree = result?.tree;
                 const ctx = result?.context;
 
@@ -744,12 +762,20 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
                   if (ctx?.modals && ctx.modals.length > 0) { satisfied = true; break; }
                 }
                 if (params.condition === 'text_contains' && params.text) {
-                  const bodyText = await pageManager.evaluate('document.body.innerText', tabId);
-                  if (bodyText && bodyText.indexOf(params.text) >= 0) { satisfied = true; break; }
+                  try {
+                    const bodyText = await pageManager.evaluate('document.body.innerText', tabId);
+                    if (bodyText && bodyText.indexOf(params.text) >= 0) { satisfied = true; break; }
+                  } catch (e) {
+                    lastError = String((e && e.message) || e);
+                  }
                 }
                 if (params.condition === 'url_contains' && params.text) {
-                  const url = await pageManager.evaluate('location.href', tabId);
-                  if (url && url.indexOf(params.text) >= 0) { satisfied = true; break; }
+                  try {
+                    const url = await pageManager.evaluate('location.href', tabId);
+                    if (url && url.indexOf(params.text) >= 0) { satisfied = true; break; }
+                  } catch (e) {
+                    lastError = String((e && e.message) || e);
+                  }
                 }
 
                 await new Promise(r => setTimeout(r, pollMs));
@@ -757,7 +783,17 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
             };
 
             await poll();
-            send({ jsonrpc: '2.0', id, result: { satisfied, elapsed_ms: Date.now() - startTime } });
+            send({
+              jsonrpc: '2.0', id,
+              result: {
+                satisfied,
+                elapsed_ms: Date.now() - startTime,
+                // 抽了几轮。0 轮 = 一次都没轮到（超时被钳到极小或页面立即失效），
+                // 这个数字让"等了两秒但只读了 3 次"这种事可诊断。
+                attempts,
+                ...(satisfied || !lastError ? {} : { last_error: lastError }),
+              },
+            });
             break;
           }
           // === ui.scroll — scroll page or element ===
@@ -778,8 +814,19 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
               window.scrollBy(0, d === 'down' ? a : -a);
               return { ok: true };
             })(${JSON.stringify(target)}, ${JSON.stringify(direction)}, ${amount})`;
-            const result = await pageManager.evaluate(js, tabId).catch(() => ({ ok: false }));
-            send({ jsonrpc: '2.0', id, result: result || { ok: true } });
+            const result = await pageManager.evaluate(js, tabId).catch((e) => ({
+              ok: false,
+              error: String((e && e.message) || e),
+            }));
+            // 以前这里写 `result || { ok: true }`：evaluate 返回 undefined 时也报成功。
+            // 「命令发出去了」不等于「页面动了」—— 这个项目为这条判据付过代价
+            // （不变量 5：任何写入必须 操作→回读→diff）。没有回执就如实说没有。
+            send({
+              jsonrpc: '2.0', id,
+              result: result && typeof result === 'object'
+                ? result
+                : { ok: false, error: 'scroll produced no result from the page' },
+            });
             break;
           }
           // === 网络抓包（可查询的 Network 面板）===
@@ -802,22 +849,21 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
             break;
           }
           case 'ui.network_get': {
-            try {
-              const result = await pageManager.networkGet(String(params.network_id || ''), {
-                include_request_headers: params.include_request_headers === true,
-                include_request_body: params.include_request_body === true,
-                include_response_headers: params.include_response_headers === true,
-                include_response_body: params.include_response_body === true,
-                include_sensitive_headers: params.include_sensitive_headers === true,
-                request_body_offset: params.request_body_offset,
-                response_body_offset: params.response_body_offset,
-                body_limit: params.body_limit,
-              });
-              send({ jsonrpc: '2.0', id, result });
-            } catch (e) {
-              if (e && e.rpcCode) send({ jsonrpc: '2.0', id, error: { code: e.rpcCode, message: e.message, data: e.data || undefined } });
-              else send({ jsonrpc: '2.0', id, error: { code: -32603, message: e.message } });
-            }
+            // 这里**不**自带 try/catch：以前自带一份，catch 里 send 完继续往下走，
+            // 最后落到统一的 noteCall(..., true) —— 于是"body 被淘汰"这类失败会被
+            // 记成一次**成功**调用，错误日志里"崩溃前最近调用"就成了假证据。
+            // 现在只有一个错误出口（外层 catch），它认 e.rpcCode 并回精确错误码。
+            const result = await pageManager.networkGet(String(params.network_id || ''), {
+              include_request_headers: params.include_request_headers === true,
+              include_request_body: params.include_request_body === true,
+              include_response_headers: params.include_response_headers === true,
+              include_response_body: params.include_response_body === true,
+              include_sensitive_headers: params.include_sensitive_headers === true,
+              request_body_offset: params.request_body_offset,
+              response_body_offset: params.response_body_offset,
+              body_limit: params.body_limit,
+            });
+            send({ jsonrpc: '2.0', id, result });
             break;
           }
           case 'ui.network_clear': {
@@ -892,17 +938,26 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
         // 而不是给每次点击都记一行日志。
         noteCall(method, params, Date.now() - t0, true);
       } catch (e) {
-        noteCall(method, params, Date.now() - t0, 'error: ' + ((e && e.message) || e));
+        const errMsg = (e && e.message) || String(e);
+        noteCall(method, params, Date.now() - t0, 'error: ' + errMsg);
+        // 带 rpcCode 的是**可预期的业务失败**（记录不存在 / body 已被淘汰 /
+        // 敏感头未开）：回精确错误码，但**不落盘** —— 它不是"主进程出问题了"，
+        // 落盘只会把真正的 uncaught/崩溃淹掉。此前 ui.network_get 在自己的
+        // catch 里这么做，代价是错误调用被记成了成功（见 AUDIT P2-1）。
+        if (e && e.rpcCode) {
+          send({ jsonrpc: '2.0', id, error: { code: e.rpcCode, message: errMsg, data: e.data || undefined } });
+          return;
+        }
         // RPC 层异常**必须落盘**。此前它只变成一句 JSON-RPC error 回给调用方，
         // 一旦客户端那边没截住（或用户只看到界面里闪一下），现场就永久丢了 ——
         // 事后既查不到崩在哪，也证不了"刚才是不是真的报过错"。
         recordError('ws_error', {
           method,
           params,
-          message: (e && e.message) || String(e),
+          message: errMsg,
           stack: String((e && e.stack) || '').slice(0, 8000),
         });
-        send({ jsonrpc: '2.0', id, error: { code: -32603, message: e.message } });
+        send({ jsonrpc: '2.0', id, error: { code: -32603, message: errMsg } });
       }
     });
 

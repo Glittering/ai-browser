@@ -14,6 +14,9 @@ let pm;
 // Behavior closures — swapped per test; the recorders are fixed.
 let evaluateImpl = () => undefined;
 let getTreeImpl = () => ({ tree: {}, context: { modals: [], messages: [] } });
+// ui.network_get 的替身：默认成功；个别用例让它抛带 rpcCode 的错误，
+// 用来验证"业务失败回精确错误码、且不会被记成成功"（AUDIT-2026-10-30 P2-1）。
+let networkGetImpl = async () => ({ id: 'n1', request: { url: 'https://x/' } });
 
 function makePageManager() {
   const obj = {
@@ -28,6 +31,8 @@ function makePageManager() {
     listTabs: () => [],
     getFocused: async () => null,
     getNetworkBody: async () => null,
+    networkGet: async (...a) => networkGetImpl(...a),
+    networkList: () => ({ requests: [], pagination: {} }),
     registerClient: () => {},
     unregisterClient: () => {},
     addSubscription: () => {},
@@ -301,5 +306,107 @@ describe('ws_server ui.set_active_tab 回执', () => {
     const res = await rpc(client, 'ui.set_active_tab', { tab: 2 });
     expect(res.result).toEqual({ ok: true });   // 事故时是 {}
     expect(fake.activeTab).toBe(2);             // 副作用也照常发生
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ui.wait 抗导航抖动（AUDIT-2026-10-30 P1-3）
+//
+// 事故形态：`browse_wait({cond:'text_contains'})` 最常见的用法就在 navigate 之后，
+// 而那几百毫秒正是文档在换、preload 的 ai:extract 会超时（getTree 硬 5s reject）
+// 的窗口。此前 poll() 里没有 try/catch，整条等待直接变成 -32603 internal error，
+// 调用方看到"内部错误"就会**重试导航**，把已经成功的导航重做一遍。
+// ---------------------------------------------------------------------------
+describe('ws_server ui.wait 抗导航抖动', () => {
+  it('W-4: 单次抽取抛错不算等待失败 —— 继续轮询直到条件成立', async () => {
+    let calls = 0;
+    getTreeImpl = () => {
+      calls++;
+      // 前两轮模拟"文档正在换"：tree 抽取超时
+      if (calls <= 2) throw new Error('getTree timeout');
+      return { tree: {}, context: { modals: [{ header: 'ready' }] } };
+    };
+
+    const res = await rpc(client, 'ui.wait', { condition: 'modal_appeared', timeout_ms: 5000 });
+    expect(res.error, '不许再变成 JSON-RPC internal error').toBeUndefined();
+    expect(res.result.satisfied, '抖动过去之后必须能等到').toBe(true);
+    expect(res.result.attempts, '至少要试到第 3 轮才可能成功').toBeGreaterThanOrEqual(3);
+  });
+
+  it('W-5: 一直读不到时 satisfied=false，但要如实带 last_error（不许静默）', async () => {
+    getTreeImpl = () => { throw new Error('getTree timeout'); };
+
+    const res = await rpc(client, 'ui.wait', { condition: 'modal_appeared', timeout_ms: 600 });
+    expect(res.error).toBeUndefined();
+    expect(res.result.satisfied).toBe(false);
+    expect(res.result.attempts).toBeGreaterThan(0);
+    expect(res.result.last_error, '读失败的原因必须能看见').toContain('getTree timeout');
+  });
+
+  it('W-6: timeout_ms 有下限（传 1ms 也至少轮询一次，不是空转即返回）', async () => {
+    getTreeImpl = () => ({ tree: {}, context: { modals: [] } });
+    const started = Date.now();
+    const res = await rpc(client, 'ui.wait', { condition: 'modal_appeared', timeout_ms: 1 });
+    expect(res.result.satisfied).toBe(false);
+    expect(res.result.attempts).toBeGreaterThanOrEqual(1);
+    expect(Date.now() - started).toBeLessThan(1500);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 错误路径不许撒谎（AUDIT-2026-10-30 P2-1 / P2-2）
+// ---------------------------------------------------------------------------
+describe('ws_server 错误路径', () => {
+  it('N-1: network_get 的业务失败回精确 rpcCode，且不返回 result', async () => {
+    networkGetImpl = async () => {
+      const e = new Error('body evicted (retention limit)');
+      e.rpcCode = -32010;
+      e.data = { id: 'n1', reason: 'evicted' };
+      throw e;
+    };
+    const res = await rpc(client, 'ui.network_get', { network_id: 'n1' });
+    expect(res.error && res.error.code, 'rpcCode 必须原样回给调用方').toBe(-32010);
+    expect(res.error.message).toContain('body evicted');
+    expect(res.error.data).toMatchObject({ reason: 'evicted' });
+    expect(res.result, '失败时不许同时给 result').toBeUndefined();
+  });
+
+  it('N-2: network_get 的普通异常回 -32603（兜底不许吞）', async () => {
+    networkGetImpl = async () => { throw new Error('n2-plain-boom'); };
+    const res = await rpc(client, 'ui.network_get', { network_id: 'n1' });
+    expect(res.error.code).toBe(-32603);
+    expect(res.result).toBeUndefined();
+  });
+
+  // P2-1 的核心判据：**错误调用不许被记成成功**。
+  // 旧实现在 case 内部自带 try/catch，catch 里 send 完继续往下走，最后落到统一的
+  // noteCall(..., true) —— 于是错误日志里"崩溃前最近调用"把一次失败的 network_get
+  // 记成成功，事后排查会被这条假证据带偏。这里直接读那条 error 条目自带的
+  // recent_calls 上下文（recordError 会把最近 20 次调用钉在里面）。
+  it('N-3: network_get 普通异常必须落盘为 ws_error，且 recent_calls 里那次调用记为 error', async () => {
+    networkGetImpl = async () => { throw new Error('n3-exploded'); };
+    const res = await rpc(client, 'ui.network_get', { network_id: 'n3' });
+    expect(res.error.code).toBe(-32603);
+
+    const listed = await rpc(client, 'ui.errors', { kind: 'ws_error', limit: 200 });
+    const items = (listed.result && listed.result.items) || [];
+    const entry = items.find(
+      (e) => e.method === 'ui.network_get' && String(e.message || '').includes('n3-exploded')
+    );
+    expect(entry, '普通异常必须能在 ui.errors 里查到（旧实现在内层 catch 里吞掉了）').toBeTruthy();
+
+    const call = (entry.recent_calls || []).find((c) => c && c.method === 'ui.network_get');
+    expect(call, 'recent_calls 里应当有这次调用').toBeTruthy();
+    expect(
+      String(call.outcome),
+      '这次调用必须以错误收尾 —— 记成 true 就是日志在撒谎（AUDIT P2-1）'
+    ).toMatch(/error/i);
+  });
+
+  it('S-2: scroll 拿不到页面回执时不许报 ok（evaluate 返回 undefined）', async () => {
+    evaluateImpl = async () => undefined;
+    const res = await rpc(client, 'ui.scroll', { direction: 'down', amount: 10 });
+    expect(res.result.ok, '没有回执就不能说成功').toBe(false);
+    expect(res.result.error).toMatch(/no result/);
   });
 });

@@ -765,15 +765,20 @@ sheet**，因此它既不在语义树里，也不受页面点击控制；**而�
 
 ## 测试基线
 
-- 单元：`npm test` —— Vitest，83 文件 / 1166 条，0 skip。
+> 数字**每次发版后按实测更新**（`npm test` / `npm run e2e:all` 的最终摘要）。
+> 2026-10-30 v2.4.5 基线：单测 **91 文件 / 1228 条**、e2e **25 套件 / 814 断言**。
+
+- 单元：`npm test` —— Vitest，91 文件 / 1228 条，0 skip。
 - 端到端：各 `npm run <suite>` 自起 Electron（隔离 profile）：
   `smoke` / `capabilities` / `richtext` / `network` / `value` / `canvas` / `modeldiff` /
-  `audit` / `focus` / `interact` / `upload` / `view` / `readcov` / `window_open` /
+  `audit` / `nav` / `focus` / `interact` / `upload` / `view` / `readcov` / `window_open` /
   `dialog` / `wrapper` / `paint` / `layout` / `download` / `multiagent` / `background` /
-  `app_model` / `lifecycle`。
+  `icon` / `app_model` / `lifecycle`。
   **改动不得破坏任何一项。** 一次跑全部：`npm run e2e:all`（25 套件 / 814 断言）。
   另外两个**不进全量**：`npm run flicker`（要屏幕录制权限 + 窗口真的在屏幕上）、
   `npm run realsites`（依赖外网）。
+  `e2e/zhihu_full.cjs` 是**手工脚本**（附着已运行的 9223 实例 + 需登录态），
+  不属于套件、也没有 npm script —— 别把它当"漏进全量的套件"。
   测试客户端（`tools/browser.cjs`）**不许永久等**：连接断开/回包超时都要把挂起的
   调用唤醒成一条错误。没有这一条，一次中途掉线会让套件挂到看门狗（150s）且没有任何线索
   —— 排查时唯一能看到的是"卡在某一步"，而真正的原因（连上了正在退出的实例）被吞掉了。

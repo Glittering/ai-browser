@@ -131,6 +131,11 @@ export class CanvasMonitor {
     return { accepted, dropped };
   }
 
+  /**
+   * 只丢抓取到的**数据**，保留该 tab 的配置（mode / hook / warnings）。
+   * `canvas_configure{clear:true}` 走这里 —— 它要的是"从零开始记"，
+   * 不是"顺手把我刚设的 mode 也忘掉"。
+   */
   clear(tabId) {
     const st = this.tabs.get(tabId);
     if (!st) return { cleared_calls: 0 };
@@ -140,6 +145,20 @@ export class CanvasMonitor {
     st.droppedCalls = 0;
     st.canvases = new Map();
     return { cleared_calls: n };
+  }
+
+  /**
+   * 彻底忘掉一个 tab（关 tab 时调用）。与 clear 的区别：
+   * 连 mode / hookInstalled / warnings 一起丢，并把 tabs 里的条目**删掉**。
+   *
+   * 为什么必须删条目：这个 Map 没有任何淘汰上限，而此前关 tab 只清数据、
+   * 留一个空 state 对象 —— 每关一页就多一条，长会话下无界累积（TODO 里
+   * "关掉的 tab 保留 canvas 抓取状态"指的就是这里）。之后 list/read 会按需重建，
+   * 行为不变。
+   */
+  forget(tabId) {
+    const had = this.tabs.delete(tabId);
+    return { forgotten: !!had };
   }
 
   /** 列出该 tab 的 canvas。 */
