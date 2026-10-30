@@ -12,6 +12,11 @@ import { parseWatchdogTargets, isWatchdogEnabled } from '../shared/watchdog.js';
 import { wrapSetActive } from '../shared/tab_hooks.js';
 import { initErrorLog, recordError, markShutdown, getLogPath } from './error_log.js';
 import errorBanner from '../shared/error_banner.cjs';
+// .cjs 一律默认导入：ESM 从 .cjs 做具名导入依赖 cjs-module-lexer 静态识别，
+// 而 tests/test_imports.js 只认 ESM `export` 语法，会误报"没有导出它"。全项目约定
+// 用默认导入（见 blank_page.cjs / error_banner.cjs），这里保持一致。
+import viewLiveness from '../shared/view_liveness.cjs';
+const { isAlive, liveness } = viewLiveness;
 import { classifyShowReason, describeShowUrl } from '../shared/window_show.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -64,6 +69,29 @@ let pendingBannerTimer = null;
 // 连窗口都等不到（启动即死）时，多久后退回一次原生框 —— 这是唯一"什么都不显示"
 // 的场景，否则用户会看到应用静默不动、也没有任何提示。
 const BANNER_GIVE_UP_MS = 8000;
+// 横幅自动收敛（2026-10-30）：以前横幅一旦挂上就只能靠人点 × 收起，异常明明已经
+// 过去却会一直占着底部 34px —— 用户截图里那条深红横幅就是挂了 3 小时没消失。
+// 现在：距最后一次 fatal 静默 BANNER_AUTO_HIDE_MS 后自动收起（日志里的 stack 永久保留，
+// 收横幅不影响查证）。有新异常会重置计时器。
+const BANNER_AUTO_HIDE_MS = (() => {
+  const n = Number(process.env.AI_BROWSER_BANNER_AUTOHIDE_MS);
+  return Number.isFinite(n) && n >= 500 ? n : 15000;   // 允许 e2e 调短；下限 500ms 防误配
+})();
+let bannerAutoHideTimer = null;
+
+function scheduleBannerAutoHide() {
+  if (bannerAutoHideTimer) { clearTimeout(bannerAutoHideTimer); bannerAutoHideTimer = null; }
+  bannerAutoHideTimer = setTimeout(() => {
+    bannerAutoHideTimer = null;
+    // 只收起横幅视图，不动日志、不动计数；人仍可从 ui.errors 查到完整 stack。
+    // 记一条：横幅自动收敛这件事必须可观测，否则"横幅是不是又挂死了"无从查证。
+    if (errorBannerView) {
+      try { recordError('error_banner_autohide', { after_ms: BANNER_AUTO_HIDE_MS }); } catch {}
+      try { hideErrorBanner(); } catch (_) {}
+    }
+  }, BANNER_AUTO_HIDE_MS);
+  if (bannerAutoHideTimer.unref) bannerAutoHideTimer.unref();
+}
 
 function bannerEnabled() {
   // e2e / 无人值守可以关掉（日志照记）：横幅虽不阻塞，但会改变窗口布局，
@@ -105,18 +133,107 @@ function showNativeFatalDialog(detail) {
   }, 800);
 }
 
+// === 标签栏视图的生命周期治理（2026-10-30 白屏事故的根治）=================
+//
+// 事故形态：标题栏还在、页面区全白、底部一条深红横幅 —— 也就是 tabBarView 的
+// webContents 失效（close/destroy 后变 undefined，或渲染进程被 GPU 崩溃连带走），
+// 而 setInterval(pushNavState, 1500) 每 1.5s 无条件访问它 → 抛
+// "Cannot read properties of undefined (reading 'isDestroyed')" → uncaughtException
+// → reportFatal → showErrorBanner → layoutWithBanner 又碰悬空视图 → 二次崩溃 →
+// 进程半死（端口 listen 但 WS 握不上手）。日志里这个异常反复出现 22 次。
+//
+// 治理三要点（底层通用，不是逐个补丁）：
+//   1. 所有"这视图还活着吗"的判断走 shared/view_liveness.cjs 的 isAlive，绝不裸写
+//      .webContents.isDestroyed()；
+//   2. tabBarView 每次被 pushNavState 摸到时顺手体检一次，死了就重建 —— 把原来的
+//      "崩溃点"变成"自愈点"；
+//   3. 重建有节流与上限：GPU 连续崩溃时不能无限 new BrowserView（那就是另一种死循环）。
+let tabBarRebuildAt = 0;
+let tabBarRebuildCount = 0;
+const TAB_BAR_REBUILD_MIN_GAP = 1500;   // 两次重建至少隔 1.5s
+const TAB_BAR_REBUILD_MAX = 8;          // 单进程生命周期内最多重建 8 次
+
+/** 造一个全新的标签栏 BrowserView 并挂进窗口。交互靠主进程全局 IPC，不用逐 view 重绑。 */
+function createTabBarView() {
+  const view = new BrowserView({
+    webPreferences: { contextIsolation: false, nodeIntegration: true },
+  });
+  mainWindow.addBrowserView(view);
+  try {
+    const cb = mainWindow.getContentBounds();
+    view.setBounds({ x: 0, y: 0, width: cb.width, height: TAB_BAR_HEIGHT });
+  } catch {
+    view.setBounds({ x: 0, y: 0, width: 1280, height: TAB_BAR_HEIGHT });
+  }
+  view.webContents.loadFile(path.join(__dirname, '../renderer/tab_bar.html'));
+
+  // 渲染进程真的死了（killed/crashed）时主动报一声并触发自愈，而不是等 1.5s 轮询。
+  // clean-exit 也要管：标签栏是常驻视图，"正常退出"对它就是不该发生的丢失。
+  view.webContents.on('render-process-gone', (_e, details) => {
+    const reason = (details && details.reason) || 'unknown';
+    try { recordError('tabbar_renderer_gone', { reason }); } catch {}
+    // 让出当前回调栈再重建，避免在 Electron 的事件派发过程中拆自己的 view。
+    setTimeout(() => {
+      try { ensureTabBarAlive(true); } catch (e) {
+        try { recordError('tabbar_rebuild_failed', { error: String(e && e.message || e) }); } catch {}
+      }
+    }, 120);
+  });
+  return view;
+}
+
+/**
+ * 保证标签栏活着。死了就重建（带节流与上限），返回当前可用的 view 或 null。
+ * @param {boolean} force 渲染进程刚死时为 true，跳过"最小间隔"节流（但仍受上限约束）。
+ */
+function ensureTabBarAlive(force = false) {
+  if (isAlive(tabBarView)) return tabBarView;
+  if (!mainWindow || mainWindow.isDestroyed()) return null;
+  const now = Date.now();
+  if (!force && now - tabBarRebuildAt < TAB_BAR_REBUILD_MIN_GAP) return null;
+  if (tabBarRebuildCount >= TAB_BAR_REBUILD_MAX) {
+    // 到顶了就不再重建，避免 GPU 反复崩溃时的无限循环。日志留一次，让人能查到。
+    if (tabBarRebuildCount === TAB_BAR_REBUILD_MAX) {
+      tabBarRebuildCount++;   // 只记一次，之后静默
+      try { recordError('tabbar_rebuild_exhausted', { max: TAB_BAR_REBUILD_MAX }); } catch {}
+    }
+    return null;
+  }
+  // 摘掉悬空的旧对象（try 包裹：它可能已经被 Electron 内部拆掉了）。
+  if (tabBarView) {
+    try { mainWindow.removeBrowserView(tabBarView); } catch {}
+  }
+  try {
+    tabBarView = createTabBarView();
+    tabBarRebuildAt = now;
+    tabBarRebuildCount++;
+    try { recordError('tabbar_rebuilt', { count: tabBarRebuildCount, prev: 'dead' }); } catch {}
+    // 新视图的 renderer 会自己拉一次 nav:state；这里再手动补一帧布局，避免它暂时
+    // 用了默认 1280 宽而窗口其实更宽/更窄。
+    layoutWithBanner();
+    return tabBarView;
+  } catch (e) {
+    tabBarView = null;
+    try { recordError('tabbar_rebuild_failed', { error: String(e && e.message || e) }); } catch {}
+    return null;
+  }
+}
+
 // 布局集中在一处算：横幅要占掉底部 34px，页面视图必须相应让出来，
 // 否则横幅会被页面盖住（或反过来压住页面最后一行）。
 function layoutWithBanner() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   let b;
   try { b = mainWindow.getContentBounds(); } catch { return; }
-  if (tabBarView && !tabBarView.webContents.isDestroyed()) {
+  // ⚠️ 不能裸写 tabBarView.webContents.isDestroyed()：webContents 在 close/destroy
+  // 后会变成 undefined，那样会抛 "Cannot read properties of undefined" 击穿主进程
+  // （2026-10-30 白屏事故的 22 次崩溃，全在这条链上）。统一走 isAlive。
+  if (isAlive(tabBarView)) {
     tabBarView.setBounds({ x: 0, y: 0, width: b.width, height: TAB_BAR_HEIGHT });
   }
   const inset = errorBannerView ? ERROR_BANNER_HEIGHT : 0;
   if (pageManager) pageManager._bottomInset = inset;
-  if (errorBannerView && !errorBannerView.webContents.isDestroyed()) {
+  if (isAlive(errorBannerView)) {
     errorBannerView.setBounds({
       x: 0,
       y: Math.max(0, b.height - ERROR_BANNER_HEIGHT),
@@ -128,7 +245,12 @@ function layoutWithBanner() {
 }
 
 function ensureErrorBanner() {
-  if (errorBannerView && !errorBannerView.webContents.isDestroyed()) return errorBannerView;
+  if (isAlive(errorBannerView)) return errorBannerView;
+  // 悬空的旧横幅：先从窗口摘掉，再重建。否则旧对象会一直占着 z 序位置。
+  if (errorBannerView) {
+    try { mainWindow.removeBrowserView(errorBannerView); } catch {}
+    errorBannerView = null;
+  }
   if (!mainWindow || mainWindow.isDestroyed()) return null;
   // 与标签栏同样的配置（nodeIntegration + 非隔离）：横幅是我们自己的本地页面，
   // 需要 ipcRenderer 才能把「×」传回主进程。页面里没有任何远程内容。
@@ -148,10 +270,12 @@ function showErrorBanner(payload) {
   const view = ensureErrorBanner();
   if (!view) return false;
   const deliver = () => {
-    try { view.webContents.send('error-banner:show', payload); } catch { /* 帧已销毁就放弃，日志已有 */ }
+    try { if (isAlive(view)) view.webContents.send('error-banner:show', payload); } catch { /* 帧已销毁就放弃，日志已有 */ }
   };
   // 首次创建时 listener 还没注册，直接 send 会静默丢失 —— 等 load 完再发。
-  if (view.webContents.isLoading()) view.webContents.once('did-finish-load', deliver);
+  let loading = false;
+  try { loading = isAlive(view) && view.webContents.isLoading(); } catch { loading = false; }
+  if (loading) { try { view.webContents.once('did-finish-load', deliver); } catch { deliver(); } }
   else deliver();
   layoutWithBanner();
   return true;
@@ -177,6 +301,17 @@ function flushPendingBanner() {
 }
 
 function reportFatal(detail) {
+  // reportFatal 本身跑在 process.on('uncaughtException') 里 —— 它是兜底处理器，
+  // 自己**绝不能**再抛异常（否则就是"处理器内部二次崩溃 → 进程半死"，2026-10-30
+  // 白屏事故里端口还 listen 但 WS 握不上手，正是这么来的）。整段包死。
+  try {
+    reportFatalInner(detail);
+  } catch (e) {
+    try { console.error('[reportFatal] self-guarded:', e && e.message); } catch {}
+  }
+}
+
+function reportFatalInner(detail) {
   const text = String(detail === undefined || detail === null ? '' : detail);
   if (nativeDialogForced()) { showNativeFatalDialog(text); return; }
   if (!bannerEnabled()) return;
@@ -190,6 +325,7 @@ function reportFatal(detail) {
     log_path: logPath,
     note: 'shown in-window (non-blocking); no modal dialog opened',
   });
+  scheduleBannerAutoHide();
   if (app.isReady() && mainWindow && !mainWindow.isDestroyed()) {
     showErrorBanner(payload);
     return;
@@ -219,13 +355,26 @@ function reportFatal(detail) {
 
 process.on('uncaughtException', (err, origin) => {
   const e = err instanceof Error ? err : new Error(String(err));
-  recordError('uncaught_exception', {
-    origin: origin || null,
-    message: e.message,
-    stack: String(e.stack || '').slice(0, 8000),
-  });
-  console.error('[fatal] uncaughtException:', (e && e.stack) || e);
-  reportFatal((e && e.message) || String(e));
+  try {
+    recordError('uncaught_exception', {
+      origin: origin || null,
+      message: e.message,
+      stack: String(e.stack || '').slice(0, 8000),
+    });
+  } catch (_) {}
+  try { console.error('[fatal] uncaughtException:', (e && e.stack) || e); } catch (_) {}
+
+  // 纵深自愈：如果这次异常本身就是"某个视图失效"引起的（例如别的路径仍存在的
+  // 裸访问，或第三方代码碰了我们的 view），立刻体检并重建标签栏，别把白屏留给
+  // 用户。识别信号用错误文本 —— 这类崩溃的典型文案就是 reading 'isDestroyed'。
+  // 这一步只重建 chrome 视图，不 reload 用户页面，代价可控。
+  try {
+    if (/isDestroyed|webContents|Object has been destroyed/i.test(String(e.message || ''))) {
+      ensureTabBarAlive(true);
+    }
+  } catch (_) {}
+
+  try { reportFatal((e && e.message) || String(e)); } catch (_) {}
 });
 
 process.on('unhandledRejection', (reason) => {
@@ -508,15 +657,7 @@ function createWindow() {
   mainWindow.webContents.on('page-title-updated', (e) => { e.preventDefault(); });
 
   // Tab bar — needs nodeIntegration for ipcRenderer
-  tabBarView = new BrowserView({
-    webPreferences: {
-      contextIsolation: false,
-      nodeIntegration: true,
-    },
-  });
-  mainWindow.addBrowserView(tabBarView);
-  tabBarView.setBounds({ x: 0, y: 0, width: 1280, height: TAB_BAR_HEIGHT });
-  tabBarView.webContents.loadFile(path.join(__dirname, '../renderer/tab_bar.html'));
+  tabBarView = createTabBarView();
 
   // Init PageManager
   pageManager = PageManager.getInstance(mainWindow);
@@ -992,7 +1133,7 @@ function StartNetworkWatchdog() {
 }
 
 function refreshTabBar() {
-  if (tabBarView && !tabBarView.webContents.isDestroyed()) {
+  if (isAlive(tabBarView)) {
     tabBarView.webContents.executeJavaScript('renderTabs && renderTabs()').catch(() => {});
   }
 }
@@ -1012,7 +1153,7 @@ function refreshTabBar() {
 function activeWebContents() {
   if (!pageManager) return null;
   const view = pageManager.tabs.get(pageManager.activeTab);
-  if (!view || view.webContents.isDestroyed()) return null;
+  if (!isAlive(view)) return null;
   return view.webContents;
 }
 
@@ -1117,11 +1258,24 @@ function pushNavState() {
   // 标题先更新：它不依赖 tabBarView 是否存活（横幅/崩溃场景下 tabBarView
   // 可能已被销毁，但窗口标题仍应反映真实页面）。
   updateWindowTitle();
-  if (!tabBarView || tabBarView.webContents.isDestroyed()) return;
+  // ⚠️ 这里曾经裸写 `tabBarView.webContents.isDestroyed()`：tabBarView 悬空时
+  // （webContents 变 undefined）就抛异常，而本函数被 setInterval 每 1.5s 无条件
+  // 调用 —— 于是每 1.5s 崩一次，累计 22 次 uncaught_exception（2026-10-30 白屏事故）。
+  // 现在改为：先体检，死了就自愈重建，绝不裸访问。这次推送可以跳过（1.5s 后再来），
+  // 重建完成后下一次自然会推到新视图上。
+  const view = ensureTabBarAlive(false);
+  if (!view) return;
+  // 刚重建的视图 renderer 还在加载 tab_bar.html，此刻 executeJavaScript 会失败
+  // （"Object has been destroyed" 或空上下文）—— 会被 .catch 接住不致命，但会往
+  // stderr 刷一条没意义的错误。它加载完成后会自己 invoke('nav:state') 拉一次，
+  // 所以加载中直接跳过本次推送即可，1.5s 后下一轮再推。
+  try { if (view.webContents.isLoading()) return; } catch (_) { return; }
   const state = buildNavState();
-  tabBarView.webContents.executeJavaScript(
-    'window.__onNavState && window.__onNavState(' + JSON.stringify(state) + ')'
-  ).catch(() => {});
+  try {
+    view.webContents.executeJavaScript(
+      'window.__onNavState && window.__onNavState(' + JSON.stringify(state) + ')'
+    ).catch(() => {});
+  } catch (_) { /* 视图在这几毫秒内又失效：交给下一轮自愈 */ }
 }
 
 /**
@@ -1168,6 +1322,27 @@ app.whenReady().then(() => {
         console.log('[selftest] error banner hidden — bottom inset restored');
       }, 5000);
     }
+  }
+  // 诊断开关（默认关闭）：主动把 tabBarView 的 webContents 置为悬空，用来复现
+  // "标签栏渲染进程丢失后，pushNavState 每 1.5s 抛 Cannot read ... isDestroyed" 这一类崩溃。
+  // 修复后这个开关必须能证明：不再抛异常、标签栏自动重建、横幅不会挂死。
+  if (_selftest === 'chrome-gone') {
+    setTimeout(() => {
+      try {
+        if (tabBarView && tabBarView.webContents) {
+          tabBarView.webContents.close();
+          console.log('[selftest:chrome-gone] tabBarView.webContents closed (simulated renderer loss)');
+        }
+      } catch (e) { console.log('[selftest:chrome-gone] close threw:', e.message); }
+    }, 2000);
+    // 5.5s 后自报体检结果：修复后应当是 ok（已被 ensureTabBarAlive 重建），
+    // 而不是崩溃/悬空。这条输出是 e2e/lifecycle_ws.cjs 的判据之一。
+    setTimeout(() => {
+      try {
+        console.log('[selftest:chrome-gone] tabBar liveness after heal = ' + liveness(tabBarView)
+          + ' | rebuildCount=' + tabBarRebuildCount);
+      } catch (e) { console.log('[selftest:chrome-gone] verify threw:', e.message); }
+    }, 5500);
   }
   // 下载与权限的 session 级钩子。必须装在 will-download 上，否则 Electron 默认
   // **取消**下载：agent 点"导出"只看到 success，然后什么都没有，连错误都没有

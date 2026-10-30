@@ -2,12 +2,16 @@
 
 ## canvas（纯绘制，没有 DOM 节点）
 
-读内容**不要 OCR**。canvas 里的文本来自 `fillText` 调用，能被直接截获。
+**先找应用模型，再退到绘制层。**「图是 canvas」不等于「没有结构」：
 
-- 前提：浏览器启动时带 `AI_BROWSER_CANVAS_HOOK=1`（默认关，因为要挂 CDP 绘制层）。
-- `browse_canvas {operation:"list"}` → 拿到 canvas 与 `canvas_id`
-- `browse_canvas {operation:"read", canvas_id}` → 文本 + 坐标 + 字体
-- **WebGL 是黑盒**：捕获不到文本，只能 `browse_canvas {operation:"capture"}` 拿 PNG，自己承担视觉成本。
+1. **`browse_capabilities {deep:true}`** —— 扫库指纹（fabric / Konva / paper / Excalidraw /
+   CodeMirror / Monaco）。实例即使**关在闭包里**也能抓出来（hook 原型方法 + 一条合成事件）。
+   命中就给 `read_expr`（**顶层可求值的完整表达式**，直接喂 `browse_evaluate`）。
+   有模型 → 读整张图的结构（图形类型/坐标/尺寸/文本），写完能**回读校验**。**这是首选。**
+2. 没有已知库 → `browse_canvas {operation:"list"}` + `read` 截获 `fillText` 文本
+   （需 `AI_BROWSER_CANVAS_HOOK=1`；**WebGL 是黑盒**，捕获不到文本，只能 `capture` 拿 PNG，
+   自己承担视觉成本）。纯 canvas 应用**不要 OCR**。
+3. 都没有 → 只能靠坐标动作 + 帧指纹确认"画面变了"，但**读不出"画的是什么"**（如实告知，别假装）。
 
 在 canvas 上落点用坐标动作，不要找元素：
 

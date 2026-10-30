@@ -114,7 +114,22 @@ describe('classifyPaint — 拿不到画面时不许瞎猜', () => {
     expect(r.reason).toContain('0');
   });
 
-  it('没有位图 → no-frame，且 blank=false（不许把诊断失败说成白屏）', () => {
+  it('没有位图 + 视图还活着（被遮挡/隐藏）→ no-frame，blank=false（不许把诊断失败说成白屏）', () => {
+    const r = classifyPaint({ stats: null, view_alive: true, dom: { text_len: 100, nodes: 50, ready_state: 'complete' } });
+    expect(r.verdict).toBe('no-frame');
+    expect(r.blank).toBe(false);
+  });
+
+  // 2026-10-30 白屏事故的盲区：渲染进程死了，capturePage 返回空，以前一律判
+  // no-frame 静默放过 —— 用户看到永久白屏，日志里却什么都没有。
+  it('没有位图 + 视图已死 → view-dead，blank=true（阳性对照：必须能报出来）', () => {
+    const r = classifyPaint({ stats: null, view_alive: false, dom: { text_len: 100, nodes: 50, ready_state: 'complete' } });
+    expect(r.verdict).toBe('view-dead');
+    expect(r.blank).toBe(true);
+    expect(r.reason).toMatch(/renderer is gone/i);
+  });
+
+  it('没有位图但没传 view_alive → 保持旧的 no-frame（向后兼容，不误报）', () => {
     const r = classifyPaint({ stats: null, dom: { text_len: 100, nodes: 50, ready_state: 'complete' } });
     expect(r.verdict).toBe('no-frame');
     expect(r.blank).toBe(false);
@@ -145,5 +160,11 @@ describe('decidePaintAction', () => {
       expect(decidePaintAction({ verdict: v, steps: 0 })).toBe('none');
       expect(decidePaintAction({ verdict: v, steps: 1 })).toBe('none');
     }
+  });
+
+  it('view-dead：跳过 repaint（对死视图无意义），reload → give-up，有上限不循环', () => {
+    expect(decidePaintAction({ verdict: 'view-dead', steps: 0 })).toBe('reload');
+    expect(decidePaintAction({ verdict: 'view-dead', steps: 1 })).toBe('give-up');
+    expect(decidePaintAction({ verdict: 'view-dead', steps: 99 })).toBe('give-up');
   });
 });

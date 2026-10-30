@@ -65,6 +65,7 @@
     "value": "node e2e/value_ws.cjs",
     "canvas": "node e2e/canvas_ws.cjs",
     "appmodel": "node e2e/app_model_ws.cjs",
+    "lifecycle": "node e2e/lifecycle_ws.cjs",
     "focus": "node e2e/focus_ws.cjs",
     "interact": "node e2e/interact_ws.cjs",
     "upload": "node e2e/upload_ws.cjs",

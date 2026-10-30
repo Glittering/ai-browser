@@ -254,9 +254,11 @@ input"这类位置猜测** —— 猜出来的对应关系比没有更糟。
 | DOM 事实 | 白得对不对 | 空文档白是正确结果；有 397 字还白才是缺陷 |
 
 阈值：`white ≥ 99% 且 unique ≤ 32` 才算"像素纯白"，再看 DOM 决定是不是故障。
-判据是 `verdict` 七态：`ok / empty-legit / not-ready / collapsed / blank-with-text /
-blank-with-dom / no-frame`；只有两个 `blank-*` 算缺陷，`no-frame`（我们没看到画面）
-明确**不**算 —— 把诊断失败说成页面故障是最坏的一种谎。
+判据是 `verdict` 八态：`ok / empty-legit / not-ready / collapsed / blank-with-text /
+blank-with-dom / view-dead / no-frame`；`blank-*` 与 `view-dead` 算缺陷（要救），
+`no-frame`（拿不到位图、但视图**还活着**，只是被遮挡/隐藏）明确**不**算 —— 把诊断失败
+说成页面故障是最坏的一种谎。`view-dead` 与 `no-frame` 的分界就是"视图还在不在"，
+见下面的「视图生命周期」。
 
 **取帧两条铁律**（2026-10-25 用肉眼可见的闪烁换来的）：
 
@@ -298,6 +300,40 @@ Promise（不返回 null）。`ui.paint_check {tab, heal?}` 供调用方按需�
 永久白屏，而日志里只有一行。
 
 `AI_BROWSER_PAINT_AUDIT=0` 可关闭自检（唯一用途：精确测量导航时延）。
+
+### 视图生命周期（2026-10-30 白屏事故：22 次崩溃 + 标签栏消失 + 横幅挂死）
+
+「视图对象还在」≠「它还能碰」。真 Electron 探针实测三事实：
+
+1. **`webContents.close()` / `destroy()` 之后，BrowserView 对象还在，但 `view.webContents`
+   变成 `undefined`** —— 裸写 `view.webContents.isDestroyed()` 当场抛
+   `Cannot read properties of undefined (reading 'isDestroyed')`。
+2. **渲染进程崩溃（`forcefullyCrashRenderer` / `render-process-gone`）后 webContents 还在、
+   `isDestroyed()` 为 false，但内容不再渲染**、视图区域空白，`reload()` 能救。
+3. **`BrowserWindow.capturePage()` 对含 BrowserView 的窗口返回 `empty`** —— 抓不到 view 的
+   合成结果，所以"窗口层像素自检"在 Electron 内置 API 上走不通（Quartz 需录屏权限）。
+
+这次事故的链条：某个视图 webContents 悬空 → `setInterval(pushNavState, 1500)` 每 1.5s 崩一次
+→ `uncaughtException → reportFatal → showErrorBanner → layoutWithBanner` 又碰悬空视图二次崩溃
+→ 进程半死（端口 listen 但 WS 握不上手）；`tabBarView` 无 `render-process-gone` 监听、无重建
+→ 标签栏永久空白；横幅挂上只能人点 × 收起，底部深红条占掉 34px。约定：
+
+- `src/shared/view_liveness.cjs` 的 `isAlive(view)` / `liveness(view)` 是**唯一判定口径**，
+  覆盖四种失效形态（`null` / `.webContents` 悬空 / `isDestroyed` / getter 抛异常），**任何情况
+  都不抛**。所有判定型裸访问收敛到它。⚠️ `.cjs` 共享模块一律**默认导入**：`tests/test_imports.js`
+  只识别 ESM `export`，对 `module.exports` 做具名导入会被静态检查判红（运行时虽可用）。
+- chrome 视图（标签栏、横幅）是**我们自己的**、可安全重建：`pushNavState` 推送前先
+  `ensureTabBarAlive` 体检（死了就重建，节流 ≥1.5s、上限 8 次防 GPU 连崩死循环）；另挂
+  `render-process-gone` 主动触发，不必等 1.5s 轮询。
+- **页面 tab 的 webContents 悬空不盲目重建**（会丢导航历史/分组/登录态），只 `reload` 一次或
+  如实上报 `paint_blank` —— 用户的页面不是重建试验场。阶梯仅 `reload → give-up`，有上限不循环。
+- 主进程兜底 `reportFatal` 跑在 `uncaughtException` 里，**自己绝不能抛**（整段 try/catch）；
+  横幅挂上后 `BANNER_AUTO_HIDE_MS`（默认 15s，可用 `AI_BROWSER_BANNER_AUTOHIDE_MS` 调）自动收敛，
+  stack 永久保留在 `ui.errors`。
+
+回归：`e2e/lifecycle_ws.cjs`（`AI_BROWSER_SELFTEST=chrome-gone` 主动置悬空）——断言无
+`uncaught_exception`、有 `tabbar_rebuilt`（真重建，不是"恰好没崩"）、WS 仍可握、横幅自动收敛
+（`error_banner_autohide`）。这些在 jsdom 里写不出来，只有真 Electron 能证伪"视图失效后主进程还活不活"。
 
 ## 几何脱节（内容缩成左上角一小块）
 
@@ -729,13 +765,13 @@ sheet**，因此它既不在语义树里，也不受页面点击控制；**而�
 
 ## 测试基线
 
-- 单元：`npm test` —— Vitest，82 文件 / 1152 条，0 skip。
+- 单元：`npm test` —— Vitest，83 文件 / 1166 条，0 skip。
 - 端到端：各 `npm run <suite>` 自起 Electron（隔离 profile）：
   `smoke` / `capabilities` / `richtext` / `network` / `value` / `canvas` / `modeldiff` /
-  `audit` / `focus` / `interact` / `view` / `readcov` / `window_open` /
+  `audit` / `focus` / `interact` / `upload` / `view` / `readcov` / `window_open` /
   `dialog` / `wrapper` / `paint` / `layout` / `download` / `multiagent` / `background` /
-  `app_model`。
-  **改动不得破坏任何一项。** 一次跑全部：`npm run e2e:all`（24 套件 / 805 断言）。
+  `app_model` / `lifecycle`。
+  **改动不得破坏任何一项。** 一次跑全部：`npm run e2e:all`（25 套件 / 814 断言）。
   另外两个**不进全量**：`npm run flicker`（要屏幕录制权限 + 窗口真的在屏幕上）、
   `npm run realsites`（依赖外网）。
   测试客户端（`tools/browser.cjs`）**不许永久等**：连接断开/回包超时都要把挂起的

@@ -79,6 +79,9 @@ function statsFromBitmap(bitmap) {
  * @param {{total:number,white:number,white_ratio:number,unique:number}} p.stats
  * @param {{text_len:number, nodes:number, ready_state:string}} p.dom 页面自述的事实
  * @param {{width:number,height:number}} [p.bounds] 视图当前尺寸
+ * @param {boolean} [p.view_alive] 视图现在还有没有可用的 webContents（isAlive）。
+ *        拿不到位图时用它区分"被遮挡"（不动）和"视图真死了"（要救）——
+ *        否则渲染进程崩溃后截图为空会被判成 no-frame 静默放过（2026-10-30 白屏盲区）。
  * @returns {{verdict:string, blank:boolean, reason:string}}
  *
  * verdict：
@@ -86,13 +89,15 @@ function statsFromBitmap(bitmap) {
  *   empty-legit      这页本来就是空的（about:blank / 空文档），白是正确结果
  *   not-ready        页面还没到 interactive/complete，白是暂时的，等它
  *   collapsed        视图本身被压成 0 高/0 宽 —— 不是没画，是没地方画
+ *   view-dead        拿不到位图**且**视图已失效（webContents 悬空/destroyed）——
+ *                    渲染进程死了，必须重建/重载，不能静默放过
  *   blank-with-text  DOM 里有文字，但屏幕上纯白 —— **真白屏**
  *   blank-with-dom   DOM 有几十个节点却纯白 —— **真白屏**（内容层失败）
  *   scale-mismatch   页面按 A 宽排版、视图只有 B 宽（合成器画了一张陈旧尺寸的
  *                    surface）—— 表现为"内容缩在左上角，其余全白"
- *   no-frame         拿不到位图（视图不可见/被销毁），无法判定
+ *   no-frame         拿不到位图，但视图还活着（被遮挡/隐藏）—— 无法判定，不动
  */
-function classifyPaint({ stats, dom, bounds } = {}) {
+function classifyPaint({ stats, dom, bounds, view_alive } = {}) {
   const d = dom || {};
   const textLen = Number(d.text_len) || 0;
   const nodes = Number(d.nodes) || 0;
@@ -102,7 +107,13 @@ function classifyPaint({ stats, dom, bounds } = {}) {
     return { verdict: 'collapsed', blank: true, reason: `view is ${bounds.width}x${bounds.height} — nothing to paint into` };
   }
   if (!stats || !stats.total) {
-    return { verdict: 'no-frame', blank: false, reason: 'no bitmap (view not visible or destroyed)' };
+    // 视图自己已经没救了（webContents 悬空/destroyed）——这是渲染进程死亡后的
+    // 典型形态：截图返回空，而 paintCheck 以前一律判 no-frame 放过，用户看到的是
+    // 永久白屏。用 view_alive 把"真死"和"只是被遮挡"分开。
+    if (view_alive === false) {
+      return { verdict: 'view-dead', blank: true, reason: 'no bitmap AND the view has no usable webContents — renderer is gone' };
+    }
+    return { verdict: 'no-frame', blank: false, reason: 'no bitmap (view not visible or occluded)' };
   }
   const isWhite = stats.white_ratio >= WHITE_MIN_RATIO && stats.unique <= UNIQUE_MAX;
   const colourDesc = `${stats.unique}${stats.unique_pinned ? '+' : ''} colours`;
@@ -134,6 +145,12 @@ function classifyPaint({ stats, dom, bounds } = {}) {
  * @returns {'none'|'repaint'|'reload'|'give-up'}
  */
 function decidePaintAction({ verdict, steps = 0 } = {}) {
+  // view-dead：视图的 webContents 已经没了，重画（invalidate）毫无意义 —— 直接
+  // 从"重建/重载"开始。有上限：重建失败就不无限循环（见调用方 _auditPaintNow）。
+  if (verdict === 'view-dead') {
+    if (steps <= 0) return 'reload';   // reload 对仍可 reload 的崩溃进程有效；悬空的由调用方重建
+    return 'give-up';
+  }
   // ok / empty-legit / not-ready / no-frame 都不该动。not-ready 尤其重要：
   // 首屏那一刻本来就可能是白的，这时候 reload 等于把正在下载的页面打断。
   if (verdict === 'ok' || verdict === 'empty-legit' || verdict === 'not-ready' || verdict === 'no-frame') {

@@ -32,6 +32,12 @@ import { newTracker, noteTree, diagnoseMissingRef } from '../shared/ref_epoch.js
 // "这一页到底画出来没有"的判定口径（纯函数）。此前没有任何检测覆盖"加载成功但
 // 屏幕纯白"这一类 —— 见 shared/blank_page.cjs 顶部（2026-10-25 用户报百度白屏）。
 import blankPage from '../shared/blank_page.cjs';
+// "这个 BrowserView 还能不能碰"的唯一判定口径（纯函数）。webContents 在
+// close/destroy 后会变 undefined，裸写 .isDestroyed() 会击穿主进程 ——
+// 见 shared/view_liveness.cjs 顶部（2026-10-30 白屏事故的 22 次崩溃）。
+// .cjs 用默认导入（全项目约定，且 tests/test_imports.js 的静态分析只认 ESM export）。
+import viewLiveness from '../shared/view_liveness.cjs';
+const { isAlive, liveness } = viewLiveness;
 import { diffValues, previewOf, safeByteLength, DEFAULT_SNAPSHOT_JS, DIFF_MAX_ENTRIES, evictOldest } from './snapshot_diff.js';
 import { withDeadline, actionDeadlineMs } from '../shared/deadline.js';
 import { DownloadMonitor } from './download_monitor.js';
@@ -914,13 +920,13 @@ class PageManager {
     try {
       if (tabId === undefined || tabId === null || !rec) return;
       const view = this.tabs.get(tabId);
-      if (!view || view.webContents.isDestroyed()) return;
+      if (!isAlive(view)) return;
       const cur = view.webContents.getURL() || '';
       if (!mediaDoc.isPlaceholderUrl(cur)) return;
       // 让这条 will-download 先走完，再切页面：避免和刚刚被取消的导航抢加载。
       setImmediate(() => {
         try {
-          if (view.webContents.isDestroyed()) return;
+          if (!isAlive(view)) return;
           if (!mediaDoc.isPlaceholderUrl(view.webContents.getURL() || '')) return;
           this.showDownloadResult(tabId, rec);
         } catch (_) { /* 结果页只是"有回执"，失败不该影响下载本身 */ }
@@ -931,7 +937,7 @@ class PageManager {
   /** 把一个 tab 换成"下载结果"页（文件名/大小/缩略图/打开/在 Finder 中显示）。 */
   showDownloadResult(tabId, rec) {
     const view = this.tabs.get(tabId);
-    if (!view || view.webContents.isDestroyed()) return false;
+    if (!isAlive(view)) return false;
     const pagePath = path.join(__dirname, '../renderer/download.html');
     // 一律走 shared/placeholder.cjs 的构造器：手拼 'file://' + path 在打包后
     // （/Applications/AI Browser.app 含空格）加载不出来。
@@ -957,7 +963,7 @@ class PageManager {
   downloadCurrent(tabId) {
     const id = tabId === undefined || tabId === null ? this.activeTab : tabId;
     const view = this.tabs.get(id);
-    if (!view || view.webContents.isDestroyed()) return { ok: false, error: 'no such tab' };
+    if (!isAlive(view)) return { ok: false, error: 'no such tab' };
     const cur = view.webContents.getURL() || '';
     const rec = this.mediaInline.recordOf(id, cur);
     const url = rec ? rec.url : cur;
@@ -974,7 +980,7 @@ class PageManager {
   mediaDocOf(tabId) {
     const id = tabId === undefined || tabId === null ? this.activeTab : tabId;
     const view = this.tabs.get(id);
-    if (!view || view.webContents.isDestroyed()) return null;
+    if (!isAlive(view)) return null;
     try {
       return this.mediaInline.recordOf(id, view.webContents.getURL() || '');
     } catch (_) {
@@ -2284,7 +2290,7 @@ class PageManager {
     let pending = false;
     try {
       const view = this._getView(mine.id);
-      const live = view && view.webContents.getURL();
+      const live = isAlive(view) ? view.webContents.getURL() : null;
       if (live && live !== 'about:blank') url = live;
       // 仍然没有真实地址（占位页还没被导航）→ 明说 pending，而不是回一个
       // 看起来像"空白页"的 about:blank。
@@ -2314,7 +2320,7 @@ class PageManager {
     const view = this._getView(tid);
     // 快路径 2：本 tab 已经开始原地导航 —— 站内跳转不会同时开新标签，别等。
     // 这一类（点链接跳走）是最高频的点击，跳过它等于让绝大多数点击零额外成本。
-    if (view && view.webContents.isLoading()) {
+    if (isAlive(view) && view.webContents.isLoading()) {
       return this._consumeOpenedTab(tid, keep, startedAt);
     }
     // 快路径 3：目标不是链接 → 不等。
@@ -4230,8 +4236,20 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     const tid = tabId !== undefined ? tabId : this.activeTab;
     const view = this._getView(tid);
     if (!view) return { ok: false, error: 'no-such-tab', tab: tid };
+    // ⚠️ 视图失效（webContents 悬空/destroyed）以前直接 `return {ok:false, error:'tab-destroyed'}`
+    // —— 而 _auditPaintNow 对 !ok 直接返回，等于**放弃自救**：渲染进程死后用户看到
+    // 永久白屏，日志里却什么都没有（2026-10-30 白屏盲区）。现在把它作为可判定的
+    // view-dead 结论返回，交给 _auditPaintNow 的重建分支处理。
+    if (!isAlive(view)) {
+      const rec = {
+        ok: true, tab: tid, blank: true, verdict: 'view-dead',
+        reason: 'view has no usable webContents (' + liveness(view) + ') — renderer is gone',
+        view_liveness: liveness(view),
+      };
+      this._paintState.set(tid, { ...rec, at: Date.now(), action: 'none' });
+      return rec;
+    }
     const wc = view.webContents;
-    if (!wc || wc.isDestroyed()) return { ok: false, error: 'tab-destroyed', tab: tid };
     const startedAt = Date.now();
 
     let bounds = null;
@@ -4312,7 +4330,10 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
       frameError = e && e.message ? e.message : String(e);
     }
 
-    let cls = blankPage.classifyPaint({ stats, dom, bounds });
+    // view_alive 让 classifyPaint 能把"截图为空"分成两种：视图真死（view-dead，要救）
+    // 和只是被遮挡/隐藏（no-frame，不动）。这里 isAlive 一定为 true（开头已挡掉死视图），
+    // 传它是为了口径统一 + 未来若读取路径变化时仍正确。
+    let cls = blankPage.classifyPaint({ stats, dom, bounds, view_alive: isAlive(view) });
     // 渲染口径与视图几何必须相等。不等只有两种原因：用户主动缩放（合法）或
     // **合成器把旧尺寸的 surface 缩进了新 bounds**（就是"内容缩成左上角一小块"）。
     // 用 zoomFactor 把两者分开：页面缩放有明确的 zoom 值，surface 脱节时 zoom 仍是 1。
@@ -4425,7 +4446,7 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     const t = setTimeout(() => {
       try {
         const v = this._getView(tabId);
-        if (!v || !v.webContents || v.webContents.isDestroyed()) return;
+        if (!isAlive(v)) return;
         let cb;
         try { cb = this.window.getContentBounds(); } catch (_) { return; }
         const exp = {
@@ -4449,15 +4470,10 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
       } catch (_) { /* 忽略 */ }
     }, 120);
     if (t.unref) t.unref();
+    // 只返回 deferred：真正的修正在上面的 setTimeout 里做（延迟确认，避免在窗口
+    // 刚变化的中间态把视图改成错尺寸）。曾经这里 return 之后还留着一段"立即修正"
+    // 的旧代码 —— 永远不可达的死代码，2026-10-30 清理。
     return { ok: false, expected, actual, fixed: 'deferred' };
-    try {
-      this._layoutView(view);
-      view.webContents.invalidate();
-    } catch (_) { /* 视图正在销毁 */ }
-    const info = { tab: tabId, expected, actual };
-    recordError('layout_mismatch', info);
-    this._broadcast('layout_mismatch', info);
-    return { ok: false, expected, actual, fixed: true };
   }
 
   /**
@@ -4524,7 +4540,38 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
       if (action === 'none') return rec;
 
       const view = this._getView(tabId);
-      if (!view || !view.webContents || view.webContents.isDestroyed()) return rec;
+
+      // view-dead：视图的 webContents 已悬空/销毁。reload() 对它还活着（进程崩溃但
+      // wc 对象还在）的情形有效；对真正悬空（wc === undefined）的情形无效 —— 那种
+      // 情况下**不盲目重建整个 tab**（会丢导航历史/分组/登录态，代价远大于收益，
+      // 用户的页面不是我们的重建试验场），而是如实上报 paint_blank 让人可见。
+      // 无论哪种，都只走一次，绝不成死循环（decidePaintAction 对 view-dead 只有
+      // reload → give-up 两级）。
+      if (res.verdict === 'view-dead') {
+        const why = liveness(view);
+        recordError('paint_view_dead', { tab: tabId, liveness: why, steps });
+        if (action === 'reload' && isAlive(view)) {
+          this._paintSteps.set(tabId, steps + 1);
+          this._paintSelfReload.add(tabId);
+          try {
+            view.webContents.reload();
+            await this._waitFinishLoad(tabId, 10000);
+            await new Promise((r) => { const t = setTimeout(r, 450); if (t.unref) t.unref(); });
+            return this._auditPaintNow(tabId);
+          } catch (_) {
+            this._paintSelfReload.delete(tabId);
+          }
+        }
+        // 悬空或 reload 无效 → give-up，广播出去让人知道（不再静默放过白屏）。
+        const info = { tab: tabId, verdict: 'view-dead', liveness: why, attempts: steps,
+          reason: res.reason, note: 'view cannot be repainted; renderer may need the tab reopened' };
+        this._paintState.set(tabId, { ...res, action: 'give-up', at: Date.now() });
+        recordError('paint_blank', info);
+        this._broadcast('paint_blank', info);
+        return { ...rec, action: 'give-up' };
+      }
+
+      if (!view || !isAlive(view)) return rec;
       if (action === 'repaint') {
         this._paintSteps.set(tabId, steps + 1);
         // 这里必须 hard：被判成白屏/scale-mismatch 时，surface 很可能就是旧尺寸，
