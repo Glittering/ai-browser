@@ -18,6 +18,10 @@ import errorBanner from '../shared/error_banner.cjs';
 import viewLiveness from '../shared/view_liveness.cjs';
 const { isAlive, liveness } = viewLiveness;
 import { classifyShowReason, describeShowUrl } from '../shared/window_show.js';
+// 地址栏跟随的挂载状态机（幂等 wire）。抽成模块是因为它原来写在闭包里，
+// 判据只能 grep 源码 —— 实测监听累到 3 个时测试照样全绿。
+import navFollow from '../shared/nav_follow.cjs';
+const { createNavFollower } = navFollow;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -486,7 +490,6 @@ let tabBarView = null;
 let pageManager = null;
 let tabRefreshInterval = null;
 let navStateInterval = null;
-let navStateWc = null;
 let networkWatchdog = null;
 let isQuitting = false;
 // 退出时固化会话 cookie 的一次性开关：cleanupAndQuit 分流用（见其注释），
@@ -520,12 +523,21 @@ if (gotLock) {
       }
     } catch (_) { /* 窗口正在销毁 */ }
   });
-} else if (!(process.platform === 'darwin' && app.isPackaged)) {
-  // A real second instance would fight the first one over the :9223 WS port.
-  // Still tolerant of weird environments (EPERM on sandboxed setups, and
-  // macOS packaged builds where the lock can report false and quitting would
-  // make the app unlaunchable) — everywhere else, the duplicate exits and
-  // lets the existing window handle the request.
+} else {
+  // A real second instance would fight the first one over the :9223 WS port
+  // and share one Chromium profile / userDataDir with the first — the duplicate
+  // must exit and let the existing window handle the request.
+  // gotLock===false already means "another instance owns the lock", on EVERY
+  // platform (including macOS packaged builds); the previous platform-conditional
+  // exemption silently skipped this quit, which let two ai-browser instances run
+  // side by side — closing one of them then crashed (Bug 6).
+  // 落了盘才有"事后可查"：从 Finder/双击启动时 stderr 是黑洞，只 console.error
+  // 等于什么都没留下（用户只会说"我点了没反应"）。
+  recordError('second_instance_exit', {
+    port: PORT,
+    user_data: config.userDataDir,
+    note: '另一个实例持有单实例锁，本进程退出（避免两个进程共享同一 Chromium profile 并抢同一端口）',
+  });
   console.error('[index] another AI Browser instance is already running — quitting');
   app.quit();
 }
@@ -685,6 +697,18 @@ function createWindow() {
 
   // Start WS server — pass cleanupAndQuit so ui.quit can shut down the app
   wsServer = startWSServer(pageManager, PORT, cleanupAndQuit);
+  // 监听失败必须让人看见。此前 ws_server 把错误 `.catch(() => {})` 吞了，
+  // 实测端口被占时窗口照常起来、却没有任何 WS，用户与 agent 都不知道为什么。
+  wsServer.ready.catch(() => {
+    const err = wsServer.listenError;
+    const code = (err && err.code) || 'unknown';
+    reportFatal(
+      `WS 端口 ${PORT} 监听失败（${code}）。本实例收不到任何指令 —— `
+      + (code === 'EADDRINUSE'
+        ? '端口已被占用：先关掉另一个 ai-browser 实例，或用 AI_BROWSER_PORT 换一个端口。'
+        : '详见 error.jsonl 的 ws_listen_error 条目。')
+    );
+  });
 
   // === Tab bar IPC ===
   ipcMain.on('tab:new', () => {
@@ -882,26 +906,20 @@ function createWindow() {
   // 导航可能来自三方：人在地址栏输入、agent 调 ui.navigate、页面自己跳转。
   // 地址栏必须反映**真实**状态，所以这里订阅激活 tab 的 webContents 事件主动推，
   // 而不是靠定时轮询（轮询有最多 2s 的滞后，人会以为按钮坏了）。
-  const wireNavState = (tabId) => {
-    const wc = activeWebContents();
-    if (!wc) return;
-    if (navStateWc === wc) return;         // 同一个 tab 重复 setActive，不重复挂
-    navStateWc = wc;
-    const push = () => pushNavState();
-    wc.on('did-start-loading', push);
-    wc.on('did-stop-loading', push);
-    wc.on('did-navigate', push);
-    wc.on('did-navigate-in-page', push);
-    wc.on('page-title-updated', push);
-  };
+  // 挂载规则收敛到 shared/nav_follow.cjs：同一个 webContents **幂等**
+  // （WeakSet 记账），修掉"切回旧 tab 又挂一遍"的累加；webContents 被销毁时
+  // 顺手清掉我们持有的引用。这段原来写在闭包里，判据只能 grep 源码 ——
+  // 实测 A→B→A×5 后监听数是 3，而回归全绿（见 tests/test_nav_follow.js）。
+  const navFollower = createNavFollower({ push: pushNavState });
+  const wireNavState = () => navFollower.wire(activeWebContents());
   // 包一层只为了挂「地址栏跟随」这块副作用，返回值必须原样透传 ——
   // ws_server 的 ui.set_active_tab 靠它回 { ok }（2026-10-19 测到过包装吞掉
   // 返回值导致 agent 收到空回执的事故，见 shared/tab_hooks.js 注释）。
-  wrapSetActive(pageManager, (tabId) => {
-    wireNavState(tabId);
+  wrapSetActive(pageManager, () => {
+    wireNavState();
     pushNavState();
   });
-  wireNavState(pageManager.activeTab);
+  wireNavState();
   // 兜底轮询：只覆盖上面事件没抓到的情况（低频，成本可忽略）
   navStateInterval = setInterval(pushNavState, 1500);
 

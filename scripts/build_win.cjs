@@ -25,8 +25,14 @@ const OUT_DIR = path.join(root, 'dist');
 
 // 与 build_dmg.cjs 完全一致的黑名单：测试/文档/构建产物/Electron 发行版/图标母版
 // 都不进安装包（src 里 from 'electron' 由 Electron 内置模块解析，不经 node_modules）。
+// ⚠️ 顶层名单必须 `^` 锚死：`dist` 若按任意层级匹配，会把**依赖自己的 dist/**
+// 一起删掉（实测 @modelcontextprotocol/sdk 缺 674/677、ajv 缺 337、hono 缺 559），
+// 包内依赖树不自洽而构建照样"成功"。与 build_dmg.cjs 保持完全一致。
 const IGNORE = new RegExp(
-  '(^|\\/)(\\.git|outputs|docs|e2e|tests|dist|build|node_modules\\/\\.cache|node_modules\\/\\.bin|node_modules\\/electron|tools\\/_oneoff)(\\/|$)'
+  // 前导 `\\/?` 不能省：packager 传进来的路径带前导分隔符（'/outputs/x.png'），
+  // 只写 `^` 会让整条规则静默失效（实测体积 12.5MB → 89MB）。
+  '^\\/?(?:\\.git|outputs|docs|e2e|tests|dist|build|tools|\\.github|\\.trae|\\.trae-html-share-packages|\\.exec-trail|\\.workbuddy)(\\/|$)'
+  + '|(^|\\/)node_modules\\/(electron|\\.cache|\\.bin|@vitest|@esbuild|@types|@electron|jsdom|vitest)(\\/|$)'
 );
 
 // 复用本地已下载好的 electron-v<version>-win32-x64.zip，避免每次联网从 GitHub 拉
@@ -91,6 +97,9 @@ function build(packager) {
     console.log(`[build:win] 产物目录：${out}`);
     console.log(`[build:win] 可执行文件：${ok ? exe : '(未找到 ' + exe + ')'}`);
     if (!ok) process.exit(1);
+    // 与 build_dmg 同一条闸门：asar 里每个依赖声明的入口必须真的在包里。
+    // 打包"成功"不等于产物可用 —— 黑名单写宽会把依赖的 dist/ 删掉而构建照绿。
+    require('./verify_asar.cjs').assertAsarDeps(out);
     return paths;
   });
 }

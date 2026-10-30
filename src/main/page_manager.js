@@ -4780,6 +4780,13 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     // tabId 会被复用，媒体文档记录跟着一起清 —— 否则新 tab 一打开就带着
     // 上一个 tab 的「下载」按钮状态（地址对不上时 recordOf 会兜住，但别依赖兜底）。
     if (this.mediaInline) this.mediaInline.forget(tabId);
+    // tabId 会被新 tab 复用 → 旧 tab 的 ref tracker / 增量 diff 快照 / 错误页守卫 /
+    // canvas 抓取状态都要清掉，否则新 tab 会带着上一任的 state 活着（Bug 5：关 tab
+    // 不清这些，长会话下按 tabId 持续累积，属于真正的内存泄漏）。
+    if (this._refTrackers) this._refTrackers.delete(tabId);
+    this._axDiffCache.delete(tabId);
+    if (this._failureGuard) this._failureGuard.delete(tabId);
+    this.canvasMonitor.clear(tabId);
     // 白屏自检 / 崩溃自救的 per-tab 状态。不清的话 tabId 会被新 tab 复用，
     // 新 tab 一开就继承上一任的"已经救过两步"，白屏时直接被判定成 give-up。
     this._paintState.delete(tabId);

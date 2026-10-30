@@ -74,13 +74,39 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
   // Passing a host pushes Node onto the async DNS-lookup listen path, so
   // wss.address() is null until 'listening'. Cache it and let callers await.
   let bound = null;
+  let listenError = null;
   const ready = new Promise((resolve, reject) => {
     wss.once('listening', () => { bound = wss.address(); resolve(bound); });
     wss.once('error', reject);
   });
+  // ⚠️ 这里原来是 `.catch(() => {})` —— 监听失败被彻底吞掉。实测（2026-10-30，
+  // 两个实例不同 userData、同端口）：第二个实例照常起了窗口，但没有 WS、没有
+  // 一行报错、error.jsonl 里只有 boot。用户看到"窗口开着但什么都不响应"，
+  // agent 连不上，两边都查不出原因 —— 静默失败比崩溃更难查。
+  //
+  // 现在：落盘（ws_listen_error）+ 打一行带可执行下一步的日志 + 记录错误对象，
+  // 由 index.js 据此弹横幅。**不主动退出**：端口冲突可能是临时的（另一个实例
+  // 正在关），窗口留着比直接消失更好，但状态必须如实说出来。
   ready.then(() => {
     console.log(`AI Browser WS server listening on ws://${bound.address}:${bound.port}`);
-  }).catch(() => {});
+  }).catch((err) => {
+    const e = err instanceof Error ? err : new Error(String(err));
+    listenError = e;
+    const code = (e && e.code) || 'unknown';
+    recordError('ws_listen_error', {
+      port,
+      bind_host: config.wsBindHost,
+      code,
+      message: String(e.message || e).slice(0, 300),
+      note: 'WS 未能监听：本实例收不到任何指令（窗口可能仍在，但没有入口）',
+    });
+    console.error(
+      `[ws] 监听失败 ${config.wsBindHost}:${port} — ${code}: ${e.message}`
+        + (code === 'EADDRINUSE'
+          ? '（端口已被占用：先关掉另一个 ai-browser，或用 AI_BROWSER_PORT 换一个端口）'
+          : '')
+    );
+  });
 
   wss.on('connection', (ws, _req) => {
     const sessionId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -887,7 +913,10 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
 
   return {
     // Resolves once the socket is actually bound (port 0 → ephemeral port known).
+    // Rejects on listen failure —— 调用方必须处理，别让"起不来"变成静默。
     ready,
+    // 监听失败的具体错误（null 表示正常）。给调用方拼提示用。
+    get listenError() { return listenError; },
     // Actual bound port/address; null until ready.
     get port() { return bound ? bound.port : null; },
     // Security invariant: must be a loopback literal.

@@ -96,8 +96,21 @@ function parseArgs(argv) {
 //                    文件（由下面的 icon 选项显式指定，从源目录读取），
 //                    目录里的 svg/png/iconset 都不该随包分发；src 里也没有
 //                    任何地方引用 build/。
+// ⚠️ 顶层名单必须用 `^` 锚死，不能用 `(^|\/)`。
+// 历史事故（2026-10-30 实测已发布 asar）：`dist` 用任意层级匹配，于是
+// **依赖自己的 dist/ 目录**也被删了 —— @modelcontextprotocol/sdk 677 个文件里
+// 674 个没进包（只剩 package.json/README/LICENSE）、ajv 缺 337/466、hono 缺 559/562。
+// prune 认为它们是生产依赖要留着，黑名单却把内容删了：包内依赖树不自洽，
+// 构建照样"成功"，只有真去 require 的那一刻才炸。目录名（dist/build/docs/…）
+// 在 node_modules 深处同名是**别人的东西**，不该由我们替它删。
 const IGNORE = new RegExp(
-  '(^|\\/)(\\.git|outputs|docs|e2e|tests|dist|build|node_modules\\/\\.cache|node_modules\\/\\.bin|node_modules\\/electron|tools\\/_oneoff)(\\/|$)'
+  // ① 仓库顶层才剔的（这些名字一旦出现在 node_modules 里，是包自己的产物目录）
+  //    前导 `\\/?` 不能省：packager 传给 ignore 的路径是**带前导分隔符**的
+  //    （'/outputs/xxx.png'），只写 `^` 会让整条规则静默失效 —— 实测体积从
+  //    12.5MB 涨到 89MB（outputs/ 的取证截图、tools/_oneoff/ 的 logo 母版全打进去了）。
+  '^\\/?(?:\\.git|outputs|docs|e2e|tests|dist|build|tools|\\.github|\\.trae|\\.trae-html-share-packages|\\.exec-trail|\\.workbuddy)(\\/|$)'
+  // ② node_modules 里只剔明确不该随包分发的：构建工具链、纯类型、测试依赖
+  + '|(^|\\/)node_modules\\/(electron|\\.cache|\\.bin|@vitest|@esbuild|@types|@electron|jsdom|vitest)(\\/|$)'
 );
 
 function run(cmd, args, opts = {}) {
@@ -296,6 +309,11 @@ function build(packager, args) {
       const appPath = path.join(destRoot, bundledApp);
 
       const size = dirSize(appPath);
+      // 打包后自检（2026-10-30 加的硬闸门）：asar 里每个依赖声明的入口必须真的
+      // 在包里。历史上 IGNORE 用 `(^|\/)dist(\/|$)` 把依赖的 dist/ 删了 ——
+      // 包内依赖树不自洽，构建却报成功，只有装到用户机器上 require 时才炸。
+      // 这一条把"打成功了"从主观变成可验证：入口文件不在就直接 fail。
+      require('./verify_asar.cjs').assertAsarDeps(appPath);
       console.log(`[build] app bundle: ${appPath}`);
       console.log(`[build] app size:   ${mb(size)}`);
       installIcon(appPath);

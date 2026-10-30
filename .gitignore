@@ -30,5 +30,7 @@ docs/**/_tmp_*
 docs/**/img_*
 # 本地 AI 工具的工作目录，不属于仓库内容。
 .trae/
+# Trae 的 HTML 分享包产物（本地导出，不属于仓库内容）
+.trae-html-share-packages/
 .workbuddy/
 .exec-trail/
