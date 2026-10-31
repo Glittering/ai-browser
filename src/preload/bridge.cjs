@@ -19,8 +19,12 @@ function sendEvent(event, data) {
 // ============================================================
 
 contextBridge.exposeInMainWorld("__ai_browser__", {
-  sendTree: function(tree) { ipcRenderer.send("ai:tree", tree); },
-  sendDiff: function(changes) { ipcRenderer.send("ai:diff", changes); },
+  // ⚠️ 这里曾经有 `sendTree` / `sendDiff`（直通 `ai:tree` / `ai:diff`）。
+  // 它们把"往主进程灌数据"的出口交给了页面主世界：页面脚本循环 id=1..N 就能
+  // 撞上在途的 getTree，让 agent 读到一棵伪造的树（把"确认支付"换成"取消"这类）。
+  // 生产代码里没有任何调用方 —— 我们自己回树走的是本文件内部的 `ipcRenderer.send`，
+  // 页面不需要这个能力。2026-10-31 删除，并由 tests/test_bridge_surface.js 钉住白名单。
+  //
   // window.open 垫片的桥（主 world 侧脚本见 main/window_open_shim_source.js）。
   // contextIsolation 下 preload 改不了页面的 window.open（那是 isolated
   // world 的 window），所以垫片本体由 CDP 注入进主 world，只把这一个
@@ -97,28 +101,15 @@ ipcRenderer.on("ai:action", function(_event, data) {
   ipcRenderer.send("ai:action_result", result);
 });
 
-// Evaluate request — run arbitrary JS in page context
-ipcRenderer.on("ai:evaluate", function(_event, data) {
-  data = data || {};
-  try {
-    var result = eval(data.js);
-    // awaitPromise 的 preload 侧对应物：CDP 路径会等 Promise，这条老路径原先
-    // 不等，于是 async IIFE 原样把 Promise 发回去，调用方看到 {}。页面里
-    // "等一个请求再返回"的探测脚本因此全变成空回执。thenable 才等，普通值
-    // 同步返回（不引入额外延迟）。
-    if (result && typeof result.then === "function") {
-      result.then(function(v) {
-        ipcRenderer.send("ai:evaluate_result", { value: v, id: data.id });
-      }, function(e) {
-        ipcRenderer.send("ai:evaluate_result", { error: e && e.message ? e.message : String(e), id: data.id });
-      });
-      return;
-    }
-    ipcRenderer.send("ai:evaluate_result", { value: result, id: data.id });
-  } catch(e) {
-    ipcRenderer.send("ai:evaluate_result", { error: e.message, id: data.id });
-  }
-});
+// ⚠️ 这里原来有一个 `ipcRenderer.on("ai:evaluate")`，里面直接 `eval(data.js)`。
+//
+// 它是本仓库最危险的一段代码：preload 有 Node（本 tab 是 sandbox:false），
+// 于是 `eval` 的作用域里能摸到 `process` / 模块系统。主进程侧的回落逻辑
+// （CDP 抛错就改走这条路）让**页面脚本的普通异常**都能触发它 —— 实测
+// `Function('return globalThis["pro"+"cess"].version')()` 拿到了宿主 Node 版本。
+//
+// 2026-10-31 删除：evaluate 只走 CDP（页面主世界，无 Node），失败就如实报错。
+// 判据见 src/shared/eval_route.cjs 与 tests/test_eval_route.js。
 
 // Start watchers only after page is fully loaded.
 // Observing during DOM construction causes massive mutation queues that block

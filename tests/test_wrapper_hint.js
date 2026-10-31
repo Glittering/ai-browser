@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { MCP_TOOLS } from '../src/main/mcp_tools.js';
 import { JSDOM } from 'jsdom';
 import { wrapperHintExpr, wrapperHintText } from '../src/shared/wrapper_hint.js';
 
@@ -133,7 +134,14 @@ describe('wrapperHintText — 下一步要能照着做', () => {
       better_target: { id: null, tag: 'SPAN', role: null, clickable: false, text: '创作打卡' },
     });
     expect(t).toContain('no ref');
-    expect(t).toContain('subset:"all"');
+    // ⚠️ 这里曾经断言 `subset:"all"` —— 那个值在 schema 里根本不存在
+    // （合法值只有 interactive|full），于是提示把 agent 引到一个必然报错的参数上。
+    // 现在从 MCP_TOOLS 的 schema 里取合法枚举来断言，写错值就会红。
+    const subsetSchema = MCP_TOOLS.find((x) => x.name === 'browse_get_tree')
+      .inputSchema.properties.subset;
+    const suggested = /subset:"([^"]+)"/.exec(t);
+    expect(suggested, '提示里必须给一个可照抄的 subset 值').toBeTruthy();
+    expect(subsetSchema.enum, `提示建议的 ${suggested[1]} 必须在上面的 enum 里`).toContain(suggested[1]);
   });
 
   it('不是容器时返回空串（不给普通回执加字）', () => {

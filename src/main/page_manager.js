@@ -37,7 +37,12 @@ import blankPage from '../shared/blank_page.cjs';
 // 见 shared/view_liveness.cjs 顶部（2026-10-30 白屏事故的 22 次崩溃）。
 // .cjs 用默认导入（全项目约定，且 tests/test_imports.js 的静态分析只认 ESM export）。
 import viewLiveness from '../shared/view_liveness.cjs';
+import ipcGuard from '../shared/ipc_guard.cjs';
+import treeFocus from '../shared/tree_focus.cjs';
+import uploadGuard from '../shared/upload_guard.cjs';
+import evalRoute from '../shared/eval_route.cjs';
 const { isAlive, liveness } = viewLiveness;
+const { acceptResult, eventFromTab } = ipcGuard;
 // "关掉一个 tab 时哪些 per-tab 容器必须跟着消失"的唯一清单（纯函数）。
 // 为什么是表而不是逐行 delete：这类清理历史上漏过两轮（Bug 5 补了 4 个字段，
 // 2026-10-30 评估又查出 3 个漏网）。清单数据化 + 完整性闸门单测之后，
@@ -389,7 +394,9 @@ class PageManager {
     ipcMain.on('ai:tree', (_event, payload) => {
       const id = payload && payload.id;
       const pending = (id !== undefined) ? self._pendingRequests.get(id) : null;
-      if (pending) {
+      // 归属校验：谁的 tab 发的、什么通道。详见 shared/ipc_guard.cjs 顶部注释
+      // （页面曾经能通过 __ai_browser__.sendTree 撞号喂假树）。
+      if (acceptResult({ senderTab: self._tabIdForContents(_event.sender), pending, expectedKind: 'tree' })) {
         self._pendingRequests.delete(id);
         pending.resolve(payload);
       }
@@ -398,7 +405,7 @@ class PageManager {
     ipcMain.on('ai:action_result', (_event, result) => {
       const id = result && result.id;
       const pending = (id !== undefined) ? self._pendingRequests.get(id) : null;
-      if (pending) {
+      if (acceptResult({ senderTab: self._tabIdForContents(_event.sender), pending, expectedKind: 'action' })) {
         self._pendingRequests.delete(id);
         // Strip routing id from the payload before resolving.
         const { id: _drop, ...clean } = result;
@@ -406,23 +413,16 @@ class PageManager {
       }
     });
 
-    ipcMain.on('ai:evaluate_result', (_event, result) => {
-      const id = result && result.id;
-      const pending = (id !== undefined) ? self._pendingRequests.get(id) : null;
-      if (pending) {
-        self._pendingRequests.delete(id);
-        if (result.error) pending.reject(new Error(result.error));
-        else pending.resolve(result.value);
-      }
-    });
-
-    ipcMain.on('ai:diff', (_event, changes) => {
-      this._broadcast('dom_change', { changes });
-    });
+    // ai:diff 已删除：它唯一的产出者是 preload 暴露给页面的 sendDiff，而那个
+    // 暴露面在 2026-10-31 被移除（页面可借它伪造 dom_change）。通道一并删掉，
+    // 免得留下"能收但没人发"的死路。
 
     ipcMain.on('ai:event', (_event, payload) => {
-      // Tag events with active tab
-      this._broadcast(payload.event, payload.data || {});
+      // Tag events with the tab that produced them. 归属不明的事件不许广播 ——
+      // 否则一个不该发事件的上下文也能把 agent 引到别的页面上。
+      const tab = eventFromTab({ senderTab: self._tabIdForContents(_event.sender) });
+      if (tab === null) return;
+      self._broadcast(payload.event, { ...(payload.data || {}), tab });
     });
 
     // === window.open 垫片的主进程侧（见 preload/bridge.cjs 的注释）===
@@ -596,11 +596,15 @@ class PageManager {
   /** 组里还有哪些页（按 tabId 升序 = 创建顺序）。 */
   tabsInGroup(groupId) {
     const out = [];
-    for (const [id] of this.tabs) {
+    for (const [id, view] of this.tabs) {
       if (this.groupOfTab(id) === groupId) {
+        // 存活判定收敛到 shared/view_liveness.cjs：视图被销毁后
+        // `view.webContents` 会变 undefined，裸解引用会击穿主进程
+        // （2026-10-30 白屏事故那一类）。这里填 null 而不是整条丢掉 ——
+        // 调用方要看到"这页还在、但已经读不到 URL"。
         out.push({
           id,
-          url: this.tabs.get(id).webContents.getURL(),
+          url: isAlive(view) ? view.webContents.getURL() : null,
           usedAt: this._tabUsedAt.get(id) || 0,
           dialog: this._openDialogs.has(id) ? true : undefined,
         });
@@ -705,18 +709,25 @@ class PageManager {
     this._sessionTab.delete(sessionId);
   }
 
-  _layoutAllViews(bounds) {
+  /**
+   * 视图几何的**唯一**公式。此前 `_layoutAllViews` 与 `_layoutView` 各抄一份，
+   * 改一处忘另一处必然漏（历史上就漏过 inset：新建 tab 走的是 _layoutView）。
+   */
+  _viewBounds(bounds) {
     // `_bottomInset`：窗口底部被别的东西占掉的高度（目前只有主进程异常横幅）。
-    // 由 index.js 设置、这里统一扣减 —— 让每个"给视图定尺寸"的地方各自记住
-    // 这 34px 必然会漏掉一处（新建 tab 走的是 _layoutView，不是这里）。
     const inset = this._bottomInset || 0;
+    return {
+      x: 0,
+      y: config.tabBarHeight,
+      width: bounds.width,
+      height: Math.max(0, bounds.height - config.tabBarHeight - inset),
+    };
+  }
+
+  _layoutAllViews(bounds) {
+    const rect = this._viewBounds(bounds);
     for (const [id, view] of this.tabs) {
-      view.setBounds({
-        x: 0,
-        y: config.tabBarHeight,
-        width: bounds.width,
-        height: Math.max(0, bounds.height - config.tabBarHeight - inset),
-      });
+      view.setBounds(rect);
     }
   }
 
@@ -1144,14 +1155,20 @@ class PageManager {
     return { ok: false, error: msg.slice(0, 300), waited_for: waitUntil };
   }
 
-  async getTree(focusedOnly = false, tabId) {
+  /**
+   * @param {boolean} focusedOnly  只返回焦点子树（见 shared/tree_focus.cjs）
+   * @param {number} [tabId]
+   * @param {{subset?: 'interactive'|'full'}} [opts]  剪枝选项。此前 subset/mode
+   *   只在 ax:true 分支生效，默认读法**静默忽略** —— 调用方以为省了 token。
+   */
+  async getTree(focusedOnly = false, tabId, opts = {}) {
     const tid = tabId !== undefined ? tabId : this.activeTab;
     const view = this._getView(tid);
     if (!view) return { tree: null, context: null };
 
     const res = await new Promise((resolve, reject) => {
       const id = ++this._requestId;
-      this._pendingRequests.set(id, { resolve, reject });
+      this._pendingRequests.set(id, { resolve, reject, tabId: tid, kind: 'tree' });
       view.webContents.send('ai:extract', { focusedOnly, id });
       setTimeout(() => {
         if (this._pendingRequests.has(id)) {
@@ -1167,7 +1184,7 @@ class PageManager {
     // 此前这条通路只在 ax:true 下存在，而**没有任何地方告诉调用方 ax:true
     // 的存在** —— B站图文编辑器（正文在 OOPIF 里）因此隐形了两小时，agent
     // 得出"编辑器没加载"的错误结论。现在默认读法自己补上这一步。
-    const frames = focusedOnly ? [] : await this._autoMergeOpaqueFrames(res, tid);
+    const frames = await this._autoMergeOpaqueFrames(res, tid);
     // 「这棵树读到了多少页面文字」—— 与 frame_hints 的 text_coverage（只看帧）
     // 互补：那个回答"帧读够了吗"，这个回答"整页读够了吗"。
     // 事故里 27 个节点、正文 0 字的页面，两个数字都会报警，而此前一个都没有。
@@ -1182,6 +1199,21 @@ class PageManager {
     if (res && res.tree && !res.tree.editors && !focusedOnly) {
       const idx = await this._editorsIndex(tid, res.tree);
       if (idx) res.tree.editors = idx;
+    }
+    // subset:'interactive' —— 默认读法此前完全不看这个参数（只有 ax:true 分支
+    // 在 getTreeViaAx 里剪枝）。判据复用同一个 filterInteractive，保证两条读法
+    // 剪出来的形状一致；'full' / 缺省 = 不剪。
+    if (res && res.tree && opts && opts.subset === 'interactive') {
+      res.tree = axExtractor.filterInteractive(res.tree) || res.tree;
+    }
+    // focused_only —— 真正的裁剪在这里（抽取器不认这个参数，见 shared/tree_focus.cjs）
+    if (focusedOnly && res) {
+      const f = treeFocus.focusOnly(res.tree);
+      res.tree = f.tree;
+      if (!f.tree) {
+        // 没有焦点就把话说清楚：调用方不能把"焦点不在页面上"当成"页面是空的"。
+        res.context = { ...(res.context || {}), focused_only: { found: false, hint: 'No element has focus on this page. Click into a field first, or read without focused_only.' } };
+      }
     }
     return res;
   }
@@ -1315,9 +1347,12 @@ class PageManager {
   // context 只有 modals/session/stats，登录墙、校验错误、必填提示全都来自
   // 这条 DOM 扫描 —— 两条读法给出不一致的 context 只会让调用方怀疑读数。
   async _readContext(view) {
+    // 归属 tab 由 view 反查（本方法只收 view）。回执要认领 pending，就必须知道
+    // 这条请求属于哪个 tab —— 见 shared/ipc_guard.cjs。
+    const tid = this._tabIdForContents(view && view.webContents);
     const res = await new Promise((resolve, reject) => {
       const id = ++this._requestId;
-      this._pendingRequests.set(id, { resolve, reject });
+      this._pendingRequests.set(id, { resolve, reject, tabId: tid, kind: 'tree' });
       view.webContents.send('ai:context', { id });
       setTimeout(() => {
         if (this._pendingRequests.has(id)) {
@@ -1472,8 +1507,15 @@ class PageManager {
         }
       }
       // 未知参数不再静默丢弃：调用方传了什么没被用上，回执里点名。
+      //
+      // `tab` 必须排除：它是**路由参数**（已经用来选中 tid 了），不是截图选项。
+      // 此前调用方照文档传 `{tab, format}` 会收到 `ignored_params:['tab']`，
+      // 看起来像"你传的 tab 被忽略了" —— 而它恰恰是唯一生效的那个。
+      // 同理 `heal` / `node_id` 这类"调用层参数"也不该出现在这里。
       const known = { format: 1, quality: 1, fullPage: 1, clip: 1, path: 1 };
-      const ignored = Object.keys(opts || {}).filter((k) => !known[k]);
+      const ROUTING_ONLY = { tab: 1 };
+      const ignored = Object.keys(opts || {})
+        .filter((k) => !known[k] && !ROUTING_ONLY[k]);
       return {
         ok: true,
         tab: tid,
@@ -2120,15 +2162,28 @@ class PageManager {
         if (r) return r;
       } catch (e) { /* fall through to preload */ }
     } else if (action === 'upload') {
+      // 路径闸门（存在性 / 大小 / 敏感位置）。判据在 shared/upload_guard.cjs：
+      // 这条动作能把本机任意文件塞进站点，是"读本地文件"的原语，必须拦。
+      const gate = uploadGuard.checkUploadPath(params.file || '');
+      if (!gate.ok) return { success: false, error: gate.error, hint: gate.hint };
+      const file = gate.path;
       try {
         await this._ensureAxHandles(view, tid);
-        const r = await this._uploadViaCdp(view, target, params.file || '', tid);
-        if (r && r.success !== false) return r;
+        const r = await this._uploadViaCdp(view, target, file, tid);
+        // ⚠️ 不许动 `uploaded` —— 它是**文件名字符串**（既有契约：e2e/richtext F-03
+        // 与调用方都按这个读）。大小与放开标记另开字段，别覆盖。
+        if (r && r.success !== false) {
+          return {
+            ...r,
+            ...(Number.isFinite(gate.size) ? { upload_bytes: gate.size } : {}),
+            ...(gate.sensitive_override ? { sensitive_override: true } : {}),
+          };
+        }
       } catch (e) { /* fall through */ }
       // CDP 的 DOM.setFileInputFiles 只能写顶层文档里的 input；跨进程 iframe 里的
       // 上传控件（B站封面、编辑器插图等都属于这一类）必须走帧内注入。
       try {
-        const r = await this._uploadViaFrameJs(view, target, params.file || '', tid);
+        const r = await this._uploadViaFrameJs(view, target, file, tid);
         if (r) return r;
       } catch (e) { /* fall through */ }
       // 无 CDP 时 preload 无法真正赋值文件（受安全限制），返回失败让 agent 感知。
@@ -2410,7 +2465,7 @@ class PageManager {
 
     return new Promise((resolve, reject) => {
       const id = ++this._requestId;
-      this._pendingRequests.set(id, { resolve, reject });
+      this._pendingRequests.set(id, { resolve, reject, tabId: tid, kind: 'action' });
       view.webContents.send('ai:action', { action, target, params, id });
       setTimeout(() => {
         if (this._pendingRequests.has(id)) {
@@ -2462,18 +2517,27 @@ class PageManager {
           + ' — the ref may be stale (page re-rendered). Re-read the tree and retry.');
       }
     }
-    // Preferred path: CDP Runtime.evaluate. It runs on the DevTools protocol
-    // channel and is NOT subject to the page's CSP code-generation (eval)
-    // restrictions, so it works on strict sites (Bing, Gmail, ...) where the
-    // in-page `eval()` used by the preload bridge is blocked. It runs in the
-    // page's main world, identical privilege to the page's own JS (no Node:
-    // nodeIntegration:false + contextIsolation:true are unchanged).
+    // 只有一条路：CDP Runtime.evaluate（页面的主世界，与页面自己的 JS 同权限）。
+    //
+    // ⚠️ 2026-10-31 删掉了原来的 `catch { return this._evaluateViaPreload(...) }`。
+    // 那个 catch 把**页面脚本自己抛的异常**当成"CDP 不可用"，于是任何会抛错的
+    // 表达式都会被拿到 preload 用 Node 的 eval 重跑一次。实测
+    //   Function('return globalThis["pro"+"cess"].version')()
+    // 拿到 "v20.18.3" —— 页面 → 宿主代码执行。guards.js 的正则只是字面量黑名单，
+    // 拆词拼接即可绕过，所以"留一条降级路"不是安全选项。
     try {
       return await this._evaluateViaCdp(view, js);
     } catch (e) {
-      // Fallback: the original preload (ai:evaluate) path, for views without a
-      // usable CDP debugger (and for the vitest unit tests that mock IPC).
-      return await this._evaluateViaPreload(view, js);
+      // 分类后**如实**抛出：脚本错就说脚本错（调用方该改脚本），环境错才说环境错。
+      // 判据在 shared/eval_route.cjs（纯函数，表驱动单测钉住每种消息）。
+      const r = evalRoute.evalFailureResult(e);
+      const err = new Error(
+        r.error.code === 'script-error' ? r.error.message : r.error.message + ' — ' + r.error.hint
+      );
+      err.code = r.error.code;
+      err.hint = r.error.hint;
+      err.retryable = r.error.retryable;
+      throw err;
     }
   }
 
@@ -2509,20 +2573,6 @@ class PageManager {
     const r = res && res.result;
     if (r && r.subtype === 'error') throw new Error(String(r.description || 'evaluate error').slice(0, 300));
     return r ? r.value : undefined;
-  }
-
-  _evaluateViaPreload(view, js) {
-    return new Promise((resolve, reject) => {
-      const id = ++this._requestId;
-      this._pendingRequests.set(id, { resolve, reject });
-      view.webContents.send('ai:evaluate', { js, id });
-      setTimeout(() => {
-        if (this._pendingRequests.has(id)) {
-          this._pendingRequests.delete(id);
-          reject(new Error('evaluate timeout'));
-        }
-      }, 5000);
-    });
   }
 
   // === CDP 受信输入（通用化，无框架特判）===
@@ -5098,14 +5148,7 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
   }
 
   _layoutView(view) {
-    const bounds = this.window.getContentBounds();
-    const inset = this._bottomInset || 0;
-    view.setBounds({
-      x: 0,
-      y: config.tabBarHeight,
-      width: bounds.width,
-      height: Math.max(0, bounds.height - config.tabBarHeight - inset),
-    });
+    view.setBounds(this._viewBounds(this.window.getContentBounds()));
   }
 
   addSubscription(sessionId, events) {
@@ -5521,8 +5564,26 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
       }
       const entry = this._cdpTabs.get(tabId);
       if (!entry.domains.has(domain)) {
-        wc.debugger.sendCommand(domain + '.enable');
+        // ⚠️ 记账必须能被撤销（2026-10-31 复核）。
+        // 原实现是 `sendCommand(...); domains.add(domain)` —— 发出即算启用。
+        // 一旦 enable 被 reject（导航中 / 域不可用），domains 里就**永久**留着
+        // 一个没启用的域，之后所有依赖它的命令（Runtime.evaluate / Network.*）
+        // 都以"看起来可用"的姿态失败，查起来像是工具本身坏了。
+        // 这里返回 promise 并挂拒绝处理：失败就删掉记账、落盘一条原因，下次重试。
         entry.domains.add(domain);
+        const p = wc.debugger.sendCommand(domain + '.enable');
+        if (p && typeof p.then === 'function') {
+          p.catch((e) => {
+            try { entry.domains.delete(domain); } catch (_e) {}
+            recordError('cdp_enable_failed', {
+              tab: tabId,
+              domain,
+              message: String((e && e.message) || e).slice(0, 300),
+              note: 'CDP 域启用失败，已撤销记账（下次调用会重试）',
+            });
+          });
+        }
+        return p;
       }
     } catch (e) { /* mid-navigation / already-attached elsewhere; skip this tab */ }
   }
@@ -5849,8 +5910,6 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     this.tabs.clear();
     ipcMain.removeAllListeners('ai:tree');
     ipcMain.removeAllListeners('ai:action_result');
-    ipcMain.removeAllListeners('ai:evaluate_result');
-    ipcMain.removeAllListeners('ai:diff');
     ipcMain.removeAllListeners('ai:event');
   }
 }

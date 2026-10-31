@@ -766,15 +766,18 @@ sheet**，因此它既不在语义树里，也不受页面点击控制；**而�
 ## 测试基线
 
 > 数字**每次发版后按实测更新**（`npm test` / `npm run e2e:all` 的最终摘要）。
-> 2026-10-31 v2.4.6 基线：单测 **91 文件 / 1231 条**、e2e **25 套件 / 814 断言**。
+> 2026-11-01 v2.5.0 基线：单测 **98 文件 / 1309 条**、e2e **27 套件 / 831 断言**。
 
-- 单元：`npm test` —— Vitest，91 文件 / 1231 条，0 skip。
+- 单元：`npm test` —— Vitest，98 文件 / 1309 条，0 skip。
 - 端到端：各 `npm run <suite>` 自起 Electron（隔离 profile）：
   `smoke` / `capabilities` / `richtext` / `network` / `value` / `canvas` / `modeldiff` /
   `audit` / `nav` / `focus` / `interact` / `upload` / `view` / `readcov` / `window_open` /
   `dialog` / `wrapper` / `paint` / `layout` / `download` / `multiagent` / `background` /
-  `icon` / `app_model` / `lifecycle`。
-  **改动不得破坏任何一项。** 一次跑全部：`npm run e2e:all`（25 套件 / 814 断言）。
+  `icon` / `app_model` / `security` / `contract` / `lifecycle`。
+  **改动不得破坏任何一项。** 一次跑全部：`npm run e2e:all`（27 套件 / 831 断言）。
+  - `security`：页面 → 控制面、页面 → 宿主 两条攻击链的回归。它会起**两个**实例
+    （第二个带 `AI_BROWSER_WS_ALLOW_ORIGIN=1` 做阳性对照），断言"拦住"而不是"服务没起来"。
+  - `contract`：声明 = 实现（`subset` / `focused_only` / `mode` / `wait` condition / `id:null`）。
   另外两个**不进全量**：`npm run flicker`（要屏幕录制权限 + 窗口真的在屏幕上）、
   `npm run realsites`（依赖外网）。
   `e2e/zhihu_full.cjs` 是**手工脚本**（附着已运行的 9223 实例 + 需登录态），

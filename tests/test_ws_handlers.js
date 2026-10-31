@@ -410,3 +410,23 @@ describe('ws_server 错误路径', () => {
     expect(res.result.error).toMatch(/no result/);
   });
 });
+
+describe('ws_server ui.wait 参数校验', () => {
+  it('W-4 未知 condition 立刻 -32602，不白等到 timeout', async () => {
+    const t0 = Date.now();
+    const res = await rpc(client, 'ui.wait', { condition: 'text-contaíns', text: 'x', timeout_ms: 30000 });
+    const cost = Date.now() - t0;
+    expect(res.error && res.error.code).toBe(-32602);
+    expect(cost, '不应该进入轮询（此前会白抽 120s）').toBeLessThan(2000);
+  });
+
+  it('W-5 text_contains 不再每轮抽整棵树（只调 evaluate）', async () => {
+    pm._evaluateCalls = [];
+    let treeCalls = 0;
+    getTreeImpl = () => { treeCalls++; return { tree: {}, context: { modals: [] } }; };
+    evaluateImpl = async () => 'nothing here';
+    await rpc(client, 'ui.wait', { condition: 'text_contains', text: 'zzz', timeout_ms: 700 });
+    expect(treeCalls, 'text 条件不该为了等一句话去建整棵树').toBe(0);
+    expect(pm._evaluateCalls.length).toBeGreaterThan(0);
+  });
+});

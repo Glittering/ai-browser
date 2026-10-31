@@ -64,7 +64,39 @@ const TAB_OWN_METHODS = new Set([
   'ui.window_shown', 'ui.quit', 'ui.subscribe', 'ui.unsubscribe', 'ui.hello',
 ]);
 
-export function startWSServer(pageManager, port = config.wsPort, onQuit = null) {
+export function startWSServer(pageManager, port = config.wsPort, onQuit = null, opts = {}) {
+  // ⚠️ 页面 → 控制面：**握手带 Origin 一律拒**（2026-10-31 实测的攻击链）。
+  //
+  // 浏览器在 WebSocket 握手时必发 `Origin`，而 Node 客户端（`ws` 包、Node 全局
+  // WebSocket —— CLI / MCP / e2e 都用这两种）**不发**（实测两者都是 null）。
+  // 所以这条判据很硬：带 Origin = 浏览器来的 = 页面脚本在试图驱动浏览器。
+  //
+  // 为什么必须挡：只绑 loopback 挡不住页面（页面就在本机跑）。实测一个普通
+  // http 页面 `new WebSocket('ws://127.0.0.1:9223')` 能连上，`ui.list_tabs`
+  // 枚举出全部标签页，`ui.evaluate` 能读到**另一个源**的正文 —— 用户所有登录态
+  // 都在射程内。
+  //
+  // 逃生门只给调试/对照实验：`AI_BROWSER_WS_ALLOW_ORIGIN=1` 或 options.allowOrigin。
+  // 它的唯一正当用途是「证明拦截器真的在起作用」（阳性对照），生产环境不要开。
+  const allowOrigin = opts.allowOrigin === true || process.env.AI_BROWSER_WS_ALLOW_ORIGIN === '1';
+  // 拒绝日志要节流：恶意页面可以循环重连，把 error.jsonl 冲掉就等于毁掉现场。
+  let rejected = 0;
+  let rejectedWindowStart = Date.now();
+  const noteRejected = (origin, ua) => {
+    const now = Date.now();
+    if (now - rejectedWindowStart > 60000) { rejected = 0; rejectedWindowStart = now; }
+    rejected += 1;
+    if (rejected <= 5) {
+      recordError('ws_origin_rejected', {
+        origin: String(origin).slice(0, 200),
+        ua: String(ua || '').slice(0, 120),
+        note: '握手带 Origin（浏览器/页面发起）—— 已拒绝。页面不允许驱动控制面。',
+      });
+    } else if (rejected === 6) {
+      recordError('ws_origin_rejected', { note: '同一分钟内超过 5 次 Origin 拒绝，后续不再逐条落盘' });
+    }
+  };
+
   // Bind loopback only — the protocol carries no auth. ws' default (host
   // omitted) is 0.0.0.0, which would expose the browser — including all its
   // persisted logins — to the entire local network. Override via
@@ -108,7 +140,16 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
     );
   });
 
-  wss.on('connection', (ws, _req) => {
+  wss.on('connection', (ws, req) => {
+    // 页面 → 控制面：见 Origin 即拒（见上方注释；Node 客户端不带这个头）。
+    const origin = req && req.headers ? req.headers.origin : undefined;
+    if (origin && !allowOrigin) {
+      noteRejected(origin, req && req.headers ? req.headers['user-agent'] : '');
+      // 1008 = policy violation。先 close 再 return：不进 JSON-RPC 分发，
+      // 连 ui.hello 都不允许（半认证状态比不认证更难查）。
+      try { ws.close(1008, 'origin not allowed'); } catch (_e) {}
+      return;
+    }
     const sessionId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const subscriptions = new Set();
     // 连接的身份与工作区。isAgentConn 只有 ui.hello 才会置真 —— 裸 WS（e2e、
@@ -142,7 +183,7 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
       try {
         msg = JSON.parse(raw.toString());
       } catch {
-        ws.send(JSON.stringify({ jsonrpc: '2.0', error: { code: -32700, message: 'Parse error' } }));
+        ws.send(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } }));
         return;
       }
 
@@ -267,13 +308,33 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
           case 'ui.get_tree': {
             // P0 probe: params.ax routes to the AX read layer (getFullAXTree);
             // default path (preload extractor) is unchanged.
+            //
+            // `mode`（'diff'）只在 AX 读法里有意义。此前默认读法会**静默忽略**
+            // 它，调用方拿到的还是整棵树却以为拿到了增量 —— 宁可报错说清楚。
+            if (params.mode && !params.ax) {
+              send({
+                jsonrpc: '2.0', id,
+                error: {
+                  code: -32602,
+                  message: "get_tree: mode is only supported with ax:true (use {ax:true, mode:'diff'})",
+                },
+              });
+              break;
+            }
             const result = params.ax
               ? await pageManager.getTreeViaAx(tabId, {
                   subset: params.subset,
                   mode: params.mode,
                   focusedOnly: params.focusedOnly,
                 })
-              : await pageManager.getTree(params.focusedOnly, tabId);
+              // subset 现在在默认读法上也生效（此前只有 ax 分支认它）
+              : await pageManager.getTree(
+                  // 两种拼写都认：raw WS 文档用 camelCase，MCP schema 用 snake_case。
+                  // 只认一个的话，抄错的那一方会**静默**拿到整棵树（本项目最常见的坑）。
+                  params.focusedOnly !== undefined ? params.focusedOnly : params.focused_only,
+                  tabId,
+                  { subset: params.subset },
+                );
             send({ jsonrpc: '2.0', id, result });
             break;
           }
@@ -366,8 +427,11 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
             //
             // heal:true 时才走自救阶梯（repaint → reload → 给结论并上报），
             // 默认只观测 —— 调用方问"是不是白的"时，不该顺手把页面重载掉。
-            const tid = params.tab !== undefined ? params.tab : pageManager.activeTab;
-            const r = params.heal ? await pageManager._auditPaint(tid) : await pageManager.paintCheck(tid);
+            // 走统一路由（tabId 已按 调用方点名 > 工作区 > 人眼在看 解析好）。
+            // 此前这里是 `params.tab !== undefined ? params.tab : activeTab` ——
+            // 直接读到"人正在看的那一页"，绕过了工作区归属。heal:true 时会去
+            // 重载**别人的**标签页，而回执看起来一切正常。
+            const r = params.heal ? await pageManager._auditPaint(tabId) : await pageManager.paintCheck(tabId);
             send({ jsonrpc: '2.0', id, result: r });
             break;
           }
@@ -721,8 +785,22 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
           }
           // === ui.wait — poll until condition or timeout ===
           case 'ui.wait': {
-            // params: { condition: 'button_enabled'|'modal_appeared'|'text_contains', target, text, timeout_ms }
+            // params: { condition, target, text, timeout_ms }
             //
+            // ⚠️ condition 必须**先校验**：此前写错一个条件（比如 'text-contains'）
+            // 不会报错，只会每 500ms 抽一次整棵树、抽到 120s 上限，然后回
+            // `satisfied:false` —— 调用方以为"条件没出现"，实际上是参数写错了。
+            const WAIT_CONDITIONS = ['button_enabled', 'modal_appeared', 'text_contains', 'url_contains'];
+            if (!WAIT_CONDITIONS.includes(params.condition)) {
+              send({
+                jsonrpc: '2.0', id,
+                error: {
+                  code: -32602,
+                  message: `unknown wait condition ${JSON.stringify(params.condition)} — use one of: ${WAIT_CONDITIONS.join(' / ')}`,
+                },
+              });
+              break;
+            }
             // timeout_ms 必须钳制：调用方写 600000 会让这条 RPC 和一次 500ms 一轮的
             // 树抽取循环一直跑着，而 agent 那边通常早就超时放弃了。
             const timeoutMs = Math.max(100, Math.min(120000, Number(params.timeout_ms) || 10000));
@@ -733,6 +811,10 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
             // 最后一次"这一轮没读成"的原因。仅仅不满足**不是**错误，但读失败
             // 必须如实报出来 —— 否则调用方分不清"条件没出现"和"我一直在读空"。
             let lastError = null;
+            // 只有两种情况需要建树。text/url 用一条 evaluate 就能答，
+            // 此前每一轮都先抽整棵树再丢弃 —— 在真实站点上一轮几十毫秒到几百毫秒，
+            // 等于把 wait 的响应时间拖成读树的时间（且 5 次/秒）。
+            const needsTree = params.condition === 'button_enabled' || params.condition === 'modal_appeared';
 
             const poll = async () => {
               while (Date.now() - startTime < timeoutMs) {
@@ -742,14 +824,17 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null) 
                 // reject）。此前这里没有 try/catch → `browse_wait({url_contains})`
                 // 这个最典型的用法直接变成 -32603 internal error，而调用方看到
                 // "内部错误"的合理反应是**重试导航**，把已经成功的导航重做一遍。
-                let result = null;
-                try {
-                  result = await pageManager.getTree(false, tabId);
-                } catch (e) {
-                  lastError = String((e && e.message) || e);
+                let tree = null;
+                let ctx = null;
+                if (needsTree) {
+                  try {
+                    const result = await pageManager.getTree(false, tabId);
+                    tree = result?.tree;
+                    ctx = result?.context;
+                  } catch (e) {
+                    lastError = String((e && e.message) || e);
+                  }
                 }
-                const tree = result?.tree;
-                const ctx = result?.context;
 
                 if (params.condition === 'button_enabled' && params.target) {
                   // Find button by id first (what get_tree hands the agent), label as fallback

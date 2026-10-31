@@ -102,7 +102,7 @@
 
 白盒 = 按实现分支设计用例，保证每个模块/关键分支被测。逐模块列**已覆盖**与**缺口(GAP)**。
 
-### 3.1 协议与消息 `src/shared/protocol.js` —（Vitest 已覆盖，`U`）
+### 3.1 协议与消息（`src/shared/protocol.js` 已于 2026-10-31 删除：只被它自己的单测引用，生产从未用它校验。见 docs/AUDIT-VERIFY-2026-10-31.md）
 Request/Response/Error/Event 构造、非法 JSON/版本校验、方法白名单、错误码（标准 + 自定义）。**GAP**：无——已达分支充分。
 
 ### 3.2 语义提取 `src/preload/extractor.cjs` —（`U` + 部分 `S`）
@@ -138,7 +138,7 @@ tab CRUD、request-id 并发匹配、`_pendingRequests` 清理、closeTab `_clea
 
 | 资产 | 位置 | 覆盖 | 运行 | 状态 |
 |---|---|---|---|---|
-| 协议单测 | `tests/test_protocol.js` (14) | 协议/错误码 | `npm test` | U |
+| 协议单测 | （已随 `protocol.js` 删除） | 协议/错误码改由 `test_ws_handlers` / `test_ws_auth` 覆盖 | `npm test` | U |
 | 提取单测 | `tests/test_semantic_extractor.js` (16) | extractor | `npm test` | U |
 | 动作单测 | `tests/test_action_binder.js` (10) | actions | `npm test` | U |
 | 观测单测 | `tests/test_state_tracker.js` (5) | watcher | `npm test` | U |

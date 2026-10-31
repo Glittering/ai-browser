@@ -86,3 +86,43 @@ describe('src/ 模块导入完整性', () => {
     }
   );
 });
+
+// 门 2：`.cjs` 模块必须能被真的 require 起来。
+//
+// 为什么单独一条：上面的门只扫 `.js` 的 ESM 具名导入。`src/preload/*.cjs` 与
+// `src/shared/*.cjs` 走的是 CommonJS，**没有任何静态检查**覆盖它们 —— 一个语法
+// 错误、或者 `module.exports = undefined`，单测全绿（没人 import 它），直到真机
+// 跑起来才炸，而那时错误在渲染器里，主进程日志里什么都没有。
+describe('.cjs 模块可加载', () => {
+  const cjs = [];
+  (function walk(dir) {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) walk(full);
+      else if (e.name.endsWith('.cjs')) cjs.push(full);
+    }
+  })(SRC_ROOT);
+
+  it('C-0 确实扫到了 .cjs（否则下面的用例会空转成绿灯）', () => {
+    expect(cjs.length).toBeGreaterThan(5);
+  });
+
+  // bridge.cjs 在模块顶层就要 `require('electron').contextBridge`，而 vitest 里
+  // 没有 Electron —— 它的加载方式由 tests/test_bridge_surface.js 用 vm + fake
+  // require 承担。这里**显式**跳过并钉住名单，防止以后有人顺手把别的文件也加进来。
+  const SKIP = new Set(['preload/bridge.cjs']);
+  const loadable = cjs.filter((f) => !SKIP.has(path.relative(SRC_ROOT, f)));
+
+  it('C-1 跳过名单只允许这一个文件（新增必须写理由）', () => {
+    expect([...SKIP]).toEqual(['preload/bridge.cjs']);
+  });
+
+  it.each(loadable.map((f) => [path.relative(SRC_ROOT, f), f]))('%s 能被 require 且有导出', (_rel, file) => {
+    const mod = require(file);
+    const keys = mod && typeof mod === 'object' ? Object.keys(mod) : [];
+    expect(
+      keys.length,
+      `${_rel} 没有导出任何东西（module.exports 为空/undefined）—— 调用方拿到的全是 undefined`
+    ).toBeGreaterThan(0);
+  });
+});

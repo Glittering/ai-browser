@@ -96,7 +96,9 @@
     "background": "node e2e/background_ws.cjs",
     "icon:check": "node scripts/check_icon.cjs",
     "icons": "env -u ELECTRON_RUN_AS_NODE node_modules/electron/dist/Electron.app/Contents/MacOS/Electron --no-sandbox --disable-gpu scripts/render_icon.cjs",
-    "icon": "node e2e/icon_ws.cjs"
+    "icon": "node e2e/icon_ws.cjs",
+    "security": "node e2e/security_ws.cjs",
+    "contract": "node e2e/contract_ws.cjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

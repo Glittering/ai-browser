@@ -53,6 +53,11 @@ const SUITES = [
   // 恒 0、没有真实事件链路 —— 「派发一条合成 mousemove 就能走到 tee」这个核心
   // 假设在那里是被 mock 兜住的，只有真浏览器能证伪它（2026-10-30）。
   'app_model',
+  // security —— 页面 → 控制面 / 页面 → 宿主 两条攻击链的回归（2026-10-31）。
+  // 它会起**两个**实例（第二个带 AI_BROWSER_WS_ALLOW_ORIGIN=1 做阳性对照）。
+  'security',
+  // contract —— 声明 = 实现：subset / focused_only / mode / wait condition / id:null
+  'contract',
   // lifecycle —— BrowserView 生命周期治理（2026-10-30 白屏事故）：视图悬空后
   // 不许击穿主进程、标签栏自动重建、横幅自动收敛。用 selftest=chrome-gone 受控
   // 复现，隐藏模式即可（与窗口可见性无关）。红→绿对照见套件头注释。

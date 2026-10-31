@@ -15,7 +15,7 @@
   <img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue.svg">
   <img alt="Electron" src="https://img.shields.io/badge/built%20with-Electron%2033-9cf">
   <img alt="Platforms" src="https://img.shields.io/badge/platforms-macOS%20%E2%80%A2%20Linux-blueviolet">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-658%20unit%20%2B%20447%20e2e-2ea043">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-1309%20unit%20%2B%20831%20e2e-2ea043">
   <img alt="MCP" src="https://img.shields.io/badge/spec-MCP%20(stdio)-f5b23b">
 </p>
 
@@ -32,17 +32,22 @@
 </p>
 
 **What it is.** An Electron app that exposes its tabs over two equivalent interfaces — an MCP server
-(20 `browse_*` tools) and a raw WebSocket JSON-RPC API (`ws://localhost:9223`, methods `ui.*`). Your
+(17 `browse_*` tools) and a raw WebSocket JSON-RPC API (`ws://localhost:9223`, methods `ui.*`). Your
 agent navigates, reads a structured semantic tree (`role` / `label` / `value` / `states` / `actions`),
-and clicks or types by `data-ai-id`. There is no screenshot step and no OCR: `src/` contains no
-capture call at all.
+and clicks or types by `data-ai-id`. **Reading never goes through a screenshot and there is no OCR** —
+that's the point of the tree. `browse_screenshot` exists, but as a *diagnostic* for the cases the tree
+can't see (overlays, canvas, mis-rendered layout), not as the read path.
 
 **What it is not.** It is not headless. The window really opens, really renders, and stays interactive —
 see [Letting a human step in](#letting-a-human-step-in). Nor does it "co-drive" with you: the hand-off
 is a conversation between the agent and the user, not a browser API.
 
-> **Security note.** The WebSocket server has no authentication — it listens on localhost and trusts
-> whoever connects. Do not expose port 9223 beyond loopback, and avoid untrusted networks.
+> **Security note.** The WebSocket server binds loopback only and **refuses any handshake that carries
+> an `Origin` header** — that's what a browser always sends, so a page running inside AI Browser (or
+> any other browser) cannot drive the control plane, while Node/CLI/MCP clients (which send no
+> `Origin`) work normally. There is still no token: a local process running as you can connect.
+> Do not expose port 9223 beyond loopback.
+> (`AI_BROWSER_WS_ALLOW_ORIGIN=1` disables the check — debug only, it re-opens the page → browser path.)
 
 ---
 
@@ -207,6 +212,9 @@ small surface, since every tool schema is injected into your agent's context on 
 | `browse_wait` | Poll until `button_enabled` / `modal_appeared` / `text_contains` / `url_contains`. |
 | `browse_tabs` | Tabs: `list` / `new` / `close` / `switch` / `window`. `switch` = default; add `show:true`. `new` never steals the view unless `show:true`. |
 | `browse_network` | Chrome-DevTools-style network inspection: `list` (filter by method / URL / status / type), `get` (request + response headers and bodies), `clear`, `configure`. |
+| `browse_auth_state` | Login-state self-check for a tab: are we logged in, or bounced to a login wall. Cheap — no tree is built. |
+| `browse_screenshot` | Diagnostic viewport/element capture (`png`/`jpeg`/`webp`, `clip`, `fullPage`). Not the read path — use it when the tree and the screen disagree. |
+| `browse_errors` | Recent errors the browser recorded (crashes, failed navigations, RPC failures) with hints. Ask here when behaviour doesn't match the docs. |
 | `browse_quit` | Shut the whole browser down and release the process. |
 
 ### What every act result already tells you: `effect_state`
@@ -484,6 +492,14 @@ Two practical consequences for the agent:
 MCP is a thin stdio adapter. Anything MCP can do is reachable directly over JSON-RPC 2.0 at
 `ws://localhost:9223` from any language. Source of truth: the method switch in
 [`src/main/ws_server.js`](src/main/ws_server.js).
+
+Two things to know before you write a client:
+
+- **Connections carrying an `Origin` header are closed with code 1008.** Browsers always send it;
+  Node's `WebSocket` and the `ws` package do not, so a normal script is unaffected. This is a
+  security boundary, not a bug — see the security note above.
+- Method parameters are camelCase (`focusedOnly`, `timeout_ms`). MCP maps the snake_case tool
+  arguments onto them.
 
 You do not have to write a client to do this. The CLI speaks the same protocol:
 

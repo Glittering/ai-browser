@@ -17,6 +17,7 @@ import ensureMod from '../../scripts/ensure_running.cjs';
 import { MCP_TOOLS } from './mcp_tools.js';
 import { actParams, networkParams } from './mcp_args.js';
 import { evaluateGuardError } from '../shared/guards.js';
+import { timeoutForTool } from '../shared/tool_timeout.js';
 // 截图体积上限（与 WS 侧共用同一把尺）：超过就不把图塞进上下文。
 import screenshotOpts from '../shared/screenshot_opts.cjs';
 import { config, wsUrl } from '../shared/config.js';
@@ -102,7 +103,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         url: args.url,
         tab: args.tab,
         wait_until: args.wait_until || undefined,
-      });
+      }, { timeoutMs: timeoutForTool('browse_navigate', args) });
       return { content: [{ type: 'text', text: JSON.stringify(result) }] };
     }
 
@@ -133,7 +134,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         target: args.target,
         params: actParams(args),
         tab: args.tab
-      });
+      }, { timeoutMs: timeoutForTool('browse_act', args) });
       return { content: [{ type: 'text', text: JSON.stringify(result) }] };
     }
 
@@ -177,7 +178,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         text: args.text,
         timeout_ms: args.timeout_ms,
         tab: args.tab
-      });
+      }, { timeoutMs: timeoutForTool('browse_wait', args) });
       return { content: [{ type: 'text', text: JSON.stringify(result) }] };
     }
 

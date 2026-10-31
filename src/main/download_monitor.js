@@ -19,6 +19,26 @@ import { config } from '../shared/config.js';
 
 const MAX_RECORDS_PER_TAB = 200;
 
+
+/**
+ * 同名文件唯一化（`report.csv` → `report (1).csv`）。
+ *
+ * 此前 savePath 直接拼 `dir/basename`，而 Electron 的 `setSavePath` 会**覆盖**
+ * 目标文件。同一站点连点两次导出，第一次的文件就没了 —— 回执里两条记录的
+ * path 一模一样，用户拿到的却是后一份内容（2026-10-31 复核）。
+ */
+function uniquePath(dir, name) {
+  const ext = path.extname(name);
+  const stem = ext ? name.slice(0, -ext.length) : name;
+  let candidate = path.join(dir, name);
+  let n = 1;
+  while (fs.existsSync(candidate) && n < 1000) {
+    candidate = path.join(dir, `${stem} (${n})${ext}`);
+    n += 1;
+  }
+  return candidate;
+}
+
 export class DownloadMonitor {
   constructor(session, opts = {}) {
     this.session = session;
@@ -50,7 +70,7 @@ export class DownloadMonitor {
     const raw = String(item.getFilename() || 'download');
     const safe = path.basename(raw).replace(/[\u0000-\u001f"*/:<>?\\|]/g, '_') || 'download';
     const dir = path.join(this.baseDir, String(tabId));
-    const savePath = path.join(dir, safe);
+    const savePath = uniquePath(dir, safe);
 
     try { fs.mkdirSync(dir, { recursive: true }); } catch (_) { /* 落盘失败在下面体现 */ }
     item.setSavePath(savePath);
@@ -142,3 +162,5 @@ export class DownloadMonitor {
     this._byTab.clear();
   }
 }
+
+export { uniquePath };

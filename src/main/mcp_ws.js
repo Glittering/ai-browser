@@ -153,12 +153,23 @@ export function createWsClient({
 
   // JSON-RPC call; resolves to the result, rejects on {error} / timeout /
   // connection failure. Uses the shared connection via getWs().
-  function call(method, params = {}) {
+  //
+  // `opts.timeoutMs`：**每次调用**自己的 deadline。此前这里只有模块级的 15s，
+  // 于是 `browse_wait {timeout_ms:60000}` / `browse_act {timeout_ms:120000}`
+  // 在第 15 秒就被传输层掐掉，而服务端还在正常轮询 —— 调用方看到的是
+  // "WS timeout"，会以为是服务端卡住。预算换算见 shared/tool_timeout.js。
+  function call(method, params = {}, opts = {}) {
+    const waitMs = Number(opts && opts.timeoutMs) > 0 ? Number(opts.timeoutMs) : timeout;
     return getWs().then((conn) => new Promise((resolve, reject) => {
       const id = ++_rpcId;
+      const t0 = Date.now();
       const timer = setTimeout(() => {
-        if (_pending.has(id)) { _pending.delete(id); reject(new Error('WS timeout')); }
-      }, timeout);
+        if (_pending.has(id)) {
+          _pending.delete(id);
+          // 带上方法与已耗时：否则"15 秒还是 120 秒到期"只能靠猜。
+          reject(new Error(`WS timeout after ${Date.now() - t0}ms (method ${method})`));
+        }
+      }, waitMs);
       _pending.set(id, (msg) => {
         clearTimeout(timer);
         if (msg.error) reject(new Error(msg.error.message || 'RPC error'));

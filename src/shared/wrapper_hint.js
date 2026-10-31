@@ -127,7 +127,7 @@ export function wrapperHintText(w) {
     return `target is a container: its own text is empty and the label is aggregated from descendants ("${w.agg_text}"). A more precise node owns that text: ${bt.id} (${bt.role || bt.tag}${bt.clickable ? ', clickable' : ''}) — click that instead of retrying this one.`;
   }
   if (bt) {
-    return `target is a container: its own text is empty and the label is aggregated from descendants ("${w.agg_text}"). The text actually lives on <${bt.tag}> "${bt.text}"${bt.clickable ? ' (clickable)' : ' (not clearly clickable)'}, which has no ref yet — re-read the tree with subset:"all" to address it.`;
+    return `target is a container: its own text is empty and the label is aggregated from descendants ("${w.agg_text}"). The text actually lives on <${bt.tag}> "${bt.text}"${bt.clickable ? ' (clickable)' : ' (not clearly clickable)'}, which has no ref yet — re-read the tree with subset:"full" to address it.`;
   }
   return `target is a container: its own text is empty and the label is aggregated from descendants ("${w.agg_text}"). Retrying the same node will not help — target the descendant that actually holds the text.`;
 }
