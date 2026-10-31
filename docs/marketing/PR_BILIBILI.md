@@ -61,4 +61,4 @@
 - 17 个 MCP 工具（`browse_navigate` / `browse_get_tree` / `browse_act` / `browse_diff` / `browse_evaluate` / `browse_wait` 为核心）
 - 428 单元测试（28 文件）+ 12 个 Electron e2e 套件（428 个断言）全绿
 - 实测站点：知乎（Draft.js 全流程）、CSDN（发布）、百度、东方财富（2458 节点）、同花顺、魔塔
-- MCP 自动拉起/自动关闭 Electron，Agent 全托管浏览器生命周期
+- MCP 首次调用自动拉起 Electron，`browse_quit` 关闭；Agent 全程托管浏览器生命周期

@@ -201,11 +201,14 @@ notifications. Use `browse_network` for pull-based inspection.
 ## Human hand-off
 
 When blocked by login, SSO, QR code, slider/image CAPTCHA, SMS/email code, or
-payment confirmation: stop, ask the user in chat to do it in the visible browser
-window and reply "done", wait for that reply, then re-read with
-`browse_get_tree` and continue. Never fabricate credentials or retry clicks that
-cannot succeed. Logins persist in the `persist:ai-browser` session partition
-(on disk under `~/.ai-browser`), so intervention is usually needed once per site.
+payment confirmation: stop and ask the user **in your own reply** (plain text —
+there is no `chat`/`message` tool here, and no side-conversation feature) to do
+it in the visible browser window and reply "done", wait for that reply, then
+re-read with `browse_get_tree` and continue. Never fabricate credentials or retry
+clicks that cannot succeed. Logins persist in the `persist:ai-browser` session
+partition (on disk under `~/.ai-browser`), so intervention is usually needed once
+per site. While the user is typing or scanning, do **not** call `browse_quit` —
+it closes the window and takes any half-finished work with it.
 
 ## Troubleshooting (common cases)
 

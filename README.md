@@ -461,7 +461,9 @@ covers the things an agent genuinely cannot do:
 side, and nothing needs to. It is a conversation between the agent and its user:
 
 1. The agent hits something it cannot do.
-2. It says so in chat, plainly: *"Please scan the QR code in the browser window, then reply 'done'."*
+2. It says so in its own reply, as plain text — *"Please scan the QR code in the browser window, then
+   reply 'done'."* No tool call is involved: there is no `chat` / `message` / `ask_user` tool in this
+   project, and no "spawn a side conversation" feature. Talking to the user is the agent's own job.
 3. It stops and waits for the reply — no retry loops on clicks that cannot work.
 4. After "done" it re-reads with `browse_get_tree` to confirm the new state, then continues.
 

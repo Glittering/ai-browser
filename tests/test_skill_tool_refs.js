@@ -59,6 +59,57 @@ describe('技能 / 文档里提到的工具必须存在', () => {
   });
 });
 
+describe('交接契约：没有 chat 工具（2026-10-31）', () => {
+  // 起因：有 agent 把文档里的"ask the user in chat"读成一个叫 `chat` 的指令去调用，
+  // 并困惑"它是不是用完就自动关闭"。事实是这个项目**从来没有**这种工具：
+  // MCP 17 个全是 browse_*，RPC 全是 ui.*，CLI 也没有这个子命令。
+  //
+  // 下面两条是**文档闸门**（文本本身就是交付物，grep 是唯一可验的东西），
+  // 另两条钉住事实来源，防止"文档说没有、代码里其实有"或反过来。
+  const HANDOFF_DOCS = [
+    'skills/ai-browser/SKILL.md',
+    'skills/ai-browser/references/tabs.md',
+    'llms-install.md',
+    'examples/AGENT_INSTRUCTIONS.md',
+  ];
+
+  it('H-1: 注册表里确实没有 chat / message / ask 类工具（事实来源）', () => {
+    const chatter = [...KNOWN].filter((n) => /chat|message|ask_user|ask$/.test(n));
+    expect(chatter, `MCP 注册表里出现了对话类工具：${chatter.join(', ')}；` +
+      '若真的新增了，必须同步改 SKILL.md 里"没有 chat 工具"的断言').toEqual([]);
+
+    const ws = readFileSync(join(ROOT, 'src/main/ws_server.js'), 'utf8');
+    const rpc = [...ws.matchAll(/case 'ui\.([a-z_]+)'/g)].map((m) => m[1]);
+    expect(rpc.length, '一个 ui.* 都没解析出来 —— 闸门失去意义').toBeGreaterThan(20);
+    expect(rpc.filter((n) => /chat|message|ask/.test(n)), 'RPC 层也不该有对话类方法').toEqual([]);
+  });
+
+  it('H-2: 四份交接文档都必须写明"没有 chat 工具 / 别调一次性会话"', () => {
+    const missing = [];
+    for (const rel of HANDOFF_DOCS) {
+      // 先剥掉 markdown 强调/反引号再匹配 —— 否则 "**没有** `chat`" 这种正常写法
+      // 会把闸门挡红（第一次就踩了：文档是对的，正则太字面）。
+      const text = readFileSync(join(ROOT, rel), 'utf8').replace(/[`*]/g, '');
+      // 只认否定式断言，不认"提到 chat 就算"——否则写给 agent 的正确做法也会顶包
+      const denies = /没有\s*chat|无\s*chat|there is no\s*chat|no\s*chat\s*\/|别调.{0,10}(一次性|临时)/i.test(text);
+      if (!denies) missing.push(rel);
+    }
+    expect(missing, `这些文档没写清"没有 chat 工具"，agent 会继续臆造：\n${missing.join('\n')}`)
+      .toEqual([]);
+  });
+
+  it('H-3: 文档里不许出现把 chat 当工具的调用形态（如 chat {...}）', () => {
+    const hits = [];
+    for (const f of [...mdFiles(join(ROOT, 'skills')), ...mdFiles(join(ROOT, 'examples')),
+      join(ROOT, 'llms-install.md'), join(ROOT, 'README.md')]) {
+      const text = readFileSync(f, 'utf8');
+      // `chat(` / `chat {` / `chat "..."` —— 会教弱模型照着调
+      if (/(^|[^a-z_])chat\s*[({"]/im.test(text)) hits.push(f.replace(ROOT + '/', ''));
+    }
+    expect(hits, `这些文档教了"调用 chat"的形态：\n${hits.join('\n')}`).toEqual([]);
+  });
+});
+
 describe('技能的形态（决定弱模型能不能用起来）', () => {
   const skillDirs = existsSync(join(ROOT, 'skills'))
     ? readdirSync(join(ROOT, 'skills'), { withFileTypes: true })

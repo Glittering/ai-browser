@@ -60,7 +60,7 @@ Agent 不需要截图，它直接问浏览器"页面上有什么？"。浏览器
 
 不只是独立使用。可以作为 MCP server，让 Claude Code / Cursor / Codex 直接调用。把下面这句话丢进 Agent 的指令，它就能自己驱动真实浏览器，甚至自己拉起、自己关闭：
 
-> 我可以使用 AI Browser 浏览网页（17 个 browse_* 的 MCP 工具）。第一次调用会自动启动 Electron 浏览器，用完自动关闭。用 browse_navigate 打开网页，用 browse_get_tree 把页面读成语义树，用 browse_act 像人一样点击/输入，用 browse_diff 证明操作真的生效，用 browse_wait 等待目标出现。
+> 我可以使用 AI Browser 浏览网页（17 个 browse_* 的 MCP 工具）。第一次调用会自动启动 Electron 浏览器；任务做完调 browse_quit 关闭（你不关它就一直在，登录态长期保留）。用 browse_navigate 打开网页，用 browse_get_tree 把页面读成语义树，用 browse_act 像人一样点击/输入，用 browse_diff 证明操作真的生效，用 browse_wait 等待目标出现。
 
 注册配置：
 

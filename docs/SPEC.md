@@ -766,9 +766,9 @@ sheet**，因此它既不在语义树里，也不受页面点击控制；**而�
 ## 测试基线
 
 > 数字**每次发版后按实测更新**（`npm test` / `npm run e2e:all` 的最终摘要）。
-> 2026-10-30 v2.4.5 基线：单测 **91 文件 / 1228 条**、e2e **25 套件 / 814 断言**。
+> 2026-10-31 v2.4.6 基线：单测 **91 文件 / 1231 条**、e2e **25 套件 / 814 断言**。
 
-- 单元：`npm test` —— Vitest，91 文件 / 1228 条，0 skip。
+- 单元：`npm test` —— Vitest，91 文件 / 1231 条，0 skip。
 - 端到端：各 `npm run <suite>` 自起 Electron（隔离 profile）：
   `smoke` / `capabilities` / `richtext` / `network` / `value` / `canvas` / `modeldiff` /
   `audit` / `nav` / `focus` / `interact` / `upload` / `view` / `readcov` / `window_open` /
