@@ -55,6 +55,13 @@ function analyzePngAlpha(png) {
 
   let transparent = 0;
   let opaque = 0;
+  const top = new Map();
+  const pad2 = (n) => n.toString(16).padStart(2, '0');
+  // colorType 2/6 才是真 RGB；0/3/4 是灰度，三个通道同值。Chromium 截图只会给 2/6，
+  // 灰度这条分支是为了"万一换了编码也照样说得清这是哪一页"，不是为了好看。
+  const rgbAt = (colorType === 2 || colorType === 6)
+    ? (line, base) => pad2(line[base]) + pad2(line[base + 1]) + pad2(line[base + 2])
+    : (line, base) => pad2(line[base]) + pad2(line[base]) + pad2(line[base]);
   let prev = Buffer.alloc(stride);
   for (let y = 0; y < height; y++) {
     const ft = raw[y * (stride + 1)];
@@ -81,9 +88,22 @@ function analyzePngAlpha(png) {
     } else {
       opaque += width;
     }
+    // 主色调直方图（shot_ws 用它证明"截到的是这一页，不是压在它上面的另一个标签页"
+    // —— 后台 tab 的表面如果被别人盖住，取错帧不会有任何报错，只会给你一张
+    // **别人的**画面。这是本文件里唯一能发现它的手段）。
+    // 只收前 256 种颜色：底色是大块连续区，一定进得来；抗锯齿边缘的成百上千种
+    // 杂色不是要找一个页面"是谁"时需要分辨的东西。
+    for (let x = 0; x < width; x++) {
+      const k = rgbAt(line, x * bpp);
+      if (top.size < 256 || top.has(k)) top.set(k, (top.get(k) || 0) + 1);
+    }
     prev = line;
   }
-  return { ok: true, width, height, colorType, hasAlphaChannel, transparent, opaque };
+  const dominant = [...top.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([hex, count]) => ({ color: '#' + hex, count }));
+  return { ok: true, width, height, colorType, hasAlphaChannel, transparent, opaque, dominant };
 }
 
 module.exports = { analyzePngAlpha };

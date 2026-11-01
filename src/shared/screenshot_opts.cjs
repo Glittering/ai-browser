@@ -12,6 +12,19 @@ const DEFAULT_FORMAT = 'png';
 // 512KB base64 ≈ 684KB 原始字节。单次回执再大，WS 帧和模型上下文都吃不消。
 const MAX_DATA_URL_CHARS = 512 * 1024;
 
+// 取帧档位（2026-11-02）：
+//   surface —— webContents.capturePage()：只把视图自己那一帧合成面拷一份，
+//              **不进渲染进程主线程**。
+//   cdp     —— CDP Page.captureScreenshot(fromSurface:true)：像素同样是 surface，
+//              但这条命令本身要渲染进程主线程接单排队。
+//   auto    —— 能走 surface 就走，拿不到位图再落 cdp（默认）。
+// 事故现场：百度、dumate 的 tab 上 `ui.screenshot` 各报
+// `captureScreenshot timeout after 20000ms —— the page main thread is likely blocked`，
+// 而屏幕上明明是一张正常画面：合成器攥着帧，只有"命令排队"这一步被脚本占死了。
+// 见 SPEC「取帧两条铁律」第 2 条 —— 自检早就是 surface 优先，截图这条路当时没跟上。
+const SHOT_SOURCES = ['auto', 'surface', 'cdp'];
+const DEFAULT_SOURCE = 'auto';
+
 /**
  * 规范化截图参数。
  * @param {object} opts 调用方传入（可能缺项/错型）
@@ -92,7 +105,55 @@ function normalizeScreenshotOpts(opts) {
     out.clip = clip;
   }
 
+  // --- source（取帧档位；显式传是为了复现旧路径 / 强制只要其中一档）---
+  if (src.source != null) {
+    if (typeof src.source !== 'string' || !SHOT_SOURCES.includes(src.source)) {
+      return { ok: false, error: `source must be one of ${SHOT_SOURCES.join('/')} (got ${JSON.stringify(src.source)})` };
+    }
+    out.source = src.source;
+  } else {
+    out.source = DEFAULT_SOURCE;
+  }
+
   return { ok: true, opts: out };
+}
+
+/**
+ * 这一发请求能不能用 surface 档（capturePage）拿帧。
+ *
+ * 判据不是"想不想快"，是**只有整视图的那一帧才是等价的**：
+ *   · fullPage —— captureBeyondViewport 要渲染进程给出视口外的布局，位图里没有；
+ *   · clip —— CDP 的 clip 是文档坐标，capturePage 给的是"当前视口那一帧"，
+ *     本地裁剪会把两个坐标系混成一个（宁可慢，不要静默给错区域）；
+ *   · webp —— nativeImage 只有 toPNG/toJPEG，没有 toWebP。
+ * 这三种继续走 CDP，也就继续受"主线程被占住会超时"约束 —— 它们本来就要渲染进程配合。
+ */
+function canUseSurface(opts) {
+  const o = opts && typeof opts === 'object' ? opts : {};
+  if (o.fullPage === true) return false;
+  if (o.clip) return false;
+  if (o.format === 'webp') return false;
+  return true;
+}
+
+/**
+ * surface 档的尺寸回执：capturePage 给的是**设备像素**，而调用方按 CSS 像素
+ * 传坐标、也按 CSS 像素读回执（CDP 档的 meta 就是 CSS 像素）。视图的 bounds
+ * 恰等于这一页的视口（BrowserView 的边界就是它的可视区），所以：
+ *   CSS 尺寸 = 视图 bounds，dpr = 位图宽 / bounds 宽。
+ * 这样主线程被占死、连 devicePixelRatio 都 evaluate 不出来的页面，
+ * 回执仍然带得齐 width/height/device_pixel_ratio —— 不必为了这两个数再去排队。
+ */
+function surfaceMeta(px, bounds) {
+  const p = px && typeof px === 'object' ? px : {};
+  const b = bounds && typeof bounds === 'object' ? bounds : {};
+  const cssW = Number(b.width);
+  const cssH = Number(b.height);
+  if (!Number.isFinite(cssW) || cssW <= 0 || !Number.isFinite(cssH) || cssH <= 0) return {};
+  const out = { width: Math.round(cssW), height: Math.round(cssH) };
+  const pxW = Number(p.width);
+  if (Number.isFinite(pxW) && pxW > 0) out.devicePixelRatio = Math.round((pxW / cssW) * 1000) / 1000;
+  return out;
 }
 
 /**
@@ -118,13 +179,25 @@ function describeShot(meta) {
   }
   if (m.hasVisiblePasswordInput === true) {
     out.warning = 'page has a visible password input — the screenshot may contain typed secrets';
+  } else if (m.passwordProbe === 'skipped') {
+    // surface 档不等渲染进程，密码框探测（一次 evaluate）就探不了。图照样给，
+    // 但"这张图里有没有密码"这件事必须如实说成未知，不能默默当成"没有"。
+    out.password_probe = 'skipped';
+    out.warning = 'password-input probe skipped (page main thread busy) — this frame may contain typed secrets';
   }
+  // 位图是哪一档取的：surface = 视图自己的合成帧（不进主线程），cdp = 渲染进程
+  // 配合截的。调用方据此判断"这张图和屏幕上看到的那一帧是不是同一个东西"。
+  if (typeof m.source === 'string') out.source = m.source;
   return out;
 }
 
 module.exports = {
   FORMATS,
+  SHOT_SOURCES,
+  DEFAULT_SOURCE,
   MAX_DATA_URL_CHARS,
   normalizeScreenshotOpts,
+  canUseSurface,
+  surfaceMeta,
   describeShot,
 };

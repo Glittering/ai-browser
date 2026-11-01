@@ -1517,9 +1517,33 @@ class PageManager {
   // 东西（浮层、canvas、图片、CSS 遮挡、渲染错位）就完全不可见，而这类情况
   // 恰恰是操作失败的主因。调用方失败时第一反应是"看截图"，工具面必须支持。
   //
-  // 走 webContents.debugger 的 Page.captureScreenshot —— 与 AX/Network 域
-  // 共用同一个 per-tab attach（_ensureCdp 幂等），不额外占用调试器。
-  // 截图是同步渲染快照，主线程卡住时它不返回，所以带 deadline。
+  // # 两档取帧，失败面正好互补（2026-11-02 裸 Electron 对照实测）
+  //
+  // 现场是 agent 在**后台**标签页（百度、dumate）上截图，各拿到一句
+  // `captureScreenshot timeout after 20000ms — the page main thread is likely blocked`，
+  // 而屏幕上是一张正常画面。这句话当时是**误诊**：对照实验把四种组合都测了一遍
+  // （视图是否在屏幕上 × 主线程是否被脚本占死）：
+  //
+  //   屏幕上是这一页 + 空闲   ：capturePage 20ms ✓   CDP 61ms ✓
+  //   被兄弟视图盖住  + 空闲   ：capturePage 9ms ✓    CDP >12s ✗   ← 主线程没忙，CDP 照样不返回
+  //   屏幕上是这一页 + 占死   ：capturePage >20s ✗    CDP 要等主线程松手才答（e2e S1 实测）
+  //   被兄弟视图盖住  + 占死  ：capturePage 18ms ✓   CDP >12s ✗
+  //
+  // CDP 的 Page.captureScreenshot 带 fromSurface:true 也只改变"像素从哪来"，**接单仍在
+  // 渲染进程主线程**（探针曾记过"这一格 CDP 3.9s ✓"，e2e 复现不了 —— 那次并发里混了
+  // 别的请求，数值作废，以 e2e/shot_ws.cjs 的 S1 为准）。所以它对两种情况都答不出来：
+  // 被兄弟视图整个盖住（永远等不到帧，页面空不空闲都一样）、以及屏幕上那一页主线程被
+  // 脚本占死（要等它松手）。而 capturePage() 拷的是那张视图自己的合成表面，被盖住时
+  // 十几毫秒就回，而且是**活帧**（每 300ms 换底色的页面，隔 1.5s 再取颜色跟着变）。
+  // 所以档位由"它是不是屏幕上那一张"决定，另一档兜底 —— 而不是像以前那样只有一条路，
+  // 把所有失败都推给"页面主线程卡住"。
+  //
+  // 现场那句超时出在第①格：agent 截的是**后台**标签页（百度、dumate），那一格现在由
+  // surface 档秒级应答。第②格（屏幕上 + 主线程占死）没有秒级答案，改善的是"不再谎称
+  // 截不到"（旧的 20s deadline 比页面松手还慢，等于永远拿不到图）和"等待有上界"。
+  //
+  // clip / fullPage / webp 只能由 CDP 应答（要视口外的布局、文档坐标或额外编码器），
+  // 见 screenshot_opts.canUseSurface —— 那一发就真的会等，这是语义要求不是缺陷。
   async screenshot(tabId, opts = {}) {
     const tid = tabId !== undefined ? tabId : this.activeTab;
     const view = this._getView(tid);
@@ -1529,24 +1553,166 @@ class PageManager {
     if (!norm.ok) return { ok: false, error: norm.error, tab: tid };
     const o = norm.opts;
 
-    let meta = {};
+    // auto 的档位顺序由 _isCoveredByOtherTab 决定；显式 source 就是点名单一档
+    // （不兜底：调用方要"只有 surface"或"只有 CDP"时，替他换档等于给一张他没要的图）。
+    const covered = this._isCoveredByOtherTab(tid);
+    const tiers = o.source === 'surface' ? ['surface']
+      : o.source === 'cdp' ? ['cdp']
+        : (covered ? ['surface', 'cdp'] : ['cdp', 'surface']);
+
+    let frame = null;
+    let lastError = null;
+    for (const tier of tiers) {
+      if (tier === 'surface') {
+        if (!screenshotOpts.canUseSurface(o)) {
+          lastError = 'no-surface-frame — fullPage/clip/webp cannot be answered from the composited surface';
+          continue;
+        }
+        frame = await this._shotFromSurface(view, o);
+        if (frame) break;
+        lastError = 'no-surface-frame — this view has no readable surface (it has never painted, or the window is gone)';
+        continue;
+      }
+      const cdp = await this._shotFromCdp(tid, view, o);
+      if (!cdp.error) { frame = cdp; break; }
+      lastError = cdp.error;
+    }
+    if (!frame) return { ok: false, tab: tid, error: lastError || 'screenshot failed' };
+
+    const imgData = frame.data;
+
+    // 一次 evaluate 拿两样东西：可见密码框（截图不脱敏，泄密了得让调用方
+    // 知道）和 devicePixelRatio —— 后者因为 CDP 的 clip 是 CSS 像素而输出
+    // 是设备像素：调用方按 getBoundingClientRect 传 500 宽，Retina 上会
+    // 拿到 1000 像素的图。没有这个比值，"zoom 拍元素"的调用方无法把图上的
+    // 坐标换算回页面坐标。
+    //
+    // surface 档绝不为了这两个数去等主线程（图已经到手了）：1.5s 探不到就
+    // 如实标 password_probe=skipped，dpr 改用"位图宽 / 视图宽"算出来。
+    //
+    // **CDP 档同样要限时**，而且理由更硬：这一档偏偏能在"屏幕上是这一页 + 主线程
+    // 被占死"时给出帧（实测 3.9s），可紧随其后的这一次 evaluate 排的还是主线程的
+    // 队（同一条命令实测 20s 不返回）。不限时的话，一张已经到手的好帧会因为
+    // "顺便问问有没有密码框"而永久挂住 —— 那比原来的超时更糟。
+    // 探测本来就是附属信息：探不到就如实说探不到，图照给。
+    const probeBudgetMs = frame.source === 'surface' ? 1500 : 3000;
+    let hasPwd = false;
+    let dpr = null;
+    let probeSkipped = false;
+    try {
+      const probe = this.evaluate(
+        `(function(){var els=document.querySelectorAll('input[type=password]');` +
+        `var pwd=false;for(var i=0;i<els.length;i++){var r=els[i].getBoundingClientRect();` +
+        `if(r.width>0&&r.height>0)pwd=true;}return JSON.stringify({pwd:pwd,dpr:window.devicePixelRatio||1});})()`, tid);
+      const p = await withDeadline(probe, probeBudgetMs, 'shot_probe');
+      let parsed = null;
+      try { parsed = typeof p === 'string' ? JSON.parse(p) : p; } catch (_) { /* evaluate 可能返回 undefined */ }
+      if (parsed) { hasPwd = parsed.pwd === true; dpr = Number(parsed.dpr) || null; }
+    } catch (_) {
+      // 探测失败（含超时）不影响截图交付，但必须承认"密码框这件事没查成" ——
+      // 不能把"没探到"当成"没有密码框"。
+      probeSkipped = true;
+    }
+    if (dpr === null && typeof frame.meta.devicePixelRatio === 'number') dpr = frame.meta.devicePixelRatio;
+
+    const summary = screenshotOpts.describeShot({
+      format: o.format,
+      mime: 'image/' + (o.format === 'jpeg' ? 'jpeg' : o.format),
+      bytes: Buffer.byteLength(imgData, 'base64'),
+      width: frame.meta.width,
+      height: frame.meta.height,
+      url: (this._getView(tid) && this._getView(tid).webContents.getURL()) || undefined,
+      hasVisiblePasswordInput: hasPwd,
+      passwordProbe: probeSkipped ? 'skipped' : undefined,
+      devicePixelRatio: dpr,
+      source: frame.source,
+    });
+    const mime = summary.mime;
+    // path：直接把图写到磁盘。写失败要如实报错（不是"截图成功但没文件"）。
+    let filePath = null;
+    if (o.path) {
+      try {
+        fs.mkdirSync(path.dirname(o.path), { recursive: true });
+        fs.writeFileSync(o.path, Buffer.from(imgData, 'base64'));
+        filePath = o.path;
+      } catch (e) {
+        return { ok: false, tab: tid, error: 'screenshot captured but writing to ' + o.path + ' failed: ' + ((e && e.message) || e), ...summary };
+      }
+    }
+    // 未知参数不再静默丢弃：调用方传了什么没被用上，回执里点名。
+    //
+    // `tab` 必须排除：它是**路由参数**（已经用来选中 tid 了），不是截图选项。
+    // 此前调用方照文档传 `{tab, format}` 会收到 `ignored_params:['tab']`，
+    // 看起来像"你传的 tab 被忽略了" —— 而它恰恰是唯一生效的那个。
+    // 同理 `heal` / `node_id` 这类"调用层参数"也不该出现在这里。
+    const known = { format: 1, quality: 1, fullPage: 1, clip: 1, path: 1, source: 1 };
+    const ROUTING_ONLY = { tab: 1 };
+    const ignored = Object.keys(opts || {})
+      .filter((k) => !known[k] && !ROUTING_ONLY[k]);
+    return {
+      ok: true,
+      tab: tid,
+      // data 是 base64 裸数据（不带 data: 前缀）—— 调用方按需自己拼。
+      data: imgData,
+      mime,
+      ...(filePath ? { path: filePath } : {}),
+      ...(ignored.length ? { ignored_params: ignored } : {}),
+      ...summary,
+    };
+  }
+
+  // surface 档：capturePage() 把视图已经合成好的那一帧拷一份就走 —— 不发 CDP
+  // 命令、不要求页面重新配合出一帧，所以"主线程被页面脚本占死"这一类页面照样截得到。
+  //
+  // 返回 null 只表示"这一档没东西"（视图从未画过、窗口被遮挡时 Electron 给空图、
+  // 或超时），由调用方决定回落哪一档。绝不把 null 当成"页面是白的"——
+  // 这条和 paintCheck 同一个判据（见 SPEC「取帧两条铁律」）。
+  async _shotFromSurface(view, o) {
+    const wc = view && view.webContents;
+    if (!wc || wc.isDestroyed()) return null;
+    let img = null;
+    try {
+      img = await withDeadline(wc.capturePage(), this._surfaceShotBudgetMs(), 'capturePage');
+    } catch (_) {
+      return null;
+    }
+    if (!img || typeof img.isEmpty !== 'function' || img.isEmpty()) return null;
+    let buf = null;
+    try {
+      buf = o.format === 'jpeg'
+        ? img.toJPEG(typeof o.quality === 'number' ? o.quality : 85)
+        : img.toPNG();
+    } catch (_) {
+      return null;
+    }
+    if (!buf || !buf.length) return null;
+    let px = { width: 0, height: 0 };
+    try { px = img.getSize() || px; } catch (_) { /* 尺寸读不到就不报 dpr，图照给 */ }
+    return {
+      source: 'surface',
+      data: buf.toString('base64'),
+      meta: screenshotOpts.surfaceMeta(px, view.getBounds()),
+    };
+  }
+
+  // CDP 档。整段是原来唯一那条路，搬进档位而已：截图命令 deadline 20s，
+  // `clip.scale < 1` 按 scale=1 抓完本地缩。
+  //
+  // 顺序是这条档的要点：**先截图，后问元数据**。Page.getLayoutMetrics 和
+  // Runtime.evaluate 一样是"要渲染进程主线程接单"的命令，而调用方要的是那张图；
+  // 主线程慢（长任务、正在重排，未必占死）时，先问指标就是让截图多排一轮它用不上的队
+  // —— 旧实现这里给的是 10s，实测把整发顶到 20s deadline 上（PM-29 钉住顺序）。
+  // 指标问不到也不影响交付：尺寸/dpr 本来就有几何答案（视图边界 + 位图尺寸）。
+  async _shotFromCdp(tid, view, o) {
     try {
       this._ensureCdp(tid, view, 'Page');
     } catch (e) {
-      return { ok: false, error: 'cdp-unavailable: ' + e.message, tab: tid };
+      return { error: 'cdp-unavailable: ' + e.message };
     }
-    const dbg = view.webContents.debugger;
-    if (!dbg) return { ok: false, error: 'cdp-unavailable', tab: tid };
-
+    const dbg = view.webContents && view.webContents.debugger;
+    if (!dbg) return { error: 'cdp-unavailable' };
+    let meta = {};
     try {
-      // 视口尺寸：clip 缺省时用于回执，也让调用方知道拍的到底是哪块。
-      // 失败不致命（老页面没布局完也会返回 0），降级为 null。
-      try {
-        const lm = await withDeadline(dbg.sendCommand('Page.getLayoutMetrics'), 10000, 'getLayoutMetrics');
-        const vp = lm && lm.cssLayoutViewport ? lm.cssLayoutViewport : (lm && lm.layoutViewport) || null;
-        if (vp) meta = { width: Math.round(vp.clientWidth || 0), height: Math.round(vp.clientHeight || 0) };
-      } catch (_) { /* 布局指标拿不到就算了，截图本身才是主目标 */ }
-
       const params = {
         format: o.format,
         fromSurface: true,
@@ -1570,7 +1736,7 @@ class PageManager {
         20000, 'captureScreenshot'
       );
       if (!shot || typeof shot.data !== 'string') {
-        return { ok: false, error: 'empty screenshot result', tab: tid };
+        return { error: 'empty screenshot result' };
       }
       // 需要缩小就自己做（见上：不把缩放交给合成器）。
       let imgData = shot.data;
@@ -1587,72 +1753,81 @@ class PageManager {
           }
         } catch (_) { /* 缩失败就用原图（宁可图大，不要空图） */ }
       }
-
-      const mime = 'image/' + (o.format === 'jpeg' ? 'jpeg' : o.format);
-      // 一次 evaluate 拿两样东西：可见密码框（截图不脱敏，泄密了得让调用方
-      // 知道）和 devicePixelRatio —— 后者因为 CDP 的 clip 是 CSS 像素而输出
-      // 是设备像素：调用方按 getBoundingClientRect 传 500 宽，Retina 上会
-      // 拿到 1000 像素的图。没有这个比值，"zoom 拍元素"的调用方无法把图上的
-      // 坐标换算回页面坐标。
-      let hasPwd = false;
-      let dpr = null;
+      // 回执里的尺寸/dpr：**截图拿到之后**再问，而且只给很短的预算。
+      // Page.getLayoutMetrics 和 Runtime.evaluate 一样要排渲染进程主线程的队，
+      // 旧实现把它放在截图前面、还给到 10s —— 页面主线程慢的时候，一张本可以早点
+      // 交出去的图要先空等一整个指标预算（PM-29 钉住这个顺序）。
+      // 问不到就用几何算：视图边界 = CSS 尺寸，位图宽 / 视图宽 = dpr。
+      const geo = screenshotOpts.surfaceMeta(this._shotPixelSize(imgData), view.getBounds());
       try {
-        const p = await this.evaluate(
-          `(function(){var els=document.querySelectorAll('input[type=password]');` +
-          `var pwd=false;for(var i=0;i<els.length;i++){var r=els[i].getBoundingClientRect();` +
-          `if(r.width>0&&r.height>0)pwd=true;}return JSON.stringify({pwd:pwd,dpr:window.devicePixelRatio||1});})()`, tid);
-        let parsed = null;
-        try { parsed = typeof p === 'string' ? JSON.parse(p) : p; } catch (_) { /* evaluate 可能返回 undefined */ }
-        if (parsed) { hasPwd = parsed.pwd === true; dpr = Number(parsed.dpr) || null; }
-      } catch (_) { /* 探测失败不影响截图交付 */ }
-
-      const summary = screenshotOpts.describeShot({
-        format: o.format,
-        mime,
-        bytes: Buffer.byteLength(imgData, 'base64'),
-        width: meta.width,
-        height: meta.height,
-        url: (this._getView(tid) && this._getView(tid).webContents.getURL()) || undefined,
-        hasVisiblePasswordInput: hasPwd,
-        devicePixelRatio: dpr,
-      });
-      // path：直接把图写到磁盘。写失败要如实报错（不是"截图成功但没文件"）。
-      let filePath = null;
-      if (o.path) {
-        try {
-          fs.mkdirSync(path.dirname(o.path), { recursive: true });
-          fs.writeFileSync(o.path, Buffer.from(imgData, 'base64'));
-          filePath = o.path;
-        } catch (e) {
-          return { ok: false, tab: tid, error: 'screenshot captured but writing to ' + o.path + ' failed: ' + ((e && e.message) || e), ...summary };
+        const lm = await withDeadline(dbg.sendCommand('Page.getLayoutMetrics'), this._shotMetricsBudgetMs(), 'getLayoutMetrics');
+        const vp = lm && lm.cssLayoutViewport ? lm.cssLayoutViewport : (lm && lm.layoutViewport) || null;
+        if (vp && vp.clientWidth) {
+          meta = { width: Math.round(vp.clientWidth), height: Math.round(vp.clientHeight || 0) };
+          // 页面自己缩放过（Ctrl+/-）时 CSS 视口 ≠ 视图边界，dpr 仍按"位图/边界"算。
+          if (typeof geo.devicePixelRatio === 'number') meta.devicePixelRatio = geo.devicePixelRatio;
         }
-      }
-      // 未知参数不再静默丢弃：调用方传了什么没被用上，回执里点名。
-      //
-      // `tab` 必须排除：它是**路由参数**（已经用来选中 tid 了），不是截图选项。
-      // 此前调用方照文档传 `{tab, format}` 会收到 `ignored_params:['tab']`，
-      // 看起来像"你传的 tab 被忽略了" —— 而它恰恰是唯一生效的那个。
-      // 同理 `heal` / `node_id` 这类"调用层参数"也不该出现在这里。
-      const known = { format: 1, quality: 1, fullPage: 1, clip: 1, path: 1 };
-      const ROUTING_ONLY = { tab: 1 };
-      const ignored = Object.keys(opts || {})
-        .filter((k) => !known[k] && !ROUTING_ONLY[k]);
-      return {
-        ok: true,
-        tab: tid,
-        // data 是 base64 裸数据（不带 data: 前缀）—— 调用方按需自己拼。
-        data: imgData,
-        mime,
-        ...(filePath ? { path: filePath } : {}),
-        ...(ignored.length ? { ignored_params: ignored } : {}),
-        ...summary,
-      };
+      } catch (_) { /* 布局指标拿不到就算了，截图本身才是主目标 */ }
+      if (!meta.width) meta = geo;
+
+      return { source: 'cdp', data: imgData, meta };
     } catch (e) {
       if (e && e.__deadline) {
-        return { ok: false, error: e.message + ' — the page main thread is likely blocked', tab: tid };
+        // 走到这里说明这一页**是**屏幕上那一张（被盖住的页面由 surface 档先答，见
+        // _isCoveredByOtherTab）。那种情况下等不到帧才是"主线程被页面占着"。
+        // 旧文案对所有失败都断言这一句，而现场其实是被兄弟视图盖住 —— 误诊过一次。
+        return { error: e.message + ' — the page main thread is likely blocked (this tab is the one on screen; covered tabs go through the surface tier)' };
       }
-      return { ok: false, error: e.message, tab: tid };
+      return { error: e.message };
     }
+  }
+
+  // surface 档的预算（毫秒）。正常情况下这一档是几十毫秒的事（拷一张已有的位图），
+  // 给到 5s 是为了"视图刚被遮挡/正在销毁"这类会迟到的情况；超了就交给另一档。
+  // env 可调是为了在 e2e 里造"这一档拿不到 → 落另一档"的对照组。
+  _surfaceShotBudgetMs() {
+    const v = Number(process.env.AI_BROWSER_SURFACE_SHOT_MS);
+    return Number.isFinite(v) && v >= 100 ? v : 5000;
+  }
+
+  // 回执里的"布局指标"探测预算（毫秒）。它只是附属信息（CSS 视口尺寸），
+  // 拿不到就用视图边界 + 位图尺寸算 —— 所以宁可短，不要让它把整发拖长。
+  _shotMetricsBudgetMs() {
+    const v = Number(process.env.AI_BROWSER_SHOT_METRICS_MS);
+    return Number.isFinite(v) && v >= 100 ? v : 1500;
+  }
+
+  /** 位图（base64）的设备像素尺寸；解不开返回 0×0，调用方据此放弃 dpr 而不是报错。 */
+  _shotPixelSize(b64) {
+    try {
+      const img = nativeImage.createFromBuffer(Buffer.from(String(b64), 'base64'));
+      if (!img || img.isEmpty()) return { width: 0, height: 0 };
+      return img.getSize() || { width: 0, height: 0 };
+    } catch (_) {
+      return { width: 0, height: 0 };
+    }
+  }
+
+  /**
+   * 这个标签页现在**不是**屏幕上的那一张（被同窗口另一张视图整个盖住）。
+   *
+   * 这是取帧档位的分水岭，判据全部来自实测（见 screenshot() 上面那张表）：
+   * 被盖住的视图 CDP 永远等不到帧，capturePage 却能立刻给出它自己的活帧。
+   *
+   * 窗口不在屏幕上的时候（hide / minimize）**不算**被盖住：那时没有"兄弟视图压在
+   * 它上面"这回事，而实测这种状态下 CDP 照样答得出来（e2e/background_ws 的 B1/B3
+   * 就是这么过的），所以维持旧的 CDP 优先，不改无头路径的行为。
+   * 问不到窗口可见性也按"没被盖住"办 —— 判据不确定时保持既有路径，不搞意外。
+   */
+  _isCoveredByOtherTab(tid) {
+    if (!this.window || tid === null || tid === undefined) return false;
+    if (tid === this.activeTab) return false;
+    let visible = null;
+    try {
+      if (typeof this.window.isVisible === 'function') visible = !!this.window.isVisible();
+      if (typeof this.window.isMinimized === 'function' && this.window.isMinimized()) visible = false;
+    } catch (_) { visible = null; }
+    return visible === true;
   }
 
   // AX probe read layer (P0). Additive — the default getTree path is untouched.

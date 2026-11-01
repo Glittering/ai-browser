@@ -298,6 +298,39 @@ blank-with-dom / view-dead / no-frame`；`blank-*` 与 `view-dead` 算缺陷（�
 缩，输出尺寸与语义不变。**`clip.scale > 1` 仍交给 Chromium** —— 本地放大得不到像素，
 糊掉的放大图比"偶尔一帧"更糟；且它只在调用方显式要放大值时发生，不在任何自动路径上。
 
+### 截图取帧的两种档位（2026-11-02）
+
+事故：agent 在百度 / dumate 的**后台**标签页上截图，各拿到一句
+`captureScreenshot timeout after 20000ms — the page main thread is likely blocked`，
+而屏幕上是一张正常画面。那句错误文案是**误诊** —— 对照实测四种组合：
+
+| 组合 | `webContents.capturePage()` | CDP `Page.captureScreenshot` |
+| --- | --- | --- |
+| 屏幕上是这一页 + 空闲 | 20ms ✓ | 61ms ✓ |
+| 被兄弟视图盖住 + 空闲 | 9ms ✓ | >12s ✗（页面没忙，照样不返回） |
+| 屏幕上是这一页 + 主线程占死 | >20s ✗ | 等主线程松手才答（e2e S1 实测 13.4s） |
+| 被兄弟视图盖住 + 主线程占死 | 18ms ✓ | >12s ✗ |
+
+`Page.captureScreenshot` 带 `fromSurface:true` 只改变"像素从哪来"，**接单仍然在渲染进程
+主线程**；它答不出两种情况：视图被同窗口另一张视图整个盖住（永远等不到帧）、屏幕上那一页
+的主线程被脚本占死（要等松手）。`capturePage()` 拷的是那张视图自己的合成表面，被盖住时
+十几毫秒就回，而且是**活帧**（每 300ms 换底色的页面，隔 1.5s 再取颜色跟着变）。
+
+于是规则是：
+
+1. **档位由「它是不是屏幕上那一张」决定**（`_isCoveredByOtherTab`：窗口可见 且 不是
+   activeTab）：被盖住 → `surface` 优先、CDP 兜底；否则 CDP 优先、surface 兜底。
+   问不到窗口可见性就维持 CDP 优先（无头/隐藏窗口路径行为不变，`e2e/background_ws` 钉着）。
+2. **`clip` / `fullPage` / `webp` 只能由 CDP 应答**（要视口外的布局、文档坐标或额外编码器），
+   见 `screenshot_opts.canUseSurface` —— 那一发就真的会继续等，这是语义要求不是缺陷。
+3. **点名单一档不许偷偷换档**：`source=surface` 拿不到位图就如实报 `no-surface-frame`，
+   `source=cdp` 等不到帧就报超时。换档等于给调用方一张他没要的图。回执带 `source` 字段。
+4. **附属请求不许把已经到手的帧拖成挂住**：探密码框 / 读 dpr 的那次 `evaluate` 和
+   `Page.getLayoutMetrics` 都要排主线程的队，所以两者都有短预算（1.5s / 3s，
+   `AI_BROWSER_SURFACE_SHOT_MS`、`AI_BROWSER_SHOT_METRICS_MS` 可调），并且**放在截图之后**。
+   探不到就如实标 `password_probe=skipped` + "这一帧可能含已输入的密码"，尺寸/dpr 改用
+   几何算（视图边界 = CSS 尺寸，位图宽 / 视图宽 = dpr）。没探成 ≠ 没有密码框。
+
 自救阶梯**有上限**：`repaint`（soft：只 `invalidate()`）→ `reload`（丢页面临时状态，
 所以排第二）→ `give-up`（落 `error.jsonl` 的 `paint_blank` + 广播，不再折腾）。
 到了最后一步才允许 `hard` 重绘（1px 微调，见「三条重绘铁律」）。
@@ -614,6 +647,9 @@ MCP 层（`src/main/mcp_server.js` 的 tool handler）必须把这个执行期�
 
 另外每个标签页**从出生起** `setBackgroundThrottling(false)`（以前只在 `setActive`
 里设，于是"从没被显示过"的标签页永远带着节流：定时器拉长到 1s、rAF 停摆）。
+
+对称的另一半在**窗口可见**时：被兄弟视图整个盖住的那一张，CDP 截图同样永远等不到帧
+（不是 0 字节，是不返回），得走 `capturePage()` —— 判据与档位见上面「截图取帧的两种档位」。
 
 ### 3. 窗口不可见时不做白屏判定
 

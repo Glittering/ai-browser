@@ -800,7 +800,10 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null, 
             // （浮层/canvas/遮挡/渲染错位）就完全不可见 —— 而它们正是操作
             // 失败的主因。失败时"先看截图"从此有工具可依。
             // 参数：{ tab, format: 'png'|'jpeg'|'webp', quality: 0-100,
-            //         fullPage: bool, clip: {x,y,width,height,scale} }
+            //         fullPage: bool, clip: {x,y,width,height,scale}, path,
+            //         source: 'auto'|'surface'|'cdp' }
+            // 取帧两档（surface 优先，见 screenshot_opts.cjs）：回执里的 source
+            // 说明这一张图是哪一档来的 —— 主线程被占死的页面也能有图，就靠这个。
             const result = await pageManager.screenshot(tabId, params);
             send({ jsonrpc: '2.0', id, result });
             break;

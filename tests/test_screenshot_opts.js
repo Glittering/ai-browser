@@ -5,7 +5,10 @@ import { describe, it, expect } from 'vitest';
 import {
   normalizeScreenshotOpts,
   describeShot,
+  canUseSurface,
+  surfaceMeta,
   FORMATS,
+  SHOT_SOURCES,
   MAX_DATA_URL_CHARS,
 } from '../src/shared/screenshot_opts.cjs';
 
@@ -154,5 +157,81 @@ describe('normalizeScreenshotOpts — path (write to disk)', () => {
     expect(normalizeScreenshotOpts({ path: 123 }).ok).toBe(false);
     expect(normalizeScreenshotOpts({ path: '   ' }).ok).toBe(false);
     expect(normalizeScreenshotOpts({ path: 123 }).error).toContain('path');
+  });
+});
+
+// 取帧档位（2026-11-02）。事故：百度 / dumate 的 tab 上 ui.screenshot 报
+// `captureScreenshot timeout after 20000ms`，而屏幕上是一帧正常画面 ——
+// CDP 那条命令要在渲染进程主线程排队，页面脚本把主线程占死就没人接单。
+// 位图本身在合成器手里，capturePage() 直接拷它就绕开排队。
+describe('canUseSurface — 哪些请求能走 surface 档', () => {
+  it('S-SRC-1: 整视口 png/jpeg 走 surface（这是绝大多数截图，也是超时的那一类）', () => {
+    expect(canUseSurface({ format: 'png', fullPage: false })).toBe(true);
+    expect(canUseSurface({ format: 'jpeg', quality: 85 })).toBe(true);
+    expect(canUseSurface({})).toBe(true);
+  });
+
+  it('S-SRC-2: fullPage 不许走 surface —— captureBeyondViewport 要渲染进程给视口外的布局', () => {
+    expect(canUseSurface({ fullPage: true })).toBe(false);
+  });
+
+  it('S-SRC-3: clip 不许走 surface —— CDP 的 clip 是文档坐标，位图只有当前视口那一帧，' +
+    '本地裁剪会把两个坐标系混成一个（宁可慢，不要静默给错区域）', () => {
+    expect(canUseSurface({ clip: { x: 0, y: 400, width: 300, height: 200, scale: 1 } })).toBe(false);
+  });
+
+  it('S-SRC-4: webp 不许走 surface —— nativeImage 只有 toPNG/toJPEG', () => {
+    expect(canUseSurface({ format: 'webp' })).toBe(false);
+  });
+
+  it('S-SRC-5: 坏输入不炸（判据是"能不能走"，不是"参数合不合法"，合法性由 normalize 管）', () => {
+    expect(canUseSurface(undefined)).toBe(true);
+    expect(canUseSurface(null)).toBe(true);
+    expect(canUseSurface('clip')).toBe(true);
+  });
+
+  it('S-SRC-6: source 参数只认 auto/surface/cdp，别的值当场给可读错误', () => {
+    expect(normalizeScreenshotOpts({}).opts.source).toBe('auto');
+    for (const v of SHOT_SOURCES) {
+      expect(normalizeScreenshotOpts({ source: v }).opts.source).toBe(v);
+    }
+    expect(normalizeScreenshotOpts({ source: 'offscreen' }).ok).toBe(false);
+    expect(normalizeScreenshotOpts({ source: 1 }).error).toContain('auto/surface/cdp');
+    // null / undefined 是"未提供"，不是"传错类型"
+    expect(normalizeScreenshotOpts({ source: null }).opts.source).toBe('auto');
+  });
+});
+
+describe('surfaceMeta — surface 档怎么给出 CSS 尺寸与 dpr', () => {
+  it('S-SRC-7: 位图是设备像素、视图 bounds 是 CSS 像素，比值就是 dpr', () => {
+    expect(surfaceMeta({ width: 2528, height: 1322 }, { width: 1264, height: 661 }))
+      .toEqual({ width: 1264, height: 661, devicePixelRatio: 2 });
+  });
+
+  it('S-SRC-8: bounds 不可用给空对象，回执退化成 width/height=null —— 不许瞎报一个尺寸', () => {
+    expect(surfaceMeta({ width: 100, height: 50 }, null)).toEqual({});
+    expect(surfaceMeta({ width: 100 }, { width: 0, height: 0 })).toEqual({});
+    expect(surfaceMeta({}, { width: 1264, height: 661 })).toEqual({ width: 1264, height: 661 });
+  });
+
+  it('S-SRC-9: 非整数 dpr 保留三位（1.5 倍屏常见），不四舍五入成 2', () => {
+    expect(surfaceMeta({ width: 1896 }, { width: 1264, height: 661 }).devicePixelRatio).toBe(1.5);
+  });
+});
+
+describe('describeShot — 回执要交代帧是哪一档来的', () => {
+  it('S-SRC-10: source 原样带出（调用方要知道这张图是不是"屏幕上的那一帧"）', () => {
+    expect(describeShot({ source: 'surface' }).source).toBe('surface');
+    expect(describeShot({ source: 'cdp' }).source).toBe('cdp');
+    expect(describeShot({}).source).toBeUndefined();
+  });
+
+  it('S-SRC-11: surface 档探不到密码框时，warning 要说"这件事没查成"，不能当成"没有密码框"', () => {
+    const skipped = describeShot({ passwordProbe: 'skipped' });
+    expect(skipped.password_probe).toBe('skipped');
+    expect(skipped.warning).toContain('may contain typed secrets');
+    // 探到了就照旧：只有真的有密码框才警告
+    expect(describeShot({ hasVisiblePasswordInput: true }).warning).toContain('password input');
+    expect(describeShot({}).warning).toBeUndefined();
   });
 });

@@ -203,6 +203,11 @@ export const MCP_TOOLS = [
             height: { type: 'number' },
             scale: { type: 'number', description: 'Device scale factor, 0-4. Default 1.' }
           }
+        },
+        source: {
+          type: 'string',
+          enum: ['auto', 'surface', 'cdp'],
+          description: 'auto|surface|cdp; receipt echoes source.',
         }
       }
     }

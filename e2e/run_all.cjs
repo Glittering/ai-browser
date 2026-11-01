@@ -39,6 +39,10 @@ const SUITES = [
   //   paint   —— 白屏自检（判定 / 阶梯 / 不误报）
   //   layout  —— 几何三等式 + 不抽搐（G4/G5）
   'dialog', 'wrapper', 'paint', 'layout',
+  // shot —— 截图取帧档位（surface 优先，CDP 兜底）。2026-11-02 的现场是"屏幕上
+  // 一帧正常画面，工具说 captureScreenshot timeout after 20000ms"：只有一档取帧
+  // 路径 = 只有一个失败面。它自带 busy/normal fixture，不依赖外网。
+  'shot',
   // download —— 「点下载」到底发生了什么：可显示的媒体文档不许变成下载、
   //             不可显示的不许把标签页留在"正在打开…"上（2026-10-27 证书事故）。
   'download',

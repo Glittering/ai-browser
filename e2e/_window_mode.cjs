@@ -32,7 +32,11 @@
 // 的时候那个动画页几乎是静止的，于是测出来的是"空环境里没有噪声"，不是"有噪声时
 // 我们没被带偏"（本项目 2026-10-14 踩过完全一样的坑：关掉噪声源后 41/41 全过）。
 // 可见模式走 showInactive：窗口出现但不夺焦点、不把用户当前 app 顶下去。
-const VISIBLE = new Set(['focus', 'flicker', 'layout', 'paint', 'nav', 'canvas']);
+//
+// shot 也在可见名单里：它测的是"这一张视图是不是屏幕上那一张"（截图档位由
+// page_manager._isCoveredByOtherTab 决定）。窗口不出来的时候**没有**屏幕上那一张，
+// 两种档位对每个视图都等价可得 —— 隐藏跑只会测到"顺序退回旧行为"，测不到修复本身。
+const VISIBLE = new Set(['focus', 'flicker', 'layout', 'paint', 'nav', 'canvas', 'shot']);
 
 const FORCE_VISIBLE = /^(1|true|yes|on)$/i.test(String(process.env.AI_BROWSER_E2E_VISIBLE || ''));
 // 反过来也留一个逃生口：想确认"隐藏下到底还差什么"时，强制全部隐藏。

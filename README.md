@@ -220,7 +220,7 @@ small surface, since every tool schema is injected into your agent's context on 
 | `browse_tabs` | Tabs: `list` / `new` / `close` / `switch` / `window`. `switch` = default; add `show:true`. `new` never steals the view unless `show:true`. |
 | `browse_network` | Chrome-DevTools-style network inspection: `list` (filter by method / URL / status / type), `get` (request + response headers and bodies), `clear`, `configure`. |
 | `browse_auth_state` | Login-state self-check for a tab: are we logged in, or bounced to a login wall. Cheap — no tree is built. |
-| `browse_screenshot` | Diagnostic viewport/element capture (`png`/`jpeg`/`webp`, `clip`, `fullPage`). Not the read path — use it when the tree and the screen disagree. |
+| `browse_screenshot` | Diagnostic viewport/element capture (`png`/`jpeg`/`webp`, `clip`, `fullPage`, `source: auto`/`surface`/`cdp`). Not the read path — use it when the tree and the screen disagree. The receipt says which tier answered. |
 | `browse_errors` | Recent errors the browser recorded (crashes, failed navigations, RPC failures) with hints. Ask here when behaviour doesn't match the docs. |
 | `browse_quit` | Shut the whole browser down and release the process. |
 
