@@ -273,9 +273,9 @@ class PageManager {
     // tabId -> 当前**仍然打开**的对话框（manual 策略下会长期存在）
     this._openDialogs = new Map();
     this._axDiffCache = new Map();  // tabId -> lite interactive snapshot (get_tree {mode:'diff'})
-    this._repaintTimers = new Map();// tabId -> 正在排队/已调度的重绘（合并同一批导航事件）
     // 重绘计数：soft = 只 invalidate；hard = 额外 1px 微调（会重排两次，肉眼可见）。
-    // 高频路径（导航完成/窗口焦点）只许走 soft —— 这条要被回归钉住。
+    // 默认档：窗口 show/restore/focus 走 soft，导航完成/切 tab 干脆不重绘；
+    // 只有 AI_BROWSER_HOT_REPAINT=hard 才把后两者变成 hard（判据见 _hotRepaintHard）。
     this._repaintCount = 0;
     this._hardRepaintCount = 0;
     // === 白屏自检（paint audit）===
@@ -4162,23 +4162,6 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
       wc0.once('did-finish-load', () => { clearTimeout(guard); proceed(); });
     }
 
-    // Force repaint after load — BrowserView content can be loaded but not
-    // painted by the compositor. Remove + re-add forces a full repaint.
-    //
-    // Hook every navigation signal, not just the two load events. Reported
-    // symptom: page HAS navigated to the new view (agent reads the new DOM /
-    // canvas through the tree and evaluate) but the window keeps showing the
-    // previous one until you click tabs back and forth — clicking a tab is
-    // exactly what calls removeBrowserView + addBrowserView + setBounds, i.e.
-    // it is the only thing that forces the compositor to repaint.
-    //
-    //   did-navigate-in-page — SPA route changes (history.pushState / hash).
-    //     Fires on every router push, which is how canvas-style apps swap views.
-    //   did-frame-finish-load — a sub-frame finished loading. ComfyUI-style
-    //     editors boot inside an iframe long after the top document finished,
-    //     so did-finish-load has already fired and repainted an empty shell.
-    //   did-navigate — any cross-document navigation, including programmatic
-    //     location.href assignment the app does on its own.
     // ⚠️ 导航事件**不挂任何重绘**（2026-10-25 修）。
     //
     // 历史：这条钩子是为了对付"页面已导航但窗口还显示旧画面"，手段是
@@ -4276,29 +4259,6 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
         if (this._failureGuard) this._failureGuard.delete(tabId);
       });
     });
-  }
-
-  /**
-   * Attach compositor-repaint hooks to a tab's webContents.
-   * Idempotent per tab: re-registering would schedule redundant remove/add
-   * cycles, so a WeakSet of hooked views guards it.
-   */
-  /**
-   * 已废弃：以前用来给"后来才导航的 tab"补挂重绘钩子。现在导航事件一律不重绘
-   * （原因见 newTab 里的长注释），这里只留一个空实现，避免调用点报错。
-   */
-  _attachRepaintHooks() {}
-
-  _scheduleRepaint(tabId, delay = 120) {
-    const prev = this._repaintTimers.get(tabId);
-    if (prev) clearTimeout(prev);
-    const t = setTimeout(() => {
-      this._repaintTimers.delete(tabId);
-      const view = this._getView(tabId);
-      if (view) this._forceRepaint(view);
-    }, delay);
-    if (t && typeof t.unref === 'function') t.unref();
-    this._repaintTimers.set(tabId, t);
   }
 
   /**
@@ -4891,21 +4851,18 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
    * the NEW page while the compositor shows the OLD one — so the agent needs an
    * explicit "I know this window looks wrong, redraw it" call rather than a
    * heuristic.
+   *
+   * 这次调用就是全部：没有任何地方给重绘排队（曾经的 `_scheduleRepaint` /
+   * `_repaintTimers` / 回执里的 `was_pending` 一起删了 —— 导航事件不挂重绘之后
+   * 就没有调用方，见 newTab 里那段 2026-10-25 的注释），所以也不存在"浏览器本来
+   * 就排了一次，你不用问"这种状态。要确认重绘真的发生了看 `repaint_count`。
    */
   repaint(tabId, opts = {}) {
     const tid = tabId !== undefined && tabId !== null ? tabId : this.activeTab;
     const view = this._getView(tid);
     if (!view) return { ok: false, error: 'no-such-tab', tab: tid };
-    // Cancel any queued repaint so this one is the last word.
-    const pending = this._repaintTimers.get(tid);
-    // `was_pending` is how a caller tells whether the navigation hooks are
-    // alive: right after a navigation there is normally a queued repaint; once
-    // it has drained, there is none. It also tells the agent "you did not need
-    // to ask, the browser already scheduled one" — i.e. the window was stale
-    // for ~120ms and has since caught up on its own.
-    if (pending) { clearTimeout(pending); this._repaintTimers.delete(tid); }
     const ok = this._forceRepaint(view, { hard: opts && opts.hard === true });
-    return { ok, tab: tid, was_active: tid === this.activeTab, was_pending: !!pending, repaint_count: this._repaintCount || 0 };
+    return { ok, tab: tid, was_active: tid === this.activeTab, repaint_count: this._repaintCount || 0 };
   }
 
   closeTab(tabId) {
@@ -6179,13 +6136,11 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
       try { pending.reject(new Error('PageManager closing')); } catch (e) {}
     }
     this._pendingRequests.clear();
-    // Same reasoning as closeTab: baselines and queued repaints belong to tabs
-    // that are about to stop existing.
+    // Same reasoning as closeTab: baselines belong to tabs that are about to
+    // stop existing.
     this._snapshots.clear();
     this.downloadMonitor.clearAll();
     if (this.mediaInline) this.mediaInline.clearAll();
-    for (const t of this._repaintTimers.values()) clearTimeout(t);
-    this._repaintTimers.clear();
     for (const [id, view] of this.tabs) {
       if (view.webContents && !view.webContents.isDestroyed()) {
         view.webContents.close();

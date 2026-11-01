@@ -48,8 +48,7 @@ const PER_TAB = [
   { field: '_axDiffCache' },
   { field: '_refTrackers' },
   { field: '_failureGuard' },
-  // ---- 重绘 / 白屏自检 / 崩溃自救 ----
-  { field: '_repaintTimers', timers: true },
+  // ---- 白屏自检 / 崩溃自救 ----
   { field: '_paintState' },
   { field: '_paintSteps' },
   { field: '_paintTimers', timers: true },
