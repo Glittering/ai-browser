@@ -384,6 +384,46 @@ describe('加载窗口期的目标地址（_pendingNavUrl / pendingNavUrl）', (
   });
 });
 
+describe('占位页那一发导航的状态机出口（newTab 的 proceed）', () => {
+  // newTab 先加载占位页、等垫片就绪，才发真实导航。这一次的 loading / pending
+  // 由 proceed 自己写、自己清 —— 它比 navigate() 少一个出口，失败一次就永久卡住
+  // （2026-11-02：状态机停在 'loading'，pendingNavUrl 的闸门跟着失效）。
+  const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+  it('PM-19 占位页导航失败：不留在 loading，pending 地址跟着消失', async () => {
+    const tid = pm.newTab('https://target.example/');
+    const wc = pm.tabs.get(tid).webContents;
+    wc.emit('did-finish-load');   // 占位页加载完成 → proceed 发出真实导航
+    await flush();
+
+    expect(pm._tabNavState.get(tid)).toBe('loading');
+    expect(pm.pendingNavUrl(tid)).toBe('https://target.example/');
+
+    wc.emit('did-fail-load', -105, 'ERR_NAME_NOT_RESOLVED', 'https://target.example/', true);
+
+    expect(pm._pendingNavUrl.has(tid), '失败没清 = 地址栏永久挂着一个不会 commit 的目标').toBe(false);
+    expect(pm.pendingNavUrl(tid)).toBe(null);
+    const row = pm.listTabs().find((t) => t.id === tid);
+    expect(row.state, 'state 停在 loading = agent 永远等一个不会来的 ready').not.toBe('loading');
+    expect(row.pending_url).toBeUndefined();
+  });
+
+  it('PM-20 这一发失败不替接管它的导航改状态（settle 的"还是我的吗"判据）', async () => {
+    const tid = pm.newTab('https://target.example/');
+    const wc = pm.tabs.get(tid).webContents;
+    wc.emit('did-finish-load');
+    await flush();
+
+    // 另一次导航接管：pending 换成新目标，state 仍是 loading。
+    // 上一次那发会以 -3 ERR_ABORTED 失败 —— 它的出口不能把别人的状态清掉。
+    pm._pendingNavUrl.set(tid, 'https://other.example/');
+    wc.emit('did-fail-load', -3, 'ERR_ABORTED', 'https://target.example/', true);
+
+    expect(pm.pendingNavUrl(tid), '清了别人的 loading，地址栏就退回旧页').toBe('https://other.example/');
+    expect(pm._tabNavState.get(tid)).toBe('loading');
+  });
+});
+
 describe('热路径重绘档位：默认不抽搐，开了才付 hard 的代价', () => {
   it('PM-16 默认档：导航完成与切标签页都不挂重绘（e2e/layout_ws G4/G5 的单元侧镜像）', async () => {
     const tid = pm.newTab('https://a.example/');

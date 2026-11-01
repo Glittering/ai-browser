@@ -292,6 +292,17 @@ Promise（不返回 null）。`ui.paint_check {tab, heal?}` 供调用方按需�
 顺带补的两处：
 - `ui.navigate` 现在维护 `_tabNavState`（`loading`→`ready`）。此前只有 `new_tab` 的
   占位流程会写它，于是导航期间 `list_tabs` 一直报 `ready`，agent 看到 ready 就去读树。
+- **两条发起导航的路径都有三个出口**：`did-finish-load` / `did-fail-load` / 超时兜底。
+  少后两个的话，一次失败（域名解析不了、连接超时、被我们的错误页接管）就让 state
+  永久停在 `loading`，`pending_url` 跟着挂在一个永远不会 commit 的地址上（2026-11-02
+  补的正是 `new_tab` 占位流程这个洞）。出口写回前先判"这一发还是不是我的导航"——
+  被别的导航接管时那发会带 `-3 ERR_ABORTED` 失败，不许替后来者改状态。
+- 加载窗口期地址栏显示的是**目标**地址（`pageManager.pendingNavUrl(tab)`），而
+  `ui.list_tabs` 的 `url` 仍是已 commit 的旧页：Chromium 的 `getURL()` 只认已提交的，
+  直接把 pending 覆盖上去会让 agent 把"正在请求"当成"已经到达"。目标另走一列
+  `pending_url`，且只在 `state === 'loading'` 时出现。回归：`npm run nav` 的 NV-D3/D4
+  （加载中目标另报一列）与 NV-D5a/b（新建标签页导航失败后必须放开 loading ——
+  前置那条先证明"确实发出过导航并失败"，否则"没卡在 loading"可能只是空过）。
 - 地址栏 `nav:go` 改走 `pageManager.navigate`。原先裸 `loadURL` 没有状态机、没有失败
   错误页、没有完成后重绘 —— 地址栏是最常用的一条路，缺这三样的代价就是"有时白屏"。
 

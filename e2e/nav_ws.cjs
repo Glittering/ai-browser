@@ -433,6 +433,36 @@ async function main() {
     await sleep(1000);
 
     // =====================================================================
+    // NV-D5：占位页那一发导航（new_tab 先加载 loading.html，垫片就绪后才发真实
+    // 导航）失败后不能停在 loading。它当时只有 did-finish-load 一个出口，于是
+    // 一次 ERR_CONNECTION_REFUSED 就把 state 永久钉在 'loading' —— 而
+    // pendingNavUrl() 的闸门正是"仍在 loading"，地址栏于是挂着一个永远不会 commit
+    // 的目标，agent 也一直在等一个不会来的 ready（2026-11-02 修）。
+    // =====================================================================
+    const ntRaw = (await b.call("ui.new_tab", { url: "http://127.0.0.1:9/" }).catch(() => ({}))).result || {};
+    const ntTab = ntRaw.tab != null ? ntRaw.tab : ntRaw.tabId;
+    const rowOf = async (id) => ((((await b.call("ui.list_tabs", {})).result || {}).tabs || [])
+      .find((t) => t.id === id) || {});
+    // 先确认"那一发真实导航确实失败过"：这一页最终落在我们自己的错误页上
+    // （URL 里带 code=ERR_*）。为什么不用"抓到过 state=loading"当前置 ——
+    // 127.0.0.1:9 是 Chromium 的保留端口，连接在几十毫秒内就失败，
+    // loading 窗口比一次轮询还短，那条判据会随机空过（2026-11-02 实测）。
+    let deadRow = await rowOf(ntTab);
+    for (let i = 0; i < 40 && !/error_page/.test(String(deadRow.url || "")); i++) {
+      await sleep(300);
+      deadRow = await rowOf(ntTab);
+    }
+    check("NV-D5a 前置：新建标签页确实发出了真实导航，且它失败了（落在我们自己的错误页）",
+      ntTab != null && /error_page/.test(String(deadRow.url || "")),
+      JSON.stringify({ tab: ntTab, url: deadRow.url }));
+    // 然后是判据：失败之后必须**离开** loading。旧实现只有 did-finish-load 一个
+    // 出口，于是永久停在 loading，pending_url 跟着挂在一个不会 commit 的地址上。
+    check("NV-D5b 新建标签页导航失败：state 放开 loading，且不再带 pending_url",
+      deadRow.state !== "loading" && deadRow.pending_url === undefined,
+      JSON.stringify({ tab: ntTab, state: deadRow.state, url: deadRow.url, pending_url: deadRow.pending_url }));
+    await b.call("ui.close_tab", { tab: ntTab }).catch(() => {});
+
+    // =====================================================================
     console.log("\n[NV-E agent 侧零回归：WS 路径照常工作]");
     // =====================================================================
     const tree = await b.call("ui.get_tree", { tab });

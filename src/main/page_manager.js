@@ -4132,10 +4132,22 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
             // "开错了"区分（见 listTabs 的 state 字段）。
             this._tabNavState.set(tabId, 'loading');
             this._pendingNavUrl.set(tabId, targetUrl);
-            wc0.once('did-finish-load', () => {
-              if (this._tabNavState.get(tabId) === 'loading') this._tabNavState.set(tabId, 'ready');
+            // 三个出口，和 navigate() 对称：did-finish-load / did-fail-load / 超时兜底。
+            // 只有第一个的话，这一发 loadURL 一旦失败（域名不存在、连接超时、被我们
+            // 的错误页接管），state 就永久停在 'loading' —— pendingNavUrl() 的闸门是
+            // "仍在 loading"，跟着一起失效，地址栏于是永远挂着一个不会 commit 的目标
+            // （2026-11-02 补，这是既有状态机的洞，pending_url 只是继承了它）。
+            // 每个出口先确认"这一发还是我的导航"：被别的导航盖掉时（did-fail-load 的
+            // -3 ERR_ABORTED 就是这么来的）不能替后来的那次把状态改掉。
+            const settle = () => {
+              if (this._pendingNavUrl.get(tabId) !== targetUrl) return;
               this._pendingNavUrl.delete(tabId);
-            });
+              if (this._tabNavState.get(tabId) === 'loading') this._tabNavState.set(tabId, 'ready');
+            };
+            wc0.once('did-finish-load', settle);
+            wc0.once('did-fail-load', settle);
+            const fallback = setTimeout(settle, 20000);
+            if (fallback.unref) fallback.unref();
             wc0.loadURL(targetUrl).catch(() => {});
           } else {
             // 无目标 URL 的占位 tab（window.open("") 的老站模式）：它本来就
