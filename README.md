@@ -49,6 +49,13 @@ is a conversation between the agent and the user, not a browser API.
 > Do not expose port 9223 beyond loopback.
 > (`AI_BROWSER_WS_ALLOW_ORIGIN=1` disables the check — debug only, it re-opens the page → browser path.)
 
+> **Sandbox is off by default, deliberately.** Chromium's OS sandbox cannot initialise in restricted
+> shells (IDE terminals, some CI), where it fails with `sandbox initialization failed: Operation not
+> permitted` and the app exits **before any of our code runs** — so there is no error to report, just a
+> silent quit. `AI_BROWSER_SANDBOX=1` turns it on; if the app then quits instantly with no output at
+> all, that's this — unset the variable. Renderers are still isolated from the page either way
+> (`contextIsolation:true`, `nodeIntegration:false`); this switch is about the OS layer under them.
+
 ---
 
 ## Install

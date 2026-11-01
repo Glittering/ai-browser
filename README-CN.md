@@ -67,6 +67,14 @@ macOS 用户也可以直接用打包好的 `.dmg`（Release 里），不用装 N
 | `browse_network` | 像 Chrome Network 面板一样查请求（含响应体、敏感头自动脱敏） |
 
 还有 WebSocket JSON-RPC 原生接口（`ws://localhost:9223`，方法 `ui.*`），不想走 MCP 也可以用。
+握手带 `Origin` 的连接会被拒（浏览器必发、脚本不发），所以网页驱动不了它。
+
+> **沙箱默认关闭，是有意的。** 受限 shell（IDE 终端、部分 CI）里 Chromium 的 OS 沙箱起不来，
+> 报 `sandbox initialization failed: Operation not permitted` 后**在我们的代码跑起来之前**就退出 ——
+> 于是你只会看到一个静默的启动失败，没有任何错误可看。`AI_BROWSER_SANDBOX=1` 可以打开它；
+> **如果打开后启动即退、一点输出都没有，就是这个原因，去掉这个变量即可**。
+> 页面与 Node 之间无论如何都是隔开的（`contextIsolation:true` + `nodeIntegration:false`），
+> 这个开关管的是它们下面那层 OS 沙箱。
 
 ## 为什么不用截图
 
