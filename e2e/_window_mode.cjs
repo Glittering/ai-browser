@@ -36,7 +36,12 @@
 // shot 也在可见名单里：它测的是"这一张视图是不是屏幕上那一张"（截图档位由
 // page_manager._isCoveredByOtherTab 决定）。窗口不出来的时候**没有**屏幕上那一张，
 // 两种档位对每个视图都等价可得 —— 隐藏跑只会测到"顺序退回旧行为"，测不到修复本身。
-const VISIBLE = new Set(['focus', 'flicker', 'layout', 'paint', 'nav', 'canvas', 'shot']);
+//
+// window_open 也在：它的 [GEO] 阶段要证明"弹窗没被布局审计纠正回整屏"，而
+// _auditLayout 只在 _schedulePaintAudit 里被调用（page_manager.js:4957），
+// 窗口不可见时那条自检是**故意跳过**的。隐藏跑等于让那半个钟摆消失：断言会绿，
+// 但绿的是"没人来改它"，不是"审计按弹窗的判据放过了它"。
+const VISIBLE = new Set(['focus', 'flicker', 'layout', 'paint', 'nav', 'canvas', 'shot', 'window_open']);
 
 const FORCE_VISIBLE = /^(1|true|yes|on)$/i.test(String(process.env.AI_BROWSER_E2E_VISIBLE || ''));
 // 反过来也留一个逃生口：想确认"隐藏下到底还差什么"时，强制全部隐藏。

@@ -53,11 +53,13 @@ const BRIDGE_SURFACE = {
   // contextIsolation 下 preload 改不了页面的 window.open（那是 isolated
   // world 的 window），所以垫片本体由 CDP 注入进主 world，只把这一个
   // 出口经 contextBridge 暴露给它。
-  // ⚠️ arity 必须固定为 4：contextBridge 两岸参数数量不一致时调用会抛错
+  // ⚠️ arity 必须固定为 5：contextBridge 两岸参数数量不一致时调用会抛错
   // （实测：垫片少传一个参数 → 抛错被 catch 吞掉 → window.open 静默返回
-  // null，站点拿到的还是"弹窗被拦"的老症状）。垫片侧所有调用都传满 4 个。
-  windowOpenBridge: function(op, token, url, name) {
-    if (op === 'open') ipcRenderer.send('ai:window_open', { token: token, url: url, name: name || '' });
+  // null，站点拿到的还是"弹窗被拦"的老症状）。垫片侧所有调用都传满 5 个。
+  // 第 5 个是站点写的窗口特性串（window.open 第三参数）—— 主进程据此判断
+  // 这一发是不是浮层（width/height）；丢掉它弹窗会长成整号标签页（2026-11-02）。
+  windowOpenBridge: function(op, token, url, name, features) {
+    if (op === 'open') ipcRenderer.send('ai:window_open', { token: token, url: url, name: name || '', features: features || '' });
     else if (op === 'nav') ipcRenderer.send('ai:window_open_nav', { token: token, url: url });
     else if (op === 'close') ipcRenderer.send('ai:window_open_close', { token: token });
   },

@@ -627,6 +627,16 @@ Because the events arrive as real keyboard and mouse input,
 Draft.js, ProseMirror, CKEditor, Quill, and plain `<textarea>` all work through the same path without
 per-framework branches.
 
+**Popups.** A site asking for an overlay — `window.open(url, name, 'width=420,height=520,left=120,top=80')`
+(login boxes, payment QR codes, pickers) — gets one: that tab's view is placed at exactly the rectangle it
+requested, on top of its parent, instead of filling the window. The geometry is read from the third argument,
+which this project used to discard on both entry points (the handler destructured `url`, the page-world shim
+named its parameter `_features` and never used it), so every 420×520 login box grew into a full-size tab and
+laid itself out for 1280px. Only size-bearing features count, exactly as in Chrome: `noopener` / `_blank` are
+not sizes and still open an ordinary tab — the suite runs that negative control in the same pass. Shrinking
+the window re-clamps the overlay; growing it does not enlarge the overlay back. `ui.list_tabs` adds a `popup`
+rectangle for those tabs, because clicking or screenshotting them on full-window coordinates misses.
+
 **Where it is thin.** `extractor.cjs` is a heuristic over the DOM, not a clean-room specification: it
 handles ordinary pages well and will mislabel exotic ones. The window runs with hardware acceleration
 off plus three Chromium switches

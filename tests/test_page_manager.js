@@ -67,7 +67,9 @@ vi.mock('electron', async () => {
     getUserAgent() { return this.userAgent; }
     setUserAgent(ua) { this.userAgent = ua; }
     loadURL(url) { this.url = url; return Promise.resolve(); }
-    setWindowOpenHandler() {}
+    // 存下 handler，测试才能真的调用它 —— window.open 的两条入口之一
+    // （setWindowOpenHandler）的几何判据只能这么测（PM-33）。
+    setWindowOpenHandler(fn) { this.windowOpenHandler = fn; }
     setAudioMuted() {}
     setZoomFactor(z) { this.zoom = z; }
     getZoomFactor() { return this.zoom; }
@@ -721,5 +723,93 @@ describe('截图取帧：档位由「它是不是屏幕上那一张」决定', (
     expect(waited, '整发只花两个附属预算（这里 300ms + 探测 3s）；旧顺序还要再加 10s 指标空等').toBeLessThan(4000);
     expect(r.width, '布局指标问不到就用视图边界 —— 尺寸本来就有几何答案').toBe(b.width);
     expect(r.password_probe, '探测排不通就如实标 skipped').toBe('skipped');
+  });
+});
+
+describe('window.open 弹窗按请求的几何呈现（不再长成整号标签页）', () => {
+  // freshWindow 的内容区是 1280×800，减去标签栏 74 → 整号视图是 {0,74,1280,726}。
+  const FULL = { x: 0, y: 74, width: 1280, height: 726 };
+
+  it('PM-30 popupRect 在挂视图之前就记好：新建那一刻就是浮层尺寸', () => {
+    const rect = { x: 120, y: 154, width: 420, height: 520 };
+    const tid = pm.newTab('https://a.example/login', { popupRect: rect });
+    expect(pm.tabs.get(tid).getBounds()).toEqual(rect);
+    expect(pm._popupRects.get(tid)).toEqual(rect);
+  });
+
+  it('PM-31 几何只有一个出口：窗口缩小浮层跟着夹，放大不把它撑回去', () => {
+    const tid = pm.newTab('https://a.example/', { popupRect: { x: 300, y: 200, width: 420, height: 520 } });
+    pm._layoutAllViews({ width: 500, height: 600 });   // 内容区 500×526
+    expect(pm.tabs.get(tid).getBounds(), '浮层不许跑到窗口外面去').toEqual({ x: 80, y: 80, width: 420, height: 520 });
+    pm._layoutAllViews({ width: 1280, height: 800 });
+    expect(pm.tabs.get(tid).getBounds(), '可用区变大不等于站点重新请求过尺寸').toEqual({ x: 300, y: 200, width: 420, height: 520 });
+    // 对照：普通 tab 永远铺满
+    const other = pm.newTab('https://b.example/', { show: false });
+    pm._layoutAllViews({ width: 1280, height: 800 });
+    expect(pm.tabs.get(other).getBounds()).toEqual(FULL);
+  });
+
+  it('PM-32 布局审计的反查也问同一份判据：浮层被"纠正"回整屏才算坏，占小格子不算坏', () => {
+    const popup = pm.newTab('https://a.example/', { popupRect: { x: 10, y: 84, width: 300, height: 200 } });
+    const normal = pm.newTab('https://b.example/', { show: false });
+    expect(pm._layoutIsBad(popup, pm.tabs.get(popup).getBounds()), '正合请求 → 不该报').toBe(false);
+    expect(pm._layoutIsBad(popup, FULL), '浮层被摆成整屏 → 正是这条审计要看见的形态').toBe(true);
+    expect(pm._layoutIsBad(normal, FULL), '普通页铺满是对的').toBe(false);
+    expect(pm._layoutIsBad(normal, { x: 0, y: 74, width: 640, height: 726 }), '普通页缩一半是错的（历史 bug）').toBe(true);
+    // 白屏自检里"该占多大"问的是同一个函数：判据分叉 = 每个弹窗都被记成 layout_mismatch
+    expect(pm._expectedBounds(popup)).toEqual({ x: 10, y: 84, width: 300, height: 200 });
+    expect(pm._expectedBounds(normal)).toEqual(FULL);
+    expect(pm._expectedBounds(null)).toEqual(FULL);   // null = "可用区"本身，不是某个 tab
+  });
+
+  it('PM-33 setWindowOpenHandler：写了尺寸才当弹窗，没写尺寸照旧整号', () => {
+    const opener = pm.newTab('https://a.example/');
+    const handler = pm.tabs.get(opener).webContents.windowOpenHandler;
+    expect(typeof handler, 'newTab 没装 setWindowOpenHandler').toBe('function');
+
+    const r = handler({ url: 'https://a.example/login', features: 'width=420,height=520,left=120,top=80' });
+    expect(r.action, '仍然自建 tab，不交给 Electron 开原生窗口').toBe('deny');
+    const child = pm.tabs.get(pm.listTabs().find((t) => t.id !== opener).id);
+    expect(child.getBounds(), 'left/top 是相对内容区的偏移，y 已含标签栏').toEqual({ x: 120, y: 154, width: 420, height: 520 });
+
+    const before = pm.tabs.size;
+    // noopener / _blank 不是尺寸 —— Chrome 也不把它们当弹窗，否则所有外链都弹成小窗
+    handler({ url: 'https://c.example/', features: 'noopener=yes,noreferrer=yes' });
+    const plain = pm.tabs.get(before + 1);
+    expect(plain.getBounds()).toEqual(FULL);
+    expect(pm._popupRects.has(before + 1)).toBe(false);
+  });
+
+  it('PM-34 两条打开入口给同一个几何：垫片 IPC 与原生 handler 判据一致', () => {
+    const opener = pm.newTab('https://a.example/');
+    const features = 'width=420,height=520,left=120,top=80';
+    pm.tabs.get(opener).webContents.windowOpenHandler({ url: 'https://a.example/x', features });
+    const viaNative = pm.tabs.get(2).getBounds();
+
+    electronMock.ipcMain.emit('ai:window_open',
+      { sender: pm.tabs.get(opener).webContents },
+      { token: 'wo1', url: '', name: '_blank', features });
+    expect(pm.tabs.get(3).getBounds(), '同一个特性串走两条路得到同一块地方').toEqual(viaNative);
+    // 特性串缺失（老版本桥/测试桩）→ 整号，不报错
+    electronMock.ipcMain.emit('ai:window_open',
+      { sender: pm.tabs.get(opener).webContents },
+      { token: 'wo2', url: '', name: '_blank' });
+    expect(pm.tabs.get(4).getBounds()).toEqual(FULL);
+  });
+
+  it('PM-35 listTabs 把浮层的矩形报出去（agent 按整屏点这一页会打空）', () => {
+    const normal = pm.newTab('https://a.example/');
+    const popup = pm.newTab('https://b.example/', { show: false, popupRect: { x: 10, y: 84, width: 300, height: 200 } });
+    const byId = new Map(pm.listTabs().map((t) => [t.id, t]));
+    expect(byId.get(normal).popup, '普通 tab 不该带 popup 字段（省 token，也不制造噪音）').toBeUndefined();
+    expect(byId.get(popup).popup).toEqual({ x: 10, y: 84, width: 300, height: 200 });
+  });
+
+  it('PM-36 关弹窗后矩形跟着消失：下一个 tab 不许继承浮层尺寸', () => {
+    const tid = pm.newTab('https://a.example/', { popupRect: { x: 10, y: 84, width: 300, height: 200 } });
+    pm.closeTab(tid);
+    expect(pm._popupRects.has(tid)).toBe(false);
+    const next = pm.newTab('https://b.example/');
+    expect(pm.tabs.get(next).getBounds(), '新 tab 必须铺满，而不是继续当浮层').toEqual(FULL);
   });
 });

@@ -37,6 +37,7 @@ const PER_TAB = [
   { field: '_openedTabs' },          // 键 = 发起 window.open 的那个 tab
   { field: '_windowOpenShimTabs' },
   { field: '_windowOpenShimReady' },
+  { field: '_popupRects' },          // 这一页是浮层时它请求的矩形；漏清 = 新 tab 继承弹窗尺寸
   // ---- 导航状态机 ----
   { field: '_tabNavState' },
   { field: '_pendingNavUrl' },       // 键 = tab，值 = 正在打开（还没 commit）的地址

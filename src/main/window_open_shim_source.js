@@ -24,20 +24,22 @@
 // OnNewDocument 注入的脚本跑在主 world，才能真正替换掉页面可见的那个。
 //
 // 通信：垫片本体没有 ipcRenderer，经 preload 用 contextBridge 暴露的
-// __ai_browser__.windowOpenBridge(op, token, url, name)（单一入口，
+// __ai_browser__.windowOpenBridge(op, token, url, name, features)（单一入口，
 // fire-and-forget）把事件送到主进程；主进程建 tab / 导航 / 关 tab。
-// ⚠️ 入口 arity 固定 4：contextBridge 两岸参数数量不一致时调用会抛错
+// ⚠️ 入口 arity 固定 5：contextBridge 两岸参数数量不一致时调用会抛错
 // （实测少传一个 → 抛错被 catch 吞掉 → window.open 静默返回 null，
-// 站点看到的就是"弹窗被拦截"的老症状）。垫片所有调用必须传满 4 个参数。
+// 站点看到的就是"弹窗被拦截"的老症状）。垫片所有调用必须传满 5 个参数。
+// 第 5 个参数是站点写的窗口特性串（window.open 的第三参数）—— 它决定这发请求
+// 是不是一个 420×520 的浮层；丢掉它弹窗就长成整号标签页（2026-11-02 修）。
 export const WINDOW_OPEN_SHIM_SOURCE = `(function () {
   if (window.__aiWindowOpenShimV2) return;
   window.__aiWindowOpenShimV2 = true;
   var seq = 0;
 
-  function send(op, token, url, name) {
+  function send(op, token, url, name, features) {
     var b = window.__ai_browser__;
     if (!b || typeof b.windowOpenBridge !== 'function') return false;
-    try { b.windowOpenBridge(op, token, url === undefined ? '' : url, name === undefined ? '' : name); return true; } catch (e) { return false; }
+    try { b.windowOpenBridge(op, token, url === undefined ? '' : url, name === undefined ? '' : name, features === undefined || features === null ? '' : String(features)); return true; } catch (e) { return false; }
   }
 
   // 相对地址按发起页面的 baseURI 解析（真实 window 的 location 也这么做）。
@@ -46,13 +48,16 @@ export const WINDOW_OPEN_SHIM_SOURCE = `(function () {
     try { return new URL(s, document.baseURI).href; } catch (e) { return s; }
   }
 
-  window.open = function (url, name, _features) {
+  window.open = function (url, name, features) {
     var target = (url === undefined || url === null) ? '' : String(url);
     var token = 'wo' + (++seq) + '_' + Date.now();
     // ⚠️ 相对地址必须在这里就解析成绝对。主进程拿到的 '/foo.html' 没有 base，
     // loadURL 会直接报 ERR_INVALID_URL（表现为一个 file:// 错误页）。
     // 实测 2026-10-20：window.open('/l2.html','_blank') 开出的是错误页。
-    var ok = send('open', token, target ? abs(target) : '', name || '');
+    //
+    // features 只在 open 这一发送：真实浏览器也只在这里读它（'width=420,height=520'
+    // 决定的是窗口尺寸，不是导航）。主进程据此把视图摆成浮层；不送就会长成整号标签页。
+    var ok = send('open', token, target ? abs(target) : '', name || '', features);
     if (!ok) {
       // 没有桥：退回原生语义（deny → null），至少不像成功那样骗站点。
       return null;

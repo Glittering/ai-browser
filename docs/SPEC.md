@@ -409,7 +409,8 @@ bounds。`setBounds` 只改几何、不改 surface；`removeBrowserView + addBro
 同样不保证重栅格化。真正的重栅格化只有 `webContents.invalidate()`（再叠一次 1px
 微调，因为尺寸没变时 `setBounds` 会被直接忽略，不会重算 surface）。
 
-三条可判定等式（`e2e/layout_ws.cjs`，`npm run layout`，25 断言）：
+三条可判定等式（`e2e/layout_ws.cjs`，`npm run layout`，25 断言；下面的"内容区"对**整号**
+标签页成立，弹窗见下一节）：
 
 ```
 view.bounds            == 窗口内容区 - 标签栏
@@ -429,6 +430,39 @@ window.devicePixelRatio ∈ {1,2}
 
 `ui.window_bounds`：读窗口 bounds / content bounds / 每个视图实际 bounds；
 带 `set` 可改尺寸（布局类缺陷此前无法复现也无法回归，就是因为没有这个入口）。
+
+### 弹窗请求的几何：写了尺寸才叫浮层（2026-11-02）
+
+站点写 `window.open(url, name, 'width=420,height=520,left=120,top=80')` 请求的是**一个盖在
+父页上的 420×520 浮层**（登录框、支付二维码、选择器都这么写）。本项目的模型里没有独立窗口
+（`setWindowOpenHandler` 一律 deny → 自建 tab），而这条请求里的几何**以前被整份丢掉**：
+handler 只解构了 `url`，页面侧垫片把第三参数接了却不用（形参名就叫 `_features`）。
+于是每个 420×520 的登录框都长成整号标签页 —— 用户看到的"弹窗一片白 / 整屏换了一页"就是这么来的。
+丢掉的不只是观感：弹窗页自己会读 `window.innerWidth` 排版（实测修复前 1280、修复后 420）。
+
+判据在 `shared/popup_geometry.cjs`（纯函数，`tests/test_popup_geometry.js` 31 条钉住），照 Chrome，
+不自创：
+
+- 只有**显式请求尺寸**（`width`/`height`）或 `popup=yes|1` 才算弹窗。`noopener` / `noreferrer` /
+  `_blank` 不是尺寸，Chrome 也照样开新标签页 —— 把它们当弹窗会把所有外链弹成小窗，那是另一种错。
+  e2e `[GEO]` 因此把"没写尺寸仍铺满"的负对照放在**同一次运行**里跑：只测缩小的那个，
+  "把所有弹窗都缩成小窗"这种过头修法照样能绿。
+- 下限 100（Chrome 不允许弹窗小于此，站点写 `width=50` 多半是笔误），上限就是能给出的内容区；
+  `left/top` 缺省时居中（Chrome 用级联偏移，我们只有一个窗口，居中更稳定也可复现）。
+- 特性串现在一路送到主进程：垫片第 5 个参数 → 桥（arity 4→5）→ `ai:window_open` 的
+  `payload.features`。`tests/test_bridge_surface.js` 的 B8 是**跨文件**用例 —— 真的把垫片源码
+  跑起来、调 bridge.cjs 暴露的那个函数、再看落到 IPC 上的 payload。两岸各自单测都能绿，
+  而少一个参数 / 键名写错 / features 没丢给主进程只有串起来才看得见（历史上就是这么静默的）。
+
+**几何判据只有一个出口**：`_expectedBounds(tabId)`。布局（`_layoutAllViews` / `_layoutView`）、
+`_auditLayout`、白屏自检的"该占多大"全都问这里。以前它们各抄一份"整号内容区"，于是弹窗一定
+会被布局看门狗判成 `layout_mismatch` 并被"纠正"回整屏 —— **判据分叉才是这个 bug 修不掉的机制**，
+所以补代码的地方不是加一处判据，而是把三处抄的合并成一处。方向也因此相反：整号页允许"至少铺满"
+（宽度略大不算错，历史 bug 是缩成一小块），浮层必须**正好**那么大（变宽就是被人纠正回去了）。
+
+窗口缩小浮层跟着夹（否则跑到窗口外，用户看到一个"打不开的弹窗"），放大**不**把它撑回去 ——
+它请求的就是那个尺寸。`ui.list_tabs` 对浮层多带一个 `popup` 矩形：agent 按整屏去点/截图会打空，
+不告诉它这一页占哪一块，等于让它对一个可见的东西反复失败。
 
 ## 渲染路径：硬件合成 vs 软件合成
 
@@ -864,12 +898,13 @@ sheet**，因此它既不在语义树里，也不受页面点击控制；**而�
 
 > 数字**每次发版后按实测更新**（`npm test` / `npm run e2e:all` 的最终摘要）。
 > 2026-11-01 v2.5.1 基线：单测 **100 文件 / 1324 条**、e2e **27 套件 / 831 断言**。
+> 下面的清单是 28 项（v2.5.1 之后进了 `shot`），那两个数字还没重测 —— 发版时按实测覆盖。
 
 - 单元：`npm test` —— Vitest，100 文件 / 1324 条，0 skip。
 - 端到端：各 `npm run <suite>` 自起 Electron（隔离 profile）：
   `smoke` / `capabilities` / `richtext` / `network` / `value` / `canvas` / `modeldiff` /
   `audit` / `nav` / `focus` / `interact` / `upload` / `view` / `readcov` / `window_open` /
-  `dialog` / `wrapper` / `paint` / `layout` / `download` / `multiagent` / `background` /
+  `dialog` / `wrapper` / `paint` / `layout` / `shot` / `download` / `multiagent` / `background` /
   `icon` / `app_model` / `security` / `contract` / `lifecycle`。
   **改动不得破坏任何一项。** 一次跑全部：`npm run e2e:all`（27 套件 / 831 断言）。
   - `security`：页面 → 控制面、页面 → 宿主 两条攻击链的回归。它会起**两个**实例

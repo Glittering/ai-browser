@@ -70,6 +70,8 @@ import valueContract from '../shared/value_contract.cjs';
 import { normalizeInputText, skeletalInputText } from '../shared/input_verify.js';
 // 截图参数规范化（纯函数）：坏参数在入口就给可读错误，不拖到 CDP 层。
 import screenshotOpts from '../shared/screenshot_opts.cjs';
+// window.open 的窗口特性 → 视图几何（纯函数）：站点请求的 420×520 浮层不该长成整号标签页。
+import popupGeometry from '../shared/popup_geometry.cjs';
 // 跨进程子帧（OOPIF）判定与自动路由回执（纯函数）：默认读法检测到不可读
 // 子帧时自己补一次 AX 读取，调用方无需知道 ax:true 的存在。
 import frameProbe from '../shared/frame_probe.cjs';
@@ -253,6 +255,11 @@ class PageManager {
     this._openedTabs = new Map();   // sourceTabId -> { id, url } (new tab opened by window.open)
     this._windowOpenTokens = new Map(); // token -> { tabId, sourceTabId } (window.open shim, preload bridge.cjs)
     this._windowOpenShimTabs = new Set(); // 已注入 window.open 垫片的 tabId
+    // tabId -> 请求来的弹窗矩形（视图坐标系，已经夹进可用区）。
+    // 有这条 = 这一页是**浮层**（站点写了 width/height），布局、几何审计、白屏自检
+    // 都要按它自己的矩形判，不能拿整号内容区当"应该占满的地方"—— 那是"弹窗被纠正成
+    // 整屏"的成因。清理走 shared/tab_state.cjs 的 PER_TAB。
+    this._popupRects = new Map();
     // tabId -> Promise<void>：该 tab 的垫片**注册完成**的信号（不是"注入成功"，
     // 失败也 resolve —— 调用方要的是"可以往下走了"，不是"一切顺利"）。
     // 存在的唯一理由：window.open("") 派生的 tab 里，ai:window_open_nav 必须等
@@ -517,7 +524,19 @@ class PageManager {
           this.closeTab(victim);
         }
       }
-      const childId = this.newTab(url && url !== 'about:blank' ? url : null, { show, group: parentGroup });
+      // 弹窗特性（`window.open(url,name,'width=420,height=520')` 的第三参数）由垫片
+      // 原样送到 p.features。两条打开路径（这条 IPC 与 setWindowOpenHandler）必须
+      // 用同一套判据、同一个可用区，否则同一个站点脚本会因为走哪条路而得到两种几何。
+      let popupRect = null;
+      if (popupGeometry.wantsPopup(p.features)) {
+        try { popupRect = popupGeometry.popupRect(p.features, this._expectedBounds(null)); }
+        catch (_) { /* 拿不到内容区就按整号处理 —— 弹窗长成全页，好过开不出来 */ }
+      }
+      const childId = this.newTab(url && url !== 'about:blank' ? url : null, {
+        show,
+        group: parentGroup,
+        ...(popupRect ? { popupRect } : {}),
+      });
       this._windowOpenTokens.set(token, { tabId: childId, sourceTabId });
       // 与 setWindowOpenHandler 路径共用 _openedTabs：executeAction 的
       // auto-follow（点击后 Agent 视角跟到新 tab）对两种打开方式一致。
@@ -785,10 +804,45 @@ class PageManager {
     };
   }
 
+  /** 当前内容区（视图坐标系）。**整号**标签页该占的地方。 */
+  _contentBox() {
+    return this._viewBounds(this.window.getContentBounds());
+  }
+
+  /**
+   * 这个 tab **应该**占的那块地方 —— 几何判据的唯一出口。
+   *
+   * 弹窗（站点写了 width/height）按它自己请求的矩形，其余铺满内容区。
+   * 每次都对着**当前**内容区重新夹一次：窗口缩小 / 底部横幅出现时浮层必须跟着挪位置
+   * （否则它跑到窗口外，用户看到一个"打不开的弹窗"）；而窗口变大不把浮层放大回去 ——
+   * 它请求的就是那个尺寸。
+   *
+   * 布局、`_auditLayout`、白屏自检的"该占多大"全都问这里。以前它们各抄一份
+   * "整号内容区"，于是弹窗一定会被判成 layout_mismatch 并被"纠正"回整屏 ——
+   * 那正是这次要修的形态，判据不能再分叉。
+   */
+  _expectedBounds(tabId, boxOverride) {
+    const box = boxOverride || this._contentBox();
+    const rect = (tabId === undefined || tabId === null) ? null : this._popupRects.get(tabId);
+    if (!rect) return box;
+    return popupGeometry.clampRect(rect, box) || box;
+  }
+
+  /** view -> tabId：布局那几条路只拿到视图，而几何判据按 tab 存。 */
+  _tabIdForView(view) {
+    for (const [id, v] of this.tabs) if (v === view) return id;
+    return null;
+  }
+
+  /** 浮层**现在**占的那块地方（list_tabs 用）。问不到就回 null，不抛。 */
+  _livePopupRect(view) {
+    try { return view && view.getBounds() ? view.getBounds() : null; } catch (_) { return null; }
+  }
+
   _layoutAllViews(bounds) {
-    const rect = this._viewBounds(bounds);
+    const box = this._viewBounds(bounds);
     for (const [id, view] of this.tabs) {
-      view.setBounds(rect);
+      view.setBounds(this._expectedBounds(id, box));
     }
   }
 
@@ -4212,7 +4266,7 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     });
 
     // Intercept window.open / new-window → create new tab instead
-    view.webContents.setWindowOpenHandler(({ url: urlToOpen }) => {
+    view.webContents.setWindowOpenHandler(({ url: urlToOpen, features }) => {
       // 派生标签页跟**打开它的那一个**走：可见页里弹出来的照旧弹到人眼前
       // （浏览器惯例），后台页里弹出来的留在后台 —— agent 流程里登录/预览/
       // 下载这类弹窗极多，每弹一个就抢一次视野等于人没法用电脑。
@@ -4232,9 +4286,18 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
           self.closeTab(victim);
         }
       }
+      // 站点在 window.open 第三参数里请求的几何（width/height/left/top）以前被整份丢掉
+      // —— 于是 420×520 的登录浮层长成整号标签页。判据、缺省、夹取全在纯函数里
+      // （shared/popup_geometry.cjs），这里只负责"对着哪个可用区夹"。
+      let popupRect = null;
+      if (popupGeometry.wantsPopup(features)) {
+        try { popupRect = popupGeometry.popupRect(features, self._expectedBounds(null)); }
+        catch (_) { /* 内容区拿不到（窗口正在销毁）就按整号标签页处理 */ }
+      }
       const childId = self.newTab(urlToOpen, {
         show: shouldShowChildTab({ openerIsVisible: tabId === self.activeTab }),
         group: parentGroup,
+        ...(popupRect ? { popupRect } : {}),
       });
       // Track which source tab opened a new tab so `executeAction` can report the
       // resulting tab and auto-follow it. Generic (any target=_blank / window.open).
@@ -4251,6 +4314,13 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     // "这一页到底画出什么了"。
     // 挂上去、把可见的那个置顶，就同时得到：真实表面（可截图/可自检）+ 人只看到
     // 他该看的那一页。
+    // 弹窗（站点在 window.open 里写了 width/height）：请求来的矩形要在**挂视图之前**
+    // 记下来 —— setActive / _layoutView 都按 _expectedBounds 摆位置，晚记一步就是先按
+    // 整屏铺一次再缩回，那一下用户看得见。
+    // 已经对着当前内容区夹过（setWindowOpenHandler / ai:window_open 那两条入口做的），
+    // 这里只存，不再判特性 —— 判据有一份就够，两处判会判出两种结果。
+    if (opts.popupRect) this._popupRects.set(tabId, opts.popupRect);
+
     const show = opts.show !== false;
     this._attachView(view);
     if (show || this.activeTab === null) {
@@ -4621,13 +4691,17 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     let expected = null;
     let layoutOk = null;
     try {
-      const cb = this.window.getContentBounds();
-      expected = {
-        width: cb.width,
-        height: Math.max(0, cb.height - config.tabBarHeight - (this._bottomInset || 0)),
-      };
+      // 问 _expectedBounds，不是"整号内容区"：弹窗的"该占的地方"就是它请求的那块，
+      // 拿全屏尺寸判它，每一个弹窗都会被记成 layout_mismatch。
+      const exp = this._expectedBounds(tid);
+      expected = { width: exp.width, height: exp.height };
       if (bounds) {
-        layoutOk = bounds.width >= expected.width - 2 && Math.abs(bounds.height - expected.height) <= 2;
+        // 整号页面允许"至少铺满"（宽度可能因夹取略大）；弹窗必须**正好**是那一块 ——
+        // 它变宽了就是"又被谁纠正回整屏"，那正是本条判据要能看见的事。
+        const popup = this._popupRects.has(tid);
+        layoutOk = popup
+          ? Math.abs(bounds.width - exp.width) <= 2 && Math.abs(bounds.height - exp.height) <= 2
+          : bounds.width >= exp.width - 2 && Math.abs(bounds.height - exp.height) <= 2;
       }
     } catch (_) { /* 窗口已销毁 */ }
 
@@ -4779,26 +4853,30 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     const view = this._getView(tabId);
     if (!view || !view.webContents || view.webContents.isDestroyed()) return null;
     let expected;
-    try {
-      const cb = this.window.getContentBounds();
-      expected = {
-        x: 0,
-        y: config.tabBarHeight,
-        width: cb.width,
-        height: Math.max(0, cb.height - config.tabBarHeight - (this._bottomInset || 0)),
-      };
-    } catch (_) { return null; }
+    try { expected = this._expectedBounds(tabId); } catch (_) { return null; }
     let actual;
     try { actual = view.getBounds(); } catch (_) { return null; }
-    const bad = actual.width < expected.width - 2
-      || Math.abs(actual.height - expected.height) > 2
-      || actual.x !== expected.x
-      || actual.y !== expected.y;
-    if (!bad) return { ok: true, expected, actual };
+    if (!this._layoutIsBad(tabId, actual)) return { ok: true, expected, actual };
     // 不一致时先复核一次再动手：窗口刚变化的那一两百毫秒里，getContentBounds 与
     // 视图 bounds 会短暂对不上，此刻"纠正"等于把视图改成中间尺寸 —— 那正是
     // "页面缩成左上角一小块"的成因之一。宁可晚 120ms 修，也不要修错。
     return this._confirmAndFixLayout(tabId, expected, actual);
+  }
+
+  /**
+   * 视图几何和"它该占的地方"对不上吗。
+   * 整号页面历史判据是"宽度至少铺满"（略宽不算错），弹窗反过来必须**正好**是它请求
+   * 的那一块：变宽就是被谁纠正回整屏了，那正是这条审计要能看见的形态。
+   */
+  _layoutIsBad(tabId, actual) {
+    if (!actual) return false;
+    let exp;
+    try { exp = this._expectedBounds(tabId); } catch (_) { return false; }
+    const wBad = this._popupRects.has(tabId)
+      ? Math.abs(actual.width - exp.width) > 2
+      : actual.width < exp.width - 2;
+    return wBad || Math.abs(actual.height - exp.height) > 2
+      || actual.x !== exp.x || actual.y !== exp.y;
   }
 
   _confirmAndFixLayout(tabId, expected, actual) {
@@ -4808,20 +4886,11 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
       try {
         const v = this._getView(tabId);
         if (!isAlive(v)) return;
-        let cb;
-        try { cb = this.window.getContentBounds(); } catch (_) { return; }
-        const exp = {
-          x: 0,
-          y: config.tabBarHeight,
-          width: cb.width,
-          height: Math.max(0, cb.height - config.tabBarHeight - (this._bottomInset || 0)),
-        };
+        let exp;
+        try { exp = this._expectedBounds(tabId); } catch (_) { return; }
         let act;
         try { act = v.getBounds(); } catch (_) { return; }
-        const stillBad = act.width < exp.width - 2
-          || Math.abs(act.height - exp.height) > 2
-          || act.x !== exp.x || act.y !== exp.y;
-        if (!stillBad) return;   // 只是中间态，已经自己好了
+        if (!this._layoutIsBad(tabId, act)) return;   // 只是中间态，已经自己好了
         try {
           this._layoutView(v);
           v.webContents.invalidate();
@@ -5202,6 +5271,12 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
         ...(this._paintProblem(id) ? { paint: this._paintProblem(id) } : {}),
         // 加载中时把 pending URL 也暴露给 agent，方便它判断"正在打开的是哪个地址"。
         ...(pending ? { pending_url: pending } : {}),
+        // 站点用 window.open 的 width/height 请求的浮层（登录框、二维码）。带上矩形
+        // 是因为它**不铺满窗口**：agent 按整屏去理解这一页就会打空。
+        // 取的是视图**当前实际**的矩形，不是当初请求的那份 —— 窗口缩小后浮层被夹过，
+        // 报旧数字等于让 agent 按一块已经不存在的地方行动；getBounds 也会随视图一起
+        // 销毁，所以套在 live 之外再兜一层（list_tabs 不能因为一个 tab 抛错而整发失败）。
+        ...(this._popupRects.has(id) ? { popup: this._livePopupRect(view) } : {}),
       });
     }
     return list;
@@ -5472,7 +5547,8 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
   }
 
   _layoutView(view) {
-    view.setBounds(this._viewBounds(this.window.getContentBounds()));
+    // 弹窗按它请求的矩形，其余铺满 —— 判据只在 _expectedBounds 一处，别再抄第二份。
+    view.setBounds(this._expectedBounds(this._tabIdForView(view)));
   }
 
   addSubscription(sessionId, events) {

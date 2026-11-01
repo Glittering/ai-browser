@@ -17,6 +17,7 @@ import vm from 'node:vm';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { WINDOW_OPEN_SHIM_SOURCE } from '../src/main/window_open_shim_source.js';
 
 const require = createRequire(import.meta.url);
 
@@ -127,5 +128,47 @@ describe('preload 暴露面白名单', () => {
 
     const all = loadBridge({ href: 'https://any.site/', env: { AI_BROWSER_POPUP_SHIM: 'on' } });
     expect(all.exposed.__ai_browser__, 'AI_BROWSER_POPUP_SHIM=on 应当全域开（含桥）').toBeTruthy();
+  });
+
+  // B8 是**跨文件**的契约测试：垫片源码（main/window_open_shim_source.js）真的调用
+  // bridge.cjs 暴露的函数，再看落到 IPC 上的 payload。两岸各自单测都能绿，
+  // 但参数少一个、键名写错、features 没带 —— 只有这么串起来才看得见。
+  // （2026-10-19 那次"垫片注入了但 window.open 返回 null"就是少传一个参数被
+  //  catch 吞掉；2026-11-02 丢 features 同理：任何一侧单测都不报错，症状却在用户面前。）
+  it('B8 垫片 → 桥 → IPC：payload 形状与 features 传递是通的', () => {
+    const { exposed, sends } = loadBridge({
+      href: 'https://course.example.chaoxing.com/x',
+      env: { AI_BROWSER_POPUP_SHIM: 'on' },
+    });
+    const bridge = exposed.__ai_browser__;
+    expect(bridge, 'B8 依赖桥真的被暴露').toBeTruthy();
+
+    const shimWindow = { __ai_browser__: bridge };
+    // eslint-disable-next-line no-new-func
+    new Function('window', 'document', 'URL', WINDOW_OPEN_SHIM_SOURCE)(
+      shimWindow, { baseURI: 'https://course.example.chaoxing.com/x' }, URL);
+
+    const w = shimWindow.open('', '_blank', 'width=420,height=520,left=10,top=20');
+    expect(w, '桥存在时 window.open 不许返回 null（返回 null = 站点以为弹窗被拦）').toBeTruthy();
+
+    const open = sends.find((s) => s.channel === 'ai:window_open');
+    expect(open, 'window.open 没有落到 ai:window_open').toBeTruthy();
+    expect(open.payload.features).toBe('width=420,height=520,left=10,top=20');
+    expect(typeof open.payload.token).toBe('string');
+    expect(open.payload.name).toBe('_blank');
+
+    // 不写第三参数时也不能留 undefined：主进程判据拿的是字符串，
+    // 而 contextBridge 两岸参数数量不一致会抛错（历史症状 = 静默 null）。
+    sends.length = 0;
+    shimWindow.open('https://course.example.chaoxing.com/y', '_blank');
+    const plain = sends.find((s) => s.channel === 'ai:window_open');
+    expect(plain.payload.features, '缺省特性串必须是空串，不是 undefined').toBe('');
+
+    sends.length = 0;
+    w.location = 'https://course.example.chaoxing.com/target';
+    const nav = sends.find((s) => s.channel === 'ai:window_open_nav');
+    expect(nav, 'location 赋值没有落到 ai:window_open_nav').toBeTruthy();
+    expect(nav.payload.url).toBe('https://course.example.chaoxing.com/target');
+    expect(nav.payload.features, 'nav 不该带 features（特性只在 open 这一发有效）').toBeUndefined();
   });
 });

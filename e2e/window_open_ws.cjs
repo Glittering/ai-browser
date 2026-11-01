@@ -11,12 +11,15 @@
 // （shim:false / openNative:true），所以在那里面再走一次同样的写法就退化回
 // 原始 bug —— 点"进入学习"打开课程页，课程页里再点"进入学习/考试"就没反应。
 //
-// 教训不是"再修一次"，而是：**修完必须有东西守着**。这个套件守一条不变量：
+// 教训不是"再修一次"，而是：**修完必须有东西守着**。这个套件守两条不变量：
 //
-//   任意一层 window.open("") 打开的页面，都必须能再走同一条路。
+//   1. 任意一层 window.open("") 打开的页面，都必须能再走同一条路。
+//   2. 站点在第三参数里请求的尺寸必须变成视图的几何（没请求的照旧整号）——
+//      这条是 2026-11-02 加的：特性串以前被丢掉，登录浮层长成整号标签页。
 //
 // 递归一层就够暴露结构性问题 —— 如果垫片只装在 agent 新建的 tab 上，
-// 第二层必然红。
+// 第二层必然红。几何同理：只测"缩小的那个"，缩错方向的修法也能绿，所以
+// 每个几何断言都配一个同批跑的整号负对照。
 //
 // 自带 fixture、不依赖外网。Run: npm run winopen
 //   AI_BROWSER_PORT=<port> npm run winopen     （run_all 会自动分配）
@@ -54,6 +57,16 @@ const FIXTURES = {
 <h1>POPUP-SOURCE</h1>
 <a href="#" onclick="window.open('/l2.html', '_blank'); return false;">打开真实弹窗</a>
 </body></html>`,
+  // 几何套件用：同一页里两种写法 —— 写尺寸（浮层）与不写尺寸（整号）。
+  // 两个都在一页里是刻意的：只测前者，"把所有 window.open 都缩成小窗"这种
+  // 过头的修法照样能绿（对照必须来自同一次运行、同一个窗口）。
+  '/geo.html': `<!doctype html><html><head><meta charset="utf-8"><title>geo</title></head><body>
+<h1>GEO-SOURCE</h1>
+<a href="#" onclick="window.__diag='got:'+!!window.open('/small.html','_blank','width=420,height=520,left=60,top=40'); return false;">开浮层</a>
+<a href="#" onclick="window.__diag2='got:'+!!window.open('/small.html','_blank'); return false;">开整号</a>
+</body></html>`,
+  '/small.html': `<!doctype html><html><head><meta charset="utf-8"><title>small</title></head><body>
+<h1>POPUP-TARGET</h1></body></html>`,
 };
 
 // ---------------------------------------------------------------- 断言计数
@@ -140,6 +153,19 @@ async function waitUrl(b, tabId, re, timeoutMs = 10000) {
     await sleep(150);
   }
   return last;
+}
+
+/** 视图当前的实际矩形（ui.window_bounds 的 views 表）+ 窗口内容区。 */
+async function viewBounds(b, tabId) {
+  const r = unwrap(await b.call('ui.window_bounds', {}));
+  const v = r && r.views && r.views[tabId];
+  return v ? { v, content: r.content } : null;
+}
+
+/** 页面自己看到的视口 —— 站点按它排版，比我们的记账更接近"用户看到的"。 */
+async function innerSize(b, tabId) {
+  const r = unwrap(await b.call('ui.evaluate', { tab: tabId, js: 'JSON.stringify({w: window.innerWidth, h: window.innerHeight})' }));
+  try { return JSON.parse(r && r.value) || {}; } catch { return {}; }
 }
 
 /** 在一个 tab 里问：垫片在不在？window.open 还是原生的吗？ */
@@ -324,6 +350,76 @@ async function main() {
     }
     for (const t of [bg1, bg2]) { if (t) { try { await b.call('ui.close_tab', { tab: t }); } catch (_) {} } }
     if (tab1) { try { await b.call('ui.close_tab', { tab: tab1 }); } catch (_) {} }
+  }
+
+  // ---------------------------------------------------------------- 弹窗几何
+  // 站点写 window.open(url, name, 'width=420,height=520,...') 请求的是一个浮层。
+  // 以前第三参数整份被丢掉（垫片形参就叫 _features，handler 只解构 url），于是登录框
+  // 长成整号标签页 —— 用户看到的是"弹窗一片白/整屏换了一页"，弹窗页自己也按 1280
+  // 宽排版。这一阶段钉的是**视图真实的矩形**，不是我们的记账：
+  //   写了尺寸 → 就那么大；没写尺寸 → 照旧整号（负对照必须同批跑，否则
+  //   "把所有弹窗都缩成小窗"这种过头修法照样能绿）。
+  console.log('\n[GEO] window.open 的尺寸请求变成视图几何');
+  {
+    const src = unwrap(await b.call('ui.new_tab', { url: `${HOST}/geo.html` })).tab;
+    await sleep(5000); // Windows: 垫片在 did-finish-load 之后经 CDP 注入，要等
+    const before = (await listTabs(b)).map((t) => t.id);
+
+    // —— 浮层那一发
+    await clickGo(b, src, '开浮层');
+    const small = await waitNewTab(b, before);
+    check('GEO 写了尺寸的 window.open 开出了新 tab', !!small, small ? '' : '10s 内没有新 tab');
+    let smallId = small && small.id;
+    if (smallId) {
+      const url = await waitUrl(b, smallId, /\/small\.html/);
+      check('GEO 浮层导航到了 /small.html', /\/small\.html/.test(url), `url=${url}`);
+      await sleep(2500);   // 让布局审计 / 白屏自检各跑一轮（它们会"纠正"视图尺寸）
+      const got = await viewBounds(b, smallId);
+      const full = await viewBounds(b, src);
+      if (got && full) {
+        const box = full.v;             // 整号 tab 就是"可用区"的实测形状
+        const wantW = Math.min(420, box.width);
+        const wantH = Math.min(520, box.height);
+        check('GEO 视图宽度 = 请求的 420（不是整号）', Math.abs(got.v.width - wantW) <= 2,
+          JSON.stringify({ got: got.v, full: box }));
+        check('GEO 视图高度 = 请求的 520', Math.abs(got.v.height - wantH) <= 2, JSON.stringify(got.v));
+        check('GEO left/top 生效：浮层压在父页右上角那块，不是铺满',
+          Math.abs(got.v.x - 60) <= 2 && Math.abs(got.v.y - (box.y + 40)) <= 2,
+          JSON.stringify({ got: got.v, base: box }));
+        const in2 = await viewBounds(b, smallId);
+        check('GEO ★ 等过审计的一轮，它仍是浮层（没被"纠正"回整屏）',
+          in2 && Math.abs(in2.v.width - wantW) <= 2, JSON.stringify(in2 && in2.v));
+        const tabInfo = (await listTabs(b)).find((t) => t.id === smallId) || {};
+        check('GEO list_tabs 把浮层矩形报出去（agent 才知道按整屏点会打空）',
+          !!tabInfo.popup && Math.abs(tabInfo.popup.width - wantW) <= 2, JSON.stringify(tabInfo));
+        const ins = await innerSize(b, smallId);
+        check('GEO 页面看到的视口就是那块地方（innerWidth≈420，不是整屏）',
+          ins.w > 0 && Math.abs(ins.w - wantW) <= 20, JSON.stringify(ins));
+      } else {
+        check('GEO 拿到了 views/src 两块几何', false, JSON.stringify({ got, full }));
+      }
+    }
+
+    // —— 负对照：没写尺寸照旧整号
+    const before2 = (await listTabs(b)).map((t) => t.id);
+    await clickGo(b, src, '开整号');
+    const plain = await waitNewTab(b, before2);
+    check('GEO 没写尺寸的 window.open 也开出了新 tab', !!plain, plain ? '' : '10s 内没有新 tab');
+    if (plain) {
+      await waitUrl(b, plain.id, /\/small\.html/);
+      const got = await viewBounds(b, plain.id);
+      const ref = await viewBounds(b, src);
+      if (got && ref) {
+        check('GEO ★ 负对照：普通标签页仍然铺满（把 noopener 当弹窗就是这条红）',
+          Math.abs(got.v.width - ref.v.width) <= 2 && Math.abs(got.v.height - ref.v.height) <= 2,
+          JSON.stringify({ got: got.v, ref: ref.v }));
+        const info = (await listTabs(b)).find((t) => t.id === plain.id) || {};
+        check('GEO 负对照不带 popup 字段', info.popup === undefined, JSON.stringify(info));
+      }
+      await b.call('ui.close_tab', { tab: plain.id });
+    }
+    await b.call('ui.close_tab', { tab: src });
+    if (smallId) { try { await b.call('ui.close_tab', { tab: smallId }); } catch (_) {} }
   }
 
   // ---------------------------------------------------------------- verdict
