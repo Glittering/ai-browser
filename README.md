@@ -671,11 +671,20 @@ Two things to know about that knob:
   a surface whose *pixels* are wrong, and it costs two relayouts — which is exactly the
   "grows-then-shrinks, flickers" complaint this app got when that ran on the hot paths
   (`e2e/layout_ws` G4/G5 now pin navigation and tab-switch to zero repaints by default).
-- If you really are seeing the **previous page's pixels** — a transparent login overlay with the old
-  site behind it — set `AI_BROWSER_HOT_REPAINT=hard` and take the flicker: it upgrades repaint on
-  navigation-finish, tab switch and window re-show. `disable-back-forward-cache` is not the lever
-  here; bfcache stores the page you navigate *away from*, so it cannot explain a stale frame on a
-  forward navigation, and switching it off costs you the instant back/forward restore.
+- **"A login overlay with a different site behind it" is not this class of bug** (root-caused
+  2026-11-02). Every tab's view stays attached to the window, stacked on the *same* bounds, and
+  only z-order decides which one you see — but z-order decides who is *on top*, not that the top
+  one is *opaque*. A page with a transparent root background (a login page designed to live inside
+  an iframe overlay, opened as a top-level document; its own captured frame measured 86.3% of
+  pixels with alpha<255) reveals whichever tab sits directly underneath it. Each tab view is now
+  created as an **opaque surface** (`#FFFFFF`, the same thing a real browser does with a
+  transparent top-level page), so those pixels are filled by that tab itself. `npm run paint` P6
+  pins the invariant: an active tab's frame must not contain a single transparent pixel.
+- If you really are seeing **this tab's own stale pixels** — the DOM reports the new page while
+  the window shows the old one — set `AI_BROWSER_HOT_REPAINT=hard` and take the flicker: it
+  upgrades repaint on navigation-finish, tab switch and window re-show. `disable-back-forward-cache`
+  is not the lever here; bfcache stores the page you navigate *away from*, so it cannot explain a
+  stale frame on a forward navigation, and switching it off costs you the instant back/forward restore.
 
 Separate bug, same "the screen is lying" family: during the few hundred milliseconds between pressing
 Enter and the new document committing, `webContents.getURL()` still returns the **old** page, so the

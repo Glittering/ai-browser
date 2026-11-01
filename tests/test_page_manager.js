@@ -103,7 +103,7 @@ vi.mock('electron', async () => {
     }
     setBounds(b) { this.bounds = b; }
     getBounds() { return this.bounds; }
-    setBackgroundColor() {}
+    setBackgroundColor(c) { this.bgColor = c; }
     setAutoResize() {}
     destroy() { this.webContents.close(); }
   }
@@ -478,6 +478,30 @@ describe('热路径重绘档位：默认不抽搐，开了才付 hard 的代价'
     } finally {
       if (old === undefined) delete process.env.AI_BROWSER_HOT_REPAINT;
       else process.env.AI_BROWSER_HOT_REPAINT = old;
+    }
+  });
+});
+
+// 所有标签页的视图都常驻窗口、叠在同一块 bounds 上，可见与否只由 z 序决定。
+// z 序只决定"谁在上面"，不保证"上面那张不透" —— 所以底色必须不透明，否则一个
+// 根背景透明的页面（按 iframe 浮层设计的登录页被当成顶层文档打开）会把**下面
+// 那张视图**照出来，也就是另一个标签页。真实现场与端到端判据见 e2e/paint_ws 的 P6。
+describe('标签页的表面必须不透明（"每个标签页独立"在渲染层成立的前提）', () => {
+  /** Electron 的底色写法：#RGB / #RRGGBB / #AARRGGBB（alpha 在前）。 */
+  const isOpaque = (c) => {
+    const m = /^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.exec(String(c || ''));
+    if (!m) return false;
+    const hex = m[1];
+    return hex.length !== 8 || hex.slice(0, 2).toLowerCase() === 'ff';
+  };
+
+  it('PM-21 每个新建标签页的视图都拿到一个不透明底色', () => {
+    const a = pm.newTab('https://a.example/');
+    const b = pm.newTab('https://b.example/');
+    for (const id of [a, b]) {
+      const view = pm.tabs.get(id);
+      expect(view.bgColor, `tab ${id} 没设底色：透明像素会把别的标签页透出来`).toBeTruthy();
+      expect(isOpaque(view.bgColor), `tab ${id} 的底色 ${view.bgColor} 不是不透明的`).toBe(true);
     }
   });
 });

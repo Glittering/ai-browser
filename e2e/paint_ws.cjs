@@ -5,11 +5,14 @@
 // ui.evaluate 读得到 397 个字的正文、CDP 截图也有内容 —— 只有用户眼睛看到的是白的。
 // 于是工具侧集体失明：agent 说"页面正常"，用户说"白的"，谁也拿不出证据。
 //
-// 本套件钉三件事：
+// 本套件钉住的事：
 //   P1 正常页 → 判 ok，不许误报（误报会触发 reload，把用户填了一半的表单刷掉）
 //   P2 纯白但有文字 → 判 blank-with-text，并进 list_tabs 的 paint 字段
 //   P3 heal 走完阶梯（repaint → reload → give-up）就**停**，不进入重载死循环；
 //      且 conclusions 落盘/广播 —— 救不动的白屏必须有人能看见
+//   P6 活动标签页的截帧**不许有一个透明像素** —— 所有视图叠在同一块 bounds 上，
+//      可见只由 z 序决定；一个透明像素就是"另一个标签页的内容照进来"的通道
+//      （2026-11-02 的"点登录，背景成了百度"）。这条要解 PNG，故有 _png_alpha.cjs
 //
 // 自带 fixture、不依赖外网。Run: npm run paint
 
@@ -19,6 +22,7 @@ const http = require('node:http');
 const { spawn } = require('node:child_process');
 const path = require('node:path');
 const guard = require('./_spawn_guard.cjs');
+const { analyzePngAlpha } = require('./_png_alpha.cjs');
 
 const ROOT = path.resolve(__dirname, '..');
 const { Browser } = require(path.join(ROOT, 'tools/browser.cjs'));
@@ -49,6 +53,14 @@ p{margin:0;padding:24px;font:14px/1.7 -apple-system,sans-serif}</style></head><b
 也可能只是作者把字刷白了 —— 所以自救有上限，救不动就如实上报，不许循环重载。</p>
 </body></html>`;
 
+// /transparent —— **根背景透明**的页面。真实世界的样子是"按 iframe 浮层设计的登录页
+// 被当成顶层文档打开"（auth.smartedu.cn/uias/login 就是这一类：html/body 都是
+// rgba(0,0,0,0)）。这种页面自己填不满表面，剩下的像素就是"能不能看见别的标签页"。
+const TRANSPARENT = `<!doctype html><html><head><meta charset="utf-8"><title>transparent</title>
+<style>html,body{margin:0;height:100%;background:transparent}</style></head><body>
+<div id="card" style="position:absolute;left:400px;top:200px;width:300px;height:200px;background:#00aa00">卡片</div>
+</body></html>`;
+
 let PASS = 0;
 let FAIL = 0;
 const fails = [];
@@ -60,7 +72,8 @@ function check(name, cond, detail) {
 function startServer() {
   return new Promise((resolve) => {
     const server = http.createServer((req, res) => {
-      const body = String(req.url || '').startsWith('/white') ? WHITE : NORMAL;
+      const u = String(req.url || '');
+      const body = u.startsWith('/white') ? WHITE : u.startsWith('/transparent') ? TRANSPARENT : NORMAL;
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(body);
     });
@@ -216,6 +229,40 @@ async function main() {
     const back = tabs.find((t) => t.id === whiteTab) || {};
     check('P5 后台 tab 没有被标成异常', back.paint === undefined, JSON.stringify(back.paint));
     unwrap(await b.call('ui.close_tab', { tab: other }));
+  }
+
+  // ---- P6 活动标签页的表面必须不透明 ----
+  console.log('\n[P6] 根背景透明的页面当活动标签页：不许有透明像素（否则下面那个标签页会透出来）');
+  {
+    // 底下先铺一张**不透明**的页面 —— 它正是"能透出来"时会看到的东西。
+    // 事故现场（2026-11-02）：auth.smartedu.cn/uias/login 这种按 iframe 浮层设计
+    // 的登录页被当成顶层文档打开，自己那张帧 86.3% 的像素 alpha<255，用户看到
+    // "点登录，背景成了百度" —— 透出来的不是这一页的旧画面，是**另一个标签页**。
+    const under = unwrap(await b.call('ui.new_tab', { url: `${base}/normal` })).tab;
+    await waitReady(b, under, `${base}/normal`);
+    const glass = unwrap(await b.call('ui.new_tab', { url: `${base}/transparent`, show: true })).tab;
+    await waitReady(b, glass, `${base}/transparent`);
+    await sleep(400);
+
+    // 反空过：先证明这个 fixture 的根背景确实还是透明的。哪天它变成不透明，
+    // 下面那条判据就会因为"没有可透的像素"而假绿。
+    const bg = unwrap(await b.call('ui.evaluate', {
+      tab: glass,
+      js: 'getComputedStyle(document.documentElement).backgroundColor + "|" + getComputedStyle(document.body).backgroundColor',
+    }));
+    const bgv = String((bg && bg.value) || '');
+    check('P6 前置：这一页的 html/body 背景确实都是 rgba(0,0,0,0)',
+      bgv === 'rgba(0, 0, 0, 0)|rgba(0, 0, 0, 0)', bgv);
+
+    const shot = unwrap(await b.call('ui.screenshot', { tab: glass, format: 'png' }));
+    const st = analyzePngAlpha(shot && shot.data);
+    check('P6 截帧解得开（不是空图，也不是"没截到所以没有透明像素"）', !!st.ok,
+      JSON.stringify({ err: st.error, bytes: shot && shot.bytes }));
+    check('P6 活动标签页的截帧里没有一个 alpha<255 的像素',
+      st.ok && st.transparent === 0,
+      JSON.stringify({ colorType: st.colorType, transparent: st.transparent, opaque: st.opaque, size: st.width + 'x' + st.height }));
+    unwrap(await b.call('ui.close_tab', { tab: glass }));
+    unwrap(await b.call('ui.close_tab', { tab: under }));
   }
 
   console.log(`\n==== PASS=${PASS} FAIL=${FAIL} ====`);

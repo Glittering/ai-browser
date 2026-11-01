@@ -3986,6 +3986,22 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
       },
     });
     this.tabs.set(tabId, view);
+    // ⚠️ 表面必须不透明 —— "谁可见"不能只靠 z 序（2026-11-02 根因修复）。
+    //
+    // 所有标签页的视图都常驻窗口、叠在**同一块 bounds** 上（为什么不"不显示就不挂"
+    // 见下面 2026-10-28 那段：没挂进窗口的视图没有合成表面，ui.screenshot 直接
+    // 0 字节），可见与否只由 `_raiseView` 的 setTopBrowserView 决定。但 z 序只决定
+    // **谁在上面**，不保证**上面那张不透**：BrowserView 的默认背景是透明的，于是
+    // 一个根背景透明的页面作为顶层文档打开时，透明像素会把**下面那张视图**照出来 ——
+    // 也就是另一个标签页的内容。实测现场（auth.smartedu.cn/uias/login，按 iframe
+    // 浮层设计、html/body 都是 rgba(0,0,0,0)）：活动标签页自己截出来的帧是
+    // RGBA、86.3% 的像素 alpha<255，用户看到的就是"点登录，背景成了百度"，
+    // 而透出来的正是上一次可见的那个百度标签页（它自己的帧是 RGB，0% 透明）。
+    //
+    // 设一个不透明底色 = 把真实浏览器的语义补回来：顶层页面背景透明时显示画布白，
+    // 由这一张自己填白，下面那张永远不参与成像。判据见 e2e paint 的"活动标签页的
+    // 帧不许有透明像素"。
+    try { view.setBackgroundColor('#FFFFFF'); } catch (_) { /* 老版本没有这个方法 */ }
     // 归属在最早的这一刻定下来：后面所有涉及"组"的判断（上限、标签栏、关闭
     // 后清理空组）都读这一条，晚设一步就会出现"页已经在了、但没人认领"的窗口期。
     this._tabGroup.set(tabId, opts.group || tabGroup.HUMAN_GROUP);
