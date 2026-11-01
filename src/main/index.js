@@ -843,7 +843,10 @@ function createWindow() {
   // while the agent works. When the user finally looks at it, they may be
   // looking at a stale frame. Repainting on show/restore/focus means the view
   // catches up the moment it becomes visible — no clicking tabs required.
-  const repaintActive = () => { try { pageManager.repaint(pageManager.activeTab); } catch (e) {} };
+  // 档位由 pageManager 的同一个判据给：默认 soft（只 invalidate，不改几何），
+  // AI_BROWSER_HOT_REPAINT=hard 时才用 1px 微调。把它无条件写成 hard 试过，
+  // 结果是"窗口每回到前台就大一下小一下" —— 判据与代价见 PageManager._hotRepaintHard。
+  const repaintActive = () => { try { pageManager.repaint(pageManager.activeTab, pageManager.hotRepaintOpts()); } catch (e) {} };
   // 拖动窗口边缘时会连发几十个 resize；逐个重绘会抖成幻灯片。150ms 去抖：松手就补一帧。
   let repaintTimer = null;
   const repaintActiveSoon = (ms = 150) => {
@@ -1213,15 +1216,20 @@ function updateWindowTitle() {
 function buildNavState() {
   const wc = activeWebContents();
   if (!wc) {
-    return { tab: null, url: '', canBack: false, canForward: false, loading: false, status: '', media_doc: null, download: null };
+    return { tab: null, url: '', canBack: false, canForward: false, loading: false, status: '', media_doc: null, download: null, pending_url: null };
   }
   const tab = pageManager.activeTab;
-  const url = wc.getURL();
+  // 加载窗口期显示**请求中的地址**，避免地址栏闪回上一页（判据在
+  // PageManager.pendingNavUrl：只在 state='loading' 期间返回，导航一落地就没了）。
+  const pendingUrl = pageManager.pendingNavUrl(tab);
+  const committedUrl = wc.getURL();
+  const url = pendingUrl || committedUrl;
   let media = null;
   try { media = pageManager.mediaDocOf(tab); } catch (_) { media = null; }
   return {
     tab,
     url,
+    pending_url: pendingUrl,
     canBack: wc.navigationHistory ? wc.navigationHistory.canGoBack() : wc.canGoBack(),
     canForward: wc.navigationHistory ? wc.navigationHistory.canGoForward() : wc.canGoForward(),
     loading: wc.isLoading(),

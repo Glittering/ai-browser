@@ -402,6 +402,37 @@ async function main() {
       JSON.stringify(afterStop.text));
 
     // =====================================================================
+    // NV-D3/D4：地址栏闪回的现场证据。/slow 要 2 秒才发响应头，这期间
+    // webContents.getURL() 返回的还是**上一页**（Chromium 只报已 commit 的地址）。
+    // 修复把"请求中的地址"记进 _pendingNavUrl，但要分两个口径：
+    //   · 地址栏（人）要看到请求中的地址，否则敲完回车会闪回旧页；
+    //   · list_tabs 的 url（agent）必须保持已 commit 的那一页 —— 把目标写进 url
+    //     会让 agent 以为已经到了，转头去读上一页的 DOM。目标放在 pending_url。
+    // =====================================================================
+    const beforeRow = (((await b.call("ui.list_tabs", {})).result || {}).tabs || [])
+      .find((t) => t.id === tab) || {};
+    const committedBefore = beforeRow.url;
+    b.call("ui.navigate", { url: HOST + "/slow", tab }).catch(() => {});   // 故意不等它
+    let duringRow = null;
+    for (let i = 0; i < 12 && !duringRow; i++) {
+      await sleep(100);
+      const row = (((await b.call("ui.list_tabs", {})).result || {}).tabs || [])
+        .find((t) => t.id === tab);
+      if (row && row.state === "loading" && row.pending_url) duringRow = row;
+    }
+    check("NV-D3 加载中：pending_url 报出正在打开的地址，url 仍是已 commit 的上一页",
+      !!duringRow && /\/slow$/.test(duringRow.pending_url) && duringRow.url === committedBefore,
+      JSON.stringify(duringRow || {}).slice(0, 220));
+    await sleep(2600);   // 等 /slow 真的落地（响应头在第 2 秒）
+    const afterRow = (((await b.call("ui.list_tabs", {})).result || {}).tabs || [])
+      .find((t) => t.id === tab) || {};
+    check("NV-D4 落地后 pending_url 消失、url 追上（不会挂着永远不加载的地址）",
+      afterRow.pending_url === undefined && /\/slow$/.test(String(afterRow.url || "")) &&
+      afterRow.state === "ready", JSON.stringify({ state: afterRow.state, url: afterRow.url, pending_url: afterRow.pending_url }));
+    await b.call("ui.navigate", { url: HOST + "/ok", tab });
+    await sleep(1000);
+
+    // =====================================================================
     console.log("\n[NV-E agent 侧零回归：WS 路径照常工作]");
     // =====================================================================
     const tree = await b.call("ui.get_tree", { tab });

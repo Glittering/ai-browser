@@ -784,6 +784,7 @@ sheet**，因此它既不在语义树里，也不受页面点击控制；**而�
 | `AI_BROWSER_CLIENT_HINTS` | 开 | `0` 关闭"给文档导航补 `sec-ch-ua*`"的出口钩子。只用于二分定位（关掉后导航请求回到内核那套：没有这三个头） |
 | `AI_BROWSER_DIALOG_POLICY` | `auto` | `alert/confirm/beforeunload` 的应答策略：`auto` / `accept` / `dismiss` / `manual`（不自动应答，交给人） |
 | `AI_BROWSER_PAINT_AUDIT` | 开 | `0` 关闭"加载成功但屏幕纯白"的自检与自救（唯一用途：精确测量导航时延） |
+| `AI_BROWSER_HOT_REPAINT` | **关** | `hard` 把"导航完成 / 切标签页 / 窗口回到前台"三条热路径的重绘升级为 1px 微调（唯一能强制合成表面重新栅格化的手段）。用它的情形：**切回一页或导航后屏幕上是上一页的像素**（透明背景的登录浮层透出旧页面）。代价：1px 微调必然触发两次重排，就是用户报过的"一闪一闪、大一下小一下"——所以默认关，`e2e/layout_ws` 的 G4/G5 把默认档钉成不变量 |
 | `AI_BROWSER_GPU` | `auto` | `on`/`off` 强制硬件或软件合成。`auto` = 默认硬件加速；连续两次 GPU 进程崩溃（2 分钟内）写 `~/.ai-browser/.gpu-off` 并自动重启到软件合成 |
 | `AI_BROWSER_MEDIA_INLINE` | 开 | `0` 关闭"图片/音视频/PDF 即使带 `Content-Disposition: attachment` 也按内容类型显示"，回到"一律当下载"。用于二分"某站点的显示问题是不是这条钩子造成的" |
 | `AI_BROWSER_START_HIDDEN` | 关 | `1` = 后台模式：进程起来但**不出窗口**（无人值守）。Dock 图标点击或 `ui.window{visible:true}` 随时把窗口叫回来；所有页面能力不受影响 |

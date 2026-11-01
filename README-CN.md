@@ -210,4 +210,22 @@ node bin/ai-browser.cjs call ui.server_info
   （`AI_BROWSER_CANVAS_HOOK` / `AI_BROWSER_POPUP_SHIM`，支持 `on` / 域名列表），
   `__ai_browser__` 也不再暴露给站点页面。
 
+### 屏幕上还是上一页的画面 / 地址栏闪回
+
+两件事，一类症状。
+
+**画面**：`BrowserView` 的合成表面只在有人逼它时才重新栅格化，所以窗口在 `show` /
+`restore` / `focus` 时会补一次重绘（这个窗口设计上不抢焦点，常常在你编辑器后面待几分钟）。
+默认那一档是 **soft**（`webContents.invalidate()`），不改几何、不会跳。它故意不更狠：
+唯一能重建"像素本身就是错的"那张表面的是 1px 尺寸微调，而它必然触发两次重排——
+把这条放在高频路径上的结果就是用户报过的"一闪一闪、大一下小一下"，现在由
+`e2e/layout_ws` 的 G4/G5 钉住（导航与切标签页默认一次重绘都不挂）。
+真的看到**上一页的像素**（透明背景登录浮层透出旧站点），就设 `AI_BROWSER_HOT_REPAINT=hard`，
+代价是跳。别去关 bfcache：bfcache 存的是你**离开**的那一页，解释不了前进导航后的旧画面，
+关掉它只会让前进/后退重新跑一遍页面 JS。
+
+**地址栏**：敲回车到新文档 commit 之间那几百毫秒，`webContents.getURL()` 返回的还是**上一页**，
+所以栏会闪回。现在加载中显示请求中的地址；`ui.list_tabs` 把同一件事放在
+**`pending_url`** 字段而不是 `url`——写进 `url` 会让 agent 以为已经到达，转头去读上一页的 DOM。
+
 仓库：https://github.com/Glittering/ai-browser · MIT

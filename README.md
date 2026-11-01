@@ -658,15 +658,30 @@ node examples/read-page.mjs
 
 ## Troubleshooting
 
-**The page updated but the window still shows the old one.** This used to require clicking tabs
-back and forth, because the only thing that forced the compositor to redraw a `BrowserView` was
-`setActiveTab` doing `removeBrowserView` + `addBrowserView` + `setBounds` — navigation never did it.
-Now every navigation signal triggers it: `did-navigate`, `did-navigate-in-page` (SPA route changes
-fire no load event at all), `did-frame-finish-load` (a canvas editor inside an iframe boots long
-after the top document finished), plus window `show` / `restore` / `focus` — which matters here
-because this window is designed never to steal your focus, so it sits behind your editor for
-minutes at a time. If it still looks stale, `ui.repaint` forces it on demand and returns
-`repaint_count` so you can confirm a repaint actually happened.
+**The page updated but the window still shows the old one.** A `BrowserView`'s surface is only
+re-rasterized when something forces it, so the app asks for a repaint on window `show` / `restore` /
+`focus` — that matters because this window is designed never to steal your focus, so it can sit behind
+your editor for minutes while the agent works. `ui.repaint` forces it on demand and reports
+`repaint_count`, the only externally observable proof that a repaint actually happened.
+
+Two things to know about that knob:
+
+- The default is **soft** (`webContents.invalidate()`): it never touches geometry, so it cannot make
+  the window jump. It is deliberately not stronger. A 1px bounds nudge is the only thing that rebuilds
+  a surface whose *pixels* are wrong, and it costs two relayouts — which is exactly the
+  "grows-then-shrinks, flickers" complaint this app got when that ran on the hot paths
+  (`e2e/layout_ws` G4/G5 now pin navigation and tab-switch to zero repaints by default).
+- If you really are seeing the **previous page's pixels** — a transparent login overlay with the old
+  site behind it — set `AI_BROWSER_HOT_REPAINT=hard` and take the flicker: it upgrades repaint on
+  navigation-finish, tab switch and window re-show. `disable-back-forward-cache` is not the lever
+  here; bfcache stores the page you navigate *away from*, so it cannot explain a stale frame on a
+  forward navigation, and switching it off costs you the instant back/forward restore.
+
+Separate bug, same "the screen is lying" family: during the few hundred milliseconds between pressing
+Enter and the new document committing, `webContents.getURL()` still returns the **old** page, so the
+address bar used to flash back to it. It now shows the requested URL while `state` is `loading`
+(`list_tabs` reports it as `pending_url`, never as `url` — an agent that read the target in `url`
+would assume it had arrived and scrape the previous page).
 
 **An action reported success but nothing changed.** Two causes worth knowing:
 

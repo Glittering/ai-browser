@@ -39,6 +39,7 @@ const PER_TAB = [
   { field: '_windowOpenShimReady' },
   // ---- 导航状态机 ----
   { field: '_tabNavState' },
+  { field: '_pendingNavUrl' },       // 键 = tab，值 = 正在打开（还没 commit）的地址
   // ---- 浏览器级对话框 ----
   { field: '_lastDialog' },
   { field: '_openDialogs' },

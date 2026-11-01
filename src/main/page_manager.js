@@ -236,6 +236,9 @@ class PageManager {
     // 所有人的默认目标都变成它；B 说"点提交"，点在 A 的页面上。判据与优先级见
     // shared/tab_route.cjs（explicit > session > active > first）。
     this._sessionTab = new Map();
+    // tabId -> 正在发起的导航 URL。地址栏在加载窗口期应显示 pending URL，
+    // 而不是 wc.getURL() 返回的旧 URL（2026-11-01 修"输入 github.com 跳回 baidu"）。
+    this._pendingNavUrl = new Map();
     // ---- 标签页归属（人的一组，每个 agent 一组）----
     //
     // 为什么需要它：会话级目标解决了"动作落在哪一页"，但标签条上仍然是一锅粥 ——
@@ -721,6 +724,7 @@ class PageManager {
     const gid = this._tabGroup.get(tabId);
     this._tabGroup.delete(tabId);
     this._tabUsedAt.delete(tabId);
+    this._pendingNavUrl.delete(tabId);
     if (!gid || gid === tabGroup.HUMAN_GROUP) return;
     // 组空了就删：留在 Map 里会让标签栏出现一个 0 页的分组，下次同名 agent
     // 重连还会复用那个组的编号/颜色，看起来像"上一轮的残留"。
@@ -1116,8 +1120,19 @@ class PageManager {
     // 于是 ui.navigate 期间 list_tabs 一直报 'ready' —— agent 看到 ready 就去
     // 读树/截图，拿到的是旧页面或半张页面，然后开始"重试"。
     this._tabNavState.set(tid, 'loading');
+    // 记录 pending URL：在加载窗口期地址栏应显示用户输入的目标 URL，
+    // 而不是 wc.getURL() 返回的上一个页面的 URL。
+    this._pendingNavUrl.set(tid, url);
     const markReady = () => {
       if (this._tabNavState.get(tid) === 'loading') this._tabNavState.set(tid, 'ready');
+      this._pendingNavUrl.delete(tid);
+      // 旧合成表面残留只在**显式开了 hard 热路径重绘**时才在这里处理：
+      // 默认关，因为 1px 微调会重排两次，而导航是最高频的路径（判据与代价见
+      // _hotRepaintHard / _forceRepaint，回归钉子是 e2e/layout_ws 的 G4/G5）。
+      if (this._hotRepaintHard() && tid === this.activeTab) {
+        const v = this._getView(tid);
+        if (v && isAlive(v)) this._forceRepaint(v, { hard: true });
+      }
     };
     wc.once('did-finish-load', markReady);
     wc.once('did-fail-load', markReady);
@@ -1159,6 +1174,45 @@ class PageManager {
         ? 'returned at ' + waitUntil + ' — the load event has not fired (normal for SPAs); the page is usable now. Wait for specific content with ui.wait, not for load.'
         : null,
     };
+  }
+
+  /**
+   * 这一页"正在打开的地址"（还没 commit 的导航目标）；没有在加载就返回 null。
+   *
+   * 为什么需要它：Chromium 的 `webContents.getURL()` 只返回**已 commit** 的地址，
+   * `loadURL` 发出去到 commit 之前返回的仍是上一页。人敲回车时地址栏先 `blur()`
+   * 再发 `nav:go`，于是这几百毫秒里推过来的还是旧地址 —— 人看到的形态是
+   * "输入 github.com，地址栏闪回 baidu"（2026-11-01）。
+   *
+   * 只在 `state === 'loading'` 期间返回：那条状态机的写入方就是发起导航的地方，
+   * 所以"有 pending 且仍在 loading"是同一个事实的两个面，不会出现"页面上停着
+   * 一个永远不加载的地址还挂在栏上"。
+   */
+  pendingNavUrl(tabId) {
+    const tid = tabId === undefined || tabId === null ? this.activeTab : tabId;
+    if (this._tabNavState.get(tid) !== 'loading') return null;
+    return this._pendingNavUrl.get(tid) || null;
+  }
+
+  /**
+   * 高频路径（导航完成 / 切标签页 / 窗口重新可见）要不要用 hard 重绘。
+   *
+   * 默认 **false**：2026-10-25 用户报"一闪一闪、大一下小一下"，根因就是 1px 微调
+   * 必然触发两次重排；这套当时被从高频路径撤掉，并由 e2e/layout_ws 的 G4/G5 钉成
+   * 不变量（导航路径一次重绘都不许挂）。
+   * 但另有一类真实反馈：切回标签页 / 导航完成后屏幕上是**上一页**的像素（透明背景
+   * 的登录浮层透出旧页面），那只有重新栅格化才能治。两者是同一枚硬币的两面，
+   * 所以不替用户决定，交给开关：
+   *   AI_BROWSER_HOT_REPAINT=hard  这三条路径改走 hard（优先消除旧画面，代价是跳）
+   *   其它/不设置                    保持现状（不抽搐，旧画面由白屏自检阶梯兜底）
+   */
+  _hotRepaintHard() {
+    return String(process.env.AI_BROWSER_HOT_REPAINT || '').trim().toLowerCase() === 'hard';
+  }
+
+  /** 给 index.js 的窗口事件重绘用：同一条开关，两处判据不许分叉。 */
+  hotRepaintOpts() {
+    return this._hotRepaintHard() ? { hard: true } : {};
   }
 
   // commit / domcontentloaded 的事件等待。只认主帧：子帧导航不改变"这个 tab 到了
@@ -4077,8 +4131,10 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
             // 让"正在加载"可被观测：白屏最贵的地方不是慢，是慢得无法和
             // "开错了"区分（见 listTabs 的 state 字段）。
             this._tabNavState.set(tabId, 'loading');
+            this._pendingNavUrl.set(tabId, targetUrl);
             wc0.once('did-finish-load', () => {
               if (this._tabNavState.get(tabId) === 'loading') this._tabNavState.set(tabId, 'ready');
+              this._pendingNavUrl.delete(tabId);
             });
             wc0.loadURL(targetUrl).catch(() => {});
           } else {
@@ -4952,10 +5008,18 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     for (const [id, view] of this.tabs) {
       const gid = this.groupOfTab(id);
       const g = this.groupMeta(gid);
+      const state = this._tabNavState.get(id) || 'ready';
+      // url 这一列必须是**已 commit** 的地址 —— agent 拿它判断"到了没有"。把"正在
+      // 请求的地址"写进 url，它会在页面还是上一页的 DOM 时就开始读树/截图。
+      // 加载目标另用 pending_url 说明（判据见 pendingNavUrl）。
+      // isAlive 守卫不是洁癖：视图在遍历这一圈时被销毁，getURL/getTitle 会抛，
+      // 一条抛错会让整个 list_tabs 失败，等于别的 tab 也一起消失。
+      const live = isAlive(view);
+      const pending = this.pendingNavUrl(id);
       list.push({
         id,
-        url: view.webContents.getURL(),
-        title: view.webContents.getTitle(),
+        url: live ? view.webContents.getURL() : '',
+        title: live ? view.webContents.getTitle() : '',
         active: id === this.activeTab,
         // 归属：'human' = 人的页，'agent:<session>' = 某个 agent 的工作区。
         // agent 靠它判断"这一页是不是我的"，人靠它在标签栏归拢。
@@ -4969,13 +5033,15 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
         //             是"正在打开"而不是"开错了"，等它，不要重试
         // 'blank'   = window.open("") 的占位 tab，在等站点赋 location
         // 'ready'   = 已就绪（没有记录时也按就绪处理）
-        state: this._tabNavState.get(id) || 'ready',
+        state,
         // 只有 manual 策略下才会长期存在。auto 模式下对话框在打开的瞬间就被
         // 应答了，所以正常情况这个字段不出现 —— 出现即意味着"有人需要点它"。
         ...(this._openDialogs.has(id) ? { dialog: this._openDialogs.get(id) } : {}),
         // 白屏只在与众不同时出现：正常页面不带这个字段（省 token，也不给
         // 调用方制造"每次都要判"的噪音）。出现即"这一页没画出来"。
         ...(this._paintProblem(id) ? { paint: this._paintProblem(id) } : {}),
+        // 加载中时把 pending URL 也暴露给 agent，方便它判断"正在打开的是哪个地址"。
+        ...(pending ? { pending_url: pending } : {}),
       });
     }
     return list;
@@ -4996,6 +5062,8 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
   /** 把某个视图提到最上层（= 人看到它）。老版本没有 setTopBrowserView 时退回 remove+add。 */
   _raiseView(view) {
     if (!view || !this.window) return;
+    // 优先 setTopBrowserView（不改 surface，只改 z 序）。
+    // 如果不可用，退回 remove+add（强制重建 surface，代价是闪一帧白）。
     try {
       if (typeof this.window.setTopBrowserView === 'function') {
         this.window.setTopBrowserView(view);
@@ -5024,12 +5092,16 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     this.networkMonitor.setActiveTab(tabId);
     const view = this._getView(tabId);
     if (view) {
-      // 只调 z 序：以前是"把所有视图 remove 掉、再 add 一个"，那等于每次切标签页
-      // 都让其余标签页失去合成表面（截图/自检全失效），而且 remove+add 本身会
-      // 闪一帧白。
       this._attachView(view);
       this._raiseView(view);
       this._layoutView(view);
+      // 旧画面残留的可疑路径就是这条：view 被摘下来过（切去别的 tab）时它的 surface
+      // 像素停在最后那一刻，切回来时合成器可能直接复用那张图。默认**不**在这里重绘
+      // —— 切标签页是最高频的动作之一，挂上 1px 微调就变成用户看到的抽搐。
+      // 真的遇到"切回来还是上一页"再开 AI_BROWSER_HOT_REPAINT=hard（判据见 _hotRepaintHard）。
+      if (this._hotRepaintHard()) {
+        try { this._forceRepaint(view, { hard: true }); } catch (_) { /* 视图正在销毁 */ }
+      }
       this._focusWebContents(view);
       view.webContents.setBackgroundThrottling(false);
     }
@@ -5203,7 +5275,13 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
       const out = { ok: true };
       try { out.bounds = this.window.getBounds(); } catch (_) { /* 窗口已销毁 */ }
       try { out.content = this.window.getContentBounds(); } catch (_) { /* 窗口已销毁 */ }
-      out.repaints = { soft: this._repaintCount || 0, hard: this._hardRepaintCount || 0 };
+      // hot_mode 是**当前档位**，soft/hard 两个数是**已经发生过几次**。
+      // 报旧画面问题时先看档位，否则"没生效"和"没开"看起来一模一样。
+      out.repaints = {
+        soft: this._repaintCount || 0,
+        hard: this._hardRepaintCount || 0,
+        hot_mode: this._hotRepaintHard() ? 'hard' : 'soft',
+      };
       const views = {};
       for (const [id, view] of this.tabs) {
         try { views[id] = view.getBounds(); } catch (_) { /* 视图已销毁 */ }

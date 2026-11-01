@@ -47,6 +47,7 @@ vi.mock('electron', async () => {
       this.id = ++seq;
       this.sent = [];          // [channel, payload]
       this.url = 'about:blank';
+      this.title = '';
       this.destroyed = false;
       this.userAgent = '';
       this.zoom = 1;
@@ -62,6 +63,7 @@ vi.mock('electron', async () => {
     send(channel, payload) { this.sent.push([channel, payload]); }
     isDestroyed() { return this.destroyed; }
     getURL() { return this.url; }
+    getTitle() { return this.title || ''; }
     getUserAgent() { return this.userAgent; }
     setUserAgent(ua) { this.userAgent = ua; }
     loadURL(url) { this.url = url; return Promise.resolve(); }
@@ -87,6 +89,9 @@ vi.mock('electron', async () => {
     downloadURL() { return Promise.resolve(); }
     addWordToSpellCheckerDictionary() {}
     capturePage() { return Promise.resolve({ isEmpty: () => false, toPNG: () => Buffer.from('') }); }
+    // 重绘计数的落点。热路径到底有没有挂重绘，只有这里能看出来 ——
+    // _forceRepaint 的返回值不区分"没挂"和"挂了但合成器没理"。
+    invalidate() { this.invalidations = (this.invalidations || 0) + 1; }
     get session() { return { setPermissionRequestHandler: () => {}, cookies: {} }; }
   }
 
@@ -327,5 +332,112 @@ describe('文档导航的 UA-CH 出口补头（_installClientHintBridge）', () 
     let out = 'not-called';
     ses.rec.listener({ get requestHeaders() { throw new Error('boom'); } }, (r) => { out = r; });
     expect(out).toEqual({});
+  });
+});
+
+// 这两组钉的是 2026-11-01 从 ai-browser-tmp 合进来的两个修复。它们各自的坑都
+// 不在"有没有效"，而在"代价落在哪"：
+//   · pending 地址：修复地址栏闪回是对的，但把它写进 list_tabs 的 url 会让
+//     agent 把"正在请求"当成"已经到达"，于是去读上一页的 DOM。
+//   · 热路径重绘：治旧画面只有 hard（1px 微调）有效，而 2026-10-25 用户报的
+//     "一闪一闪、大一下小一下"正是 hard 上了高频路径。所以它必须是开关，不是默认。
+describe('加载窗口期的目标地址（_pendingNavUrl / pendingNavUrl）', () => {
+  it('PM-13 导航在途：pendingNavUrl 给出目标，但 list_tabs 的 url 仍是已 commit 的地址', async () => {
+    const tid = pm.newTab('https://old.example/');
+    const wc = pm.tabs.get(tid).webContents;
+    // 真 Chromium 在这几百毫秒里 getURL() 返回的就是上一页；假对象会立刻改口，
+    // 所以把"还没 commit"显式钉回来 —— 否则这条测的是假对象，不是判据。
+    wc.getURL = () => 'https://old.example/';
+    wc.getTitle = () => '旧页';
+
+    await pm.navigate('https://target.example/', tid, { waitUntil: 'commit' });
+
+    expect(pm.pendingNavUrl(tid)).toBe('https://target.example/');
+    const row = pm.listTabs().find((t) => t.id === tid);
+    expect(row.state).toBe('loading');
+    expect(row.url, 'url 被 pending 覆盖 = agent 以为已经到了，转头去读上一页的 DOM').toBe('https://old.example/');
+    expect(row.pending_url, '加载中的目标要有地方说，但不能占用 url 这一列').toBe('https://target.example/');
+    // 地址栏取的正是 pending：人敲进去的那个地址不该闪回上一页。
+    expect(pm.pendingNavUrl(tid) || wc.getURL()).toBe('https://target.example/');
+  });
+
+  it('PM-14 load 落地后 pending 消失，不会挂着一个永远不加载的地址', async () => {
+    const tid = pm.newTab('https://old.example/');
+    const wc = pm.tabs.get(tid).webContents;
+    await pm.navigate('https://target.example/', tid, { waitUntil: 'commit' });
+    wc.emit('did-finish-load');
+
+    expect(pm.pendingNavUrl(tid)).toBe(null);
+    expect(pm._pendingNavUrl.has(tid), 'markReady 没清 = 这一列永远脏').toBe(false);
+    const row = pm.listTabs().find((t) => t.id === tid);
+    expect(row.state).toBe('ready');
+    expect(row.pending_url, 'state=ready 还带 pending_url = 两个字段互相打脸').toBeUndefined();
+  });
+
+  it('PM-15 关 tab 后 pending 条目跟着消失（登记表真的管到了它）', () => {
+    const tid = pm.newTab('https://a.example/');
+    pm._tabNavState.set(tid, 'loading');
+    pm._pendingNavUrl.set(tid, 'https://b.example/');
+    expect(pm.pendingNavUrl(tid)).toBe('https://b.example/');
+    pm.closeTab(tid);
+    expect(pm._pendingNavUrl.has(tid)).toBe(false);
+  });
+});
+
+describe('热路径重绘档位：默认不抽搐，开了才付 hard 的代价', () => {
+  it('PM-16 默认档：导航完成与切标签页都不挂重绘（e2e/layout_ws G4/G5 的单元侧镜像）', async () => {
+    const tid = pm.newTab('https://a.example/');
+    const wc = pm.tabs.get(tid).webContents;
+    await pm.navigate('https://b.example/', tid, { waitUntil: 'commit' });
+    wc.emit('did-finish-load');
+    const other = pm.newTab('https://c.example/');
+    pm.setActive(tid);
+    pm.setActive(other);
+    pm.setActive(tid);
+
+    expect(wc.invalidations || 0, '热路径一挂重绘，用户就看到"大一下小一下"').toBe(0);
+    expect(pm._hardRepaintCount || 0).toBe(0);
+  });
+
+  it('PM-17 AI_BROWSER_HOT_REPAINT=hard：这两条路径改为重新栅格化，且尺寸回到原值', async () => {
+    const old = process.env.AI_BROWSER_HOT_REPAINT;
+    process.env.AI_BROWSER_HOT_REPAINT = 'hard';
+    try {
+      const tid = pm.newTab('https://a.example/');
+      const view = pm.tabs.get(tid);
+      const wc = view.webContents;
+      await pm.navigate('https://b.example/', tid, { waitUntil: 'commit' });
+      wc.emit('did-finish-load');
+      expect(wc.invalidations || 0, 'hard 档下导航完成要清掉上一页的像素').toBeGreaterThan(0);
+      expect(pm._hardRepaintCount || 0, 'hard 计数是唯一可外部观察的证据').toBeGreaterThan(0);
+
+      const other = pm.newTab('https://c.example/');
+      const before = wc.invalidations || 0;
+      pm.setActive(tid);
+      expect((wc.invalidations || 0) - before, '切回这一页也要重绘').toBeGreaterThan(0);
+      // 1px 微调是临时的：切完之后视图尺寸必须和布局算出来的一致，否则几何不变量就坏了。
+      expect(view.bounds.width).toBe(1280);
+      expect(view.bounds.height).toBe(800 - config.tabBarHeight);
+    } finally {
+      if (old === undefined) delete process.env.AI_BROWSER_HOT_REPAINT;
+      else process.env.AI_BROWSER_HOT_REPAINT = old;
+    }
+  });
+
+  it('PM-18 档位判据只认 hard，别的值（含 1/true）都保持默认', () => {
+    const old = process.env.AI_BROWSER_HOT_REPAINT;
+    try {
+      for (const v of ['0', '1', 'true', '', 'soft', 'HARD ']) {
+        process.env.AI_BROWSER_HOT_REPAINT = v;
+        const on = v.trim().toLowerCase() === 'hard';
+        expect(pm._hotRepaintHard(), `档位 ${JSON.stringify(v)} 判错`).toBe(on);
+        expect(!!pm.hotRepaintOpts().hard, `opts 与判据分叉（${JSON.stringify(v)}）`).toBe(on);
+      }
+      delete process.env.AI_BROWSER_HOT_REPAINT;
+      expect(pm._hotRepaintHard(), '不设置 = 默认关（保持不抽搐）').toBe(false);
+    } finally {
+      if (old === undefined) delete process.env.AI_BROWSER_HOT_REPAINT;
+      else process.env.AI_BROWSER_HOT_REPAINT = old;
+    }
   });
 });
