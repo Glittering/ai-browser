@@ -451,13 +451,19 @@ if (!gpuDisabled && gpuPref !== 'on') {
 }
 if (gpuDisabled) app.disableHardwareAcceleration();
 
-// Disable Chromium sandbox — required when launched from restricted
-// environments (e.g. TRAE IDE shell) where the sandbox helper cannot
-// acquire the privileges it needs, causing "sandbox initialization failed:
-// Operation not permitted" and immediate app exit. Safe here because we
-// already run with contextIsolation:true + nodeIntegration:false, so
-// renderer code has no Node access regardless of OS-level sandbox.
-app.commandLine.appendSwitch('no-sandbox');
+// Chromium 的 OS 级沙箱**默认关闭**：受限环境（例如 IDE 的集成终端 / TRAE 的
+// shell）里 sandbox helper 拿不到它需要的权限，表现为 "sandbox initialization
+// failed: Operation not permitted" 后立刻退出 —— 那是一个"装上就打不开"的
+// 故障，比沙箱带来的纵深防御更急。
+//
+// 但它不再是**无法打开**的：`AI_BROWSER_SANDBOX=1` 就不加这个开关，让
+// Chromium 用自己的沙箱。前提是启动环境允许 helper 工作（否则启动即退），
+// 所以默认仍然关着 —— 这是权衡，不是"忘了"。
+//
+// 注：渲染器侧无论如何都没有 Node（contextIsolation:true + nodeIntegration:false），
+// 这一位管的是"渲染进程被攻破之后还能不能碰到系统"。
+const wantOsSandbox = process.env.AI_BROWSER_SANDBOX === '1';
+if (!wantOsSandbox) app.commandLine.appendSwitch('no-sandbox');
 
 // Keep renderers fully active even when the window is occluded (e.g. an IDE
 // fullscreen window sits on top of the browser). By default Chromium
@@ -1424,10 +1430,26 @@ async function persistSessionCookies() {
       // 每 10 个停 100ms，让每一批都有机会落盘。
       if (i % 10 === 9) await new Promise((r) => setTimeout(r, 100));
     }
-    // 最后一组的 grouped commit 也要时间，等 2 秒再让 cleanupAndQuit 继续。
+    // 最后强制落盘。`cookies.set()` resolve 只代表"已经排进 store"：Chromium 的
+    // cookie store 是 grouped commit，提交永远追不上（实测 86 个 set 全部"成功"
+    // 但磁盘只剩 2 个，2026-10-19）。此前这里靠"固定睡 2 秒"碰运气，退出因此
+    // 白等 2s 而且不保证成功；`flushStore()` 正是为此存在的原语：强制写盘并
+    // 等它完成。老版本 Electron 没有这个 API 时退回原来的等待。
     if (n > 0) {
-      await new Promise((r) => setTimeout(r, 2000));
-      console.log(`[index] persisted ${n} session cookies before quit`);
+      let flushed = false;
+      try {
+        if (ses.cookies && typeof ses.cookies.flushStore === 'function') {
+          await ses.cookies.flushStore();
+          flushed = true;
+        }
+      } catch (e) {
+        console.error('[index] cookie flushStore failed:', e && e.message);
+      }
+      if (!flushed) await new Promise((r) => setTimeout(r, 2000));
+      // 留一点余量给紧随其后的进程退出路径（不参与正确性，只是别让写盘和
+      // 销毁撞在同一毫秒）。有了 flushStore 之后这 2s 不再需要。
+      await new Promise((r) => setTimeout(r, 300));
+      console.log(`[index] persisted ${n} session cookies before quit (flushStore=${flushed})`);
     }
   } catch (e) {
     console.error('[index] persistSessionCookies failed:', e && e.message);

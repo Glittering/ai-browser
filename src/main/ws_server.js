@@ -311,6 +311,32 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null, 
             //
             // `mode`（'diff'）只在 AX 读法里有意义。此前默认读法会**静默忽略**
             // 它，调用方拿到的还是整棵树却以为拿到了增量 —— 宁可报错说清楚。
+            // 枚举必须先校验。`subset` 只认 'interactive'|'full'，此前传
+            // 'all'（wrapper_hint 就一直这么建议）或任意拼错都会**静默返回全量**
+            // ——调用方以为省了 token，实际一句没省，而且没有任何信号。这和
+            // "参数根本不存在"是同一类失败，必须报错。
+            const SUBSETS = ['interactive', 'full'];
+            if (params.subset !== undefined && params.subset !== null && SUBSETS.indexOf(params.subset) < 0) {
+              send({
+                jsonrpc: '2.0', id,
+                error: {
+                  code: -32602,
+                  message: `get_tree: unknown subset ${JSON.stringify(params.subset)} — use one of: ${SUBSETS.join(' / ')}`,
+                },
+              });
+              break;
+            }
+            const MODES = ['diff', 'full'];
+            if (params.mode !== undefined && params.mode !== null && MODES.indexOf(params.mode) < 0) {
+              send({
+                jsonrpc: '2.0', id,
+                error: {
+                  code: -32602,
+                  message: `get_tree: unknown mode ${JSON.stringify(params.mode)} — use one of: ${MODES.join(' / ')}`,
+                },
+              });
+              break;
+            }
             if (params.mode && !params.ax) {
               send({
                 jsonrpc: '2.0', id,
@@ -800,6 +826,30 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null, 
                 },
               });
               break;
+            }
+            // 必填参数也要先校验：`button_enabled` 不传 target、`text_*` 不传 text
+            // 时，旧代码会在轮询里拿一个恒不成立的条件跑满 timeout，最后回
+            // `satisfied:false`。调用方读到的是"条件没出现"，而真相是"你少传了一个
+            // 参数"——这两种情况要付出的代价完全不同（一个该重试，一个该改代码）。
+            const NEEDS = {
+              button_enabled: 'target',
+              text_contains: 'text',
+              url_contains: 'text',
+            };
+            const needKey = NEEDS[params.condition];
+            if (needKey) {
+              const v = params[needKey];
+              const missing = v === undefined || v === null || (typeof v === 'string' && v === '');
+              if (missing) {
+                send({
+                  jsonrpc: '2.0', id,
+                  error: {
+                    code: -32602,
+                    message: `wait: condition '${params.condition}' requires ${needKey} (got ${JSON.stringify(v)})`,
+                  },
+                });
+                break;
+              }
             }
             // timeout_ms 必须钳制：调用方写 600000 会让这条 RPC 和一次 500ms 一轮的
             // 树抽取循环一直跑着，而 agent 那边通常早就超时放弃了。

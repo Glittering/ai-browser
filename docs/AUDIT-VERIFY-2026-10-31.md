@@ -191,3 +191,93 @@ path=ws-pkg  | origin = null | ua = ""
 **一个必须写进测试的判据**：把 §2.1/§2.2 的探针做成 `e2e/security_ws.cjs` 的固定用例 ——
 页面连不上（`readyState` 3 / close 1008）、且 evaluate 拿不到 `process`。
 两条都要有**阳性对照**：临时删掉 Origin 检查应当变红，否则这道闸门永远绿。
+
+---
+
+## 6. 闭环状态（2026-11-01，v2.5.0 修完 → v2.5.1 补齐）
+
+> 这一节是**逐条对账**：本报告里点名的每一条，现在的状态、落点、判据。
+> 状态只有三种：✅ 已修（有判据）／⚠️ 部分（说明差在哪）／⏸ 有意不修（说明理由）。
+
+### 6.1 逐条对账
+
+| 项 | 状态 | 落点（判据） |
+|---|---|---|
+| C1 WS 无鉴权 / 不校验 Origin | ✅（Origin） | `ws_server.js` 握手见 `Origin` → `close(1008)`；`tests/test_ws_auth.js` A1–A3；`e2e/security_ws.cjs` SE-1..3（另起 `AI_BROWSER_WS_ALLOW_ORIGIN=1` 的实例做阳性对照） |
+| C1 的 explicit tab 跨会话 | ⏸ | 见 §6.3-④：`explicit > session > active` 是**写死的产品优先级**，关掉 Origin 后它只对"本机同用户进程"成立 |
+| C2 `sendTree/sendDiff` 暴露 / `ai:*` 不校验 sender | ✅ | 暴露面删除；`shared/ipc_guard.cjs` 校验 sender+tab+kind；`tests/test_bridge_surface.js`（vm 真加载 bridge）、`test_ipc_guard.js` G1–G9、**`test_page_manager.js` PM-5/6**（真 PageManager 收 IPC） |
+| C3 preload `eval` 兜底 + guard 可绕 | ✅ | 删 `_evaluateViaPreload` 与 `ai:evaluate`；`shared/eval_route.cjs` 把"页面抛错"与"CDP 不可用"分开；`tests/test_eval_route.js` E2–E6 |
+| C4 全局 `--no-sandbox` + `sandbox:false` | ⚠️ | `--no-sandbox` 现在**可关**：`AI_BROWSER_SANDBOX=1`（默认仍关，理由见 §6.3-②）；`sandbox:false` **未动**，前置条件是 preload 打包成单文件 |
+| C5 upload 任意绝对路径 | ✅ | `shared/upload_guard.cjs`（存在性/普通文件/**realpath 后**判敏感/大小上限）；`tests/test_upload_guard.js` U1–U10（U10 就是 `ln -s` 伪装私钥） |
+| C6 MCP 固定 15s 腰斩 300s | ✅ | `mcp_ws.call(method, params, {timeoutMs})` + `shared/tool_timeout.js`；`tests/test_tool_timeout.js` |
+| C7 `subset/mode` 静默失效 | ✅ | `subset` 在**默认读法**生效（`page_manager.getTree` 第三参）；`mode` 不带 `ax` 报 `-32602`；**且枚举非法值现在也报错**（`tests/test_ws_handlers.js` V-1/V-3） |
+| C8 `focused_only` 空转 | ✅ | `shared/tree_focus.cjs`（保留祖先链 + 焦点子树，无焦点时明说）；两种拼写都认；`e2e/contract_ws.cjs` CT-6/6b |
+| C9 每次读树必合并 OOPIF | ⏸ | 见 §6.3-③：有 3 道早退，加缓存会引入"陈旧的树"，代价大于收益 |
+| C10 `wait` 抽整棵树 + 未知 condition 空转 | ✅ | 按条件选探针（text/url 只 evaluate）；condition 白名单 `-32602`；**且必填参数也校验**（`target`/`text` 缺失立刻报错，V-4/V-5）；W-4/W-5 |
+| C11 `id:null` / paint_check 路由 / `ignored_params` / `subset:"all"` / `protocol.js` | ✅ | 5 项全修：解析错误补 `id:null`；`paint_check` 走统一路由；`screenshot` 不再把 `tab` 报成 ignored；`wrapper_hint` 建议 `full` 且断言"必须是 schema 里的枚举"；死抽象 `protocol.js` 删除 |
+| C12 PageManager 零行为单测 | ✅ | **`tests/test_page_manager.js` 7 条**：用 `vi.mock('electron')` 真构造真调用（关 tab 清理 / IPC 归属 / 崩溃超时） |
+| C12 CI 只跑单测 | ⚠️ | e2e 需要真实桌面会话，`macos-14` runner 上跑 27 个要起窗口的套件不现实；改为把"能静态查的"纳入 CI：新增**语法闸门** `tests/test_syntax.js`（`src/`+`bin/` 全量 `node --check`，覆盖 `index.js` 这种单测从不 import 的文件） |
+| C13 README 漂移 | ✅ | 17 工具 / 工具表 17 行 / badge `1309+831` / "没有截图调用"改为"读页面不经过截图，`browse_screenshot` 是诊断口" |
+| C14 cookie 固化固定等 2s | ✅ | `session.cookies.flushStore()` 取代固定 2s（失败才退回等待），退出不再白等 |
+| C14 Cmd+W 关窗即退出 | ⏸ | 见 §6.3-⑤ |
+| C15 抓包 / canvas hook 默认全开 | ⏸ | 见 §6.3-③：两者都有 env 逃生门（`AI_BROWSER_NETWORK_CAPTURE=0` / `AI_BROWSER_CANVAS_HOOK=0`），关掉会直接砍掉 agent 的核心观测能力 |
+| C16 同名下载覆盖 | ✅ | `download_monitor.uniquePath()`（`report.csv` → `report (1).csv`）；`tests/test_download_unique.js` |
+| C17 布局两份 / `_ensureCdp` 乐观记账 / `tabsInGroup` 裸解引用 / `test_imports` 漏 `.cjs` | ✅ | `_viewBounds()` 唯一公式；`ensure` 成功后才记账、失败落盘 `cdp_enable_failed`；`tabsInGroup` 走 `isAlive`；`test_imports` 增 `.cjs` require 闸门（C-0/C-1） |
+| C17 无 lint/类型检查 | ⚠️ | 见 §6.3-⑥：不引 eslint，只做 `node --check` 全量语法闸门 |
+
+### 6.2 §3 卡的落实情况
+
+| 卡 | 结果 |
+|---|---|
+| SEC-01 Origin + token | **Origin 已做**（并加了 `Origin` 只在浏览器出现的前提判据）；token 未做，理由 §6.3-① |
+| SEC-02 删暴露面 + sender 绑定 | ✅ 且补了卡里没写的"崩溃后 pending 靠超时释放"（PM-7，5s 硬超时实测） |
+| SEC-03 换掉 preload eval | ✅ 且按 §3 的意见**先改错误分类再删回落**（否则只是换一种撒谎） |
+| API-01 per-call timeout | ✅（默认仍 15s 兜底，坏工具拖不住整轮） |
+| API-02/03 subset / focused_only | ✅ `subset` 复用 `filterInteractive` 是安全的：它只剪枝、不改 id，`data-ai-id` 与 `actions` 不会错配；`focused_only` 按 §3 要求保留了祖先链 |
+| CORE-00 Fake Electron 骨架 | ✅ 采用了卡里的"更小的第一刀"：不抽 `ViewShell`，直接把假 `BrowserView` 注进**真类**，同样拿到行为判据、不动生产代码 |
+| DOC-01 README 一致性 | ✅ badge + 工具表 + 截图表述三处都改 |
+
+### 6.3 有意不做的五件（都是判断，不是遗漏）
+
+① **启动 token（SEC-01 后半）**。Origin 已经挡住"页面 → 控制面"这条真实路径；
+token 保护的是"本机已能以你的身份执行代码的进程"——那种进程本来就能读 token 文件
+（或直接 ptrace）。收益小、迁移面覆盖 CLI/MCP/27 个 e2e 套件/`tools/browser.cjs`/
+2 个自带连接的 `.mjs`/必须豁免的 `_repro_identity.cjs`。**如果将来要多用户或把端口
+暴露出去，这一条必须补**，卡的迁移清单已在本报告 §3 修正。
+
+② **`--no-sandbox` 默认仍关**。受限环境（IDE 集成终端）里 Chromium 的 sandbox
+helper 拿不到权限，直接起不来 —— 那是"装上就打不开"。现在给了 `AI_BROWSER_SANDBOX=1`
+让人自己选，并在注释里写明权衡。**彻底的做法是让渲染器能进 sandbox**（见 ③ 的前置）。
+
+③ **`sandbox:false`（每 tab）**。前置条件是 preload 能打包成单文件：现在
+`bridge.cjs` 要 `require('./extractor.cjs')(89KB)`、`./actions.cjs`、`./watcher.cjs`，
+沙箱化 preload 只允许 require Electron 白名单。要做就得引入打包步骤（dev/e2e/打包
+三条路径都要先生成 bundle，且缺 bundle 时必须有硬报错）。属独立一轮，收益是
+"渲染进程被攻破后还有一层 OS 沙箱"——在 Origin 与 preload eval 都堵上之后，这一层
+是纵深防御而非主防线。
+
+④ **`explicit > session` 的跨标签**。这是 `shared/tab_route.cjs` 顶部写死的产品
+优先级（"调用方点名"优先于"你自己的标签页"），不是漏洞：多 agent 场景下 A 明确
+点名 B 的标签页是**合法操作**。要在关闭 Origin 之后还想限制它，得先有"标签页归属 +
+调用方身份"的模型，那是新功能而不是修 bug。**待你确认是否需要**（真需要的话，
+判据应该是"点名别人的 tab 要显式 opt-in"，而不是静默拒绝）。
+
+⑤ **`Cmd+W` 关窗即退出**。这是单窗口应用的设计选择（窗关 = 进程退，与 `ui.quit`
+同一条 `cleanupAndQuit`）。改成"关标签页"要动菜单或每个 view 的 `before-input-event`：
+前者会替换 Electron 默认菜单（macOS 上 `Cmd+C/V` 靠它），后者要在 `newTab` 里逐视图
+挂钩子——两者都会碰输入链路，而输入链路是本项目最容易 flaky 的地方。**代价 > 收益**，
+记为已知行为。
+
+⑥ **不引 eslint**。20k 行存量代码一次会报几千条，实际结果是把它关掉或加 `// eslint-disable`
+糊过去，等于没有。只做"能解析"这一条（`test_syntax.js`），它抓住的是"提交了就挂"
+的那一类，而且能在 2 秒内跑完。
+
+### 6.4 这一轮**新发现**的问题（不在原报告里）
+
+跑真 `PageManager` 的第一分钟就抓到一条：`this._preloadPath` **只在 `index.js` 里
+赋值**，`page_manager.js` 自己从不初始化。`preload: undefined` 不报任何错，症状是
+"每一条读树都超时"——而错误信息里没有一个字指向 preload。现在构造函数里有默认值，
+`newTab` 里做一次性自检并落盘 `preload_missing`（PM-2 钉住）。
+
+第二类（同一形态）：`subset` / `mode` 传**非法枚举值**时仍然静默返回全量（`subset:'all'`
+是 `wrapper_hint` 自己建议过的值）。已改为 `-32602`，判据 V-1/V-3。

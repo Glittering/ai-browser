@@ -121,8 +121,12 @@ async function main() {
   // 两条读层都要测：默认（preload DOM extractor，agent 实际用的就是它）
   // 和 AX 层（get_tree {ax:true}）。agg 标记必须在两条路径上一致 —— 只修一条的话，
   // 换个读法就又开始"点不动"，而且没有任何报错。
-  const domTree = unwrap(await b.call('ui.get_tree', { tab, subset: 'all' }));
-  const axTree = unwrap(await b.call('ui.get_tree', { tab, subset: 'all', ax: true }));
+  // ⚠️ 这里原本写的是 `subset: 'all'` —— 那个值**不在 schema 里**（合法值只有
+  // interactive|full），而旧代码对未知 subset 是静默忽略，于是这条套件一直是
+  // 拿一个"不存在的参数值"在跑，还全绿。2026-11-01 给 subset 加枚举校验后它
+  // 立刻 -32602、整份套件 11 条红 —— 这是"判据本身建立在 bug 行为上"的典型。
+  const domTree = unwrap(await b.call('ui.get_tree', { tab, subset: 'full' }));
+  const axTree = unwrap(await b.call('ui.get_tree', { tab, subset: 'full', ax: true }));
 
   const pick = (tree) => ({
     rows: findNodes(tree && tree.tree, (n) => n.role === 'generic' && /创作者小助手/.test(String(n.label || ''))),

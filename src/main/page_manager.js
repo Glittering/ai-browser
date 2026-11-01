@@ -207,6 +207,10 @@ function keySpec(name, extraModifiers) {
 class PageManager {
   constructor(browserWindow) {
     this.window = browserWindow;
+    // preload 的路径**必须在这里有默认值**：index.js 也会赋值（同一个路径），
+    // 但此前只有它赋值 —— 换个入口（单测、脚本、未来的新窗口）就 `undefined`，
+    // 而 `preload: undefined` 不报任何错，只表现为"页面读不到树、全超时"。
+    this._preloadPath = path.join(__dirname, '../preload/bridge.cjs');
     this.tabs = new Map();       // tabId -> BrowserView
     this.activeTab = null;
     // 启动时那一个标签页。它存在的唯一用途是判断"人眼前这一页是不是还没人动过"：
@@ -3828,6 +3832,20 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
    *   agent 侧由 ws_server 显式传 false（见 shared/tab_route.cjs 的说明）。
    */
   newTab(url = null, opts = {}) {
+    // 缺 preload 的症状是"每一条读树都超时"，而没有一条错误信息指向它。
+    // 这里做一次性自检并落盘：宁可多一条 error_log，也不要让人从超时反推。
+    if (this._preloadReported !== true) {
+      let ok = false;
+      try { ok = !!this._preloadPath && fs.existsSync(this._preloadPath); } catch (_e) { ok = false; }
+      if (!ok) {
+        this._preloadReported = true;
+        console.error('[page_manager] preload missing:', this._preloadPath);
+        recordError('preload_missing', {
+          path: String(this._preloadPath),
+          hint: 'Views will load but no bridge is injected — every get_tree/evaluate/act will time out. Check that src/preload/bridge.cjs is packaged.',
+        });
+      }
+    }
     const tabId = ++this.tabCounter;
     const self = this;
     const view = new BrowserView({

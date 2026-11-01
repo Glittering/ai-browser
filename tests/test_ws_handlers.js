@@ -430,3 +430,45 @@ describe('ws_server ui.wait 参数校验', () => {
     expect(pm._evaluateCalls.length).toBeGreaterThan(0);
   });
 });
+
+describe('ws_server 枚举/必填参数（静默空转 = 最贵的失败形态）', () => {
+  it('V-1 subset 传非法值立刻 -32602（此前静默返回全量）', async () => {
+    // wrapper_hint 曾经建议 subset:"all" —— 那个值不在 schema 里，旧代码会
+    // 当作"没传"，把整棵树原样返回，调用方以为省了 token。
+    const res = await rpc(client, 'ui.get_tree', { subset: 'all' });
+    expect(res.error && res.error.code).toBe(-32602);
+    expect(res.error.message).toMatch(/interactive.*full/);
+  });
+
+  it('V-2 subset 合法值照常放行', async () => {
+    const res = await rpc(client, 'ui.get_tree', { subset: 'interactive' });
+    expect(res.error).toBeUndefined();
+    expect(res.result).toBeTruthy();
+  });
+
+  it('V-3 mode 传非法值立刻 -32602', async () => {
+    const res = await rpc(client, 'ui.get_tree', { ax: true, mode: 'delta' });
+    expect(res.error && res.error.code).toBe(-32602);
+  });
+
+  it('V-4 wait 的 button_enabled 缺 target → -32602，不跑满 timeout', async () => {
+    const t0 = Date.now();
+    const res = await rpc(client, 'ui.wait', { condition: 'button_enabled', timeout_ms: 30000 });
+    expect(res.error && res.error.code).toBe(-32602);
+    expect(res.error.message).toMatch(/target/);
+    expect(Date.now() - t0).toBeLessThan(2000);
+  });
+
+  it('V-5 wait 的 text_contains 缺 text → -32602', async () => {
+    const res = await rpc(client, 'ui.wait', { condition: 'text_contains', timeout_ms: 30000 });
+    expect(res.error && res.error.code).toBe(-32602);
+    expect(res.error.message).toMatch(/text/);
+  });
+
+  it('V-6 modal_appeared 不需要额外参数（别把合法用法误杀）', async () => {
+    getTreeImpl = () => ({ tree: {}, context: { modals: [{ header: 'x' }] } });
+    const res = await rpc(client, 'ui.wait', { condition: 'modal_appeared', timeout_ms: 1000 });
+    expect(res.error).toBeUndefined();
+    expect(res.result.satisfied).toBe(true);
+  });
+});
