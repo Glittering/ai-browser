@@ -235,6 +235,15 @@ async function main() {
   await b.ready();
   await harness.assertIdentity(b, child, "canvas");
 
+  // hook 现在**默认关**（包一层 getContext 是站点一次 toString 就看得见的痕迹）。
+  // 本套件测的就是这套能力，所以每个要用它的 tab 都走"文档里教的那条路"：
+  // ui.canvas_configure 显式点名 + reload:true 拿完整历史。
+  // 顺带这也验证了"默认关 ≠ 关死了"——点名必须真的能装上。
+  const enableHook = async (tabId) => {
+    await b.call("ui.canvas_configure", { tab: tabId, mode: "semantic", reload: true }, 20000);
+    await sleep(2500);
+  };
+
   console.log("\n[canvas 绘制调用记录]");
   await b.call("ui.new_tab", { url: HOST + "/canvas" });
   await sleep(2500);
@@ -349,6 +358,7 @@ async function main() {
   const boardTab = await b.call("ui.new_tab", { url: HOST + "/board" }, 20000);
   const boardId = boardTab.result.tab;
   await sleep(2500);
+  await enableHook(boardId);
   const fpShape = await b.call("ui.evaluate", { js: "typeof window.__aiCanvasFp", tab: boardId });
   check("CB-1 页面暴露了 canvas 帧指纹（hook 接线）",
     fpShape && fpShape.result && fpShape.result.value === "function",
@@ -419,6 +429,7 @@ async function main() {
   console.log("\n[画布自己在动时：不能谎称『我这一手生效了』]");
   const sameTab = (await b.call("ui.new_tab", { url: HOST + "/anim?mode=same" }, 20000)).result.tab;
   await sleep(2500);
+  await enableHook(sameTab);
   const sameFp = await b.call("ui.evaluate", { js: "typeof window.__aiCanvasFp", tab: sameTab });
   check("CB-12 同内容重绘页也装了 hook",
     sameFp && sameFp.result && sameFp.result.value === "function",
@@ -472,6 +483,7 @@ async function main() {
 
   const driftTab = (await b.call("ui.new_tab", { url: HOST + "/anim?mode=drift" }, 20000)).result.tab;
   await sleep(2500);
+  await enableHook(driftTab);
   const driftN1 = await b.call("ui.evaluate", { js: "window.__aiCanvasFp().n", tab: driftTab });
   await sleep(400);
   const driftN2 = await b.call("ui.evaluate", { js: "window.__aiCanvasFp().n", tab: driftTab });
@@ -519,6 +531,7 @@ async function main() {
   console.log("\n[持续重绘的页面上：能不能说出『这一手没反应』]");
   const repeatTab = (await b.call("ui.new_tab", { url: HOST + "/repeat" }, 20000)).result.tab;
   await sleep(2500);
+  await enableHook(repeatTab);
   const rpN1 = await b.call("ui.evaluate", { js: "window.__aiCanvasFp().n", tab: repeatTab });
   await sleep(400);
   const rpN2 = await b.call("ui.evaluate", { js: "window.__aiCanvasFp().n", tab: repeatTab });

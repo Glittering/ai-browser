@@ -27,6 +27,7 @@ import { EventEmitter } from 'node:events';
 // 我们这个模块的绑定就绪之后跑。
 import * as electronMock from 'electron';
 import { PageManager } from '../src/main/page_manager.js';
+import { config } from '../src/shared/config.js';
 import tabState from '../src/shared/tab_state.cjs';
 
 // 工厂必须是 **async**：非 async 的工厂会被 hoist 到 import 之前执行，那时
@@ -253,4 +254,78 @@ describe('IPC 回执的归属（页面伪造树那条路）', () => {
     await expect(p).rejects.toThrow(/timeout/i);
     expect(Date.now() - t0).toBeLessThan(9000);
   }, 15000);
+});
+
+describe('文档导航的 UA-CH 出口补头（_installClientHintBridge）', () => {
+  // 假 session：只记录挂上去的 filter 与 listener，然后由用例亲手调那个 listener。
+  // 判据是"发出去的请求头长什么样"，不是"源码里有没有这行"。
+  function stubSession() {
+    const rec = { calls: [] };
+    return {
+      webRequest: {
+        onBeforeSendHeaders: (filter, listener) => { rec.filter = filter; rec.listener = listener; },
+      },
+      rec,
+    };
+  }
+
+  function run(listener, requestHeaders) {
+    let out = null;
+    listener({ requestHeaders }, (r) => { out = r; });
+    return out && out.requestHeaders;
+  }
+
+  it('PM-8 只挂加密连接（明文上补 critical hints 反而是不一致）', () => {
+    const ses = stubSession();
+    expect(pm._installClientHintBridge(ses), '装不上就等于没补头').toBe(true);
+    expect(ses.rec.filter.urls.sort()).toEqual(['https://*/*', 'wss://*/*']);
+    expect(pm._clientHintBridge).toBe(true);
+  });
+
+  it('PM-9 缺失才补：内核已经给了 sec-ch-ua 的请求一个字都不许改', () => {
+    const ses = stubSession();
+    pm._installClientHintBridge(ses);
+    const already = { 'sec-ch-ua': '"Chromium";v="130"', 'sec-ch-ua-mobile': '?0', 'sec-ch-ua-platform': '"Windows"' };
+    const got = run(ses.rec.listener, { ...already, accept: 'text/html' });
+    expect(got['sec-ch-ua']).toBe(already['sec-ch-ua']);
+    expect(got['sec-ch-ua-mobile']).toBe('?0');
+    expect(got['sec-ch-ua-platform']).toBe('"Windows"');
+    // 已存在但大小写不同（Sec-CH-UA）同样算存在 —— 否则补出两个同名头。
+    const mixed = run(ses.rec.listener, { 'Sec-CH-UA': '"Chromium";v="130"' });
+    expect(Object.keys(mixed).filter((k) => k.toLowerCase() === 'sec-ch-ua').length).toBe(1);
+  });
+
+  it('PM-10 补出来的三个头与 UA / userAgentData 同源', () => {
+    const ses = stubSession();
+    pm._installClientHintBridge(ses);
+    const got = run(ses.rec.listener, { 'user-agent': config.identity.userAgent });
+    const md = config.identity.metadata;
+    expect(got['sec-ch-ua']).toBe(md.brands.map((b) => `"${b.brand}";v="${b.version}"`).join(', '));
+    expect(got['sec-ch-ua']).toContain('"Google Chrome"');
+    expect(got['sec-ch-ua-platform']).toBe(`"${md.platform}"`);
+    expect(got['sec-ch-ua-mobile']).toBe('?0');
+    // 版本必须与 UA 里那个大版本一致，否则又是"UA 说一套、hint 说另一套"。
+    expect(got['sec-ch-ua']).toContain(`;v="${config.identity.chromeMajor}"`);
+  });
+
+  it('PM-11 AI_BROWSER_CLIENT_HINTS=0 时不装钩子', () => {
+    const old = process.env.AI_BROWSER_CLIENT_HINTS;
+    process.env.AI_BROWSER_CLIENT_HINTS = '0';
+    try {
+      const ses = stubSession();
+      expect(pm._installClientHintBridge(ses)).toBe(false);
+      expect(ses.rec.listener, '关开关后还挂 listener = 关不掉').toBeUndefined();
+    } finally {
+      if (old === undefined) delete process.env.AI_BROWSER_CLIENT_HINTS;
+      else process.env.AI_BROWSER_CLIENT_HINTS = old;
+    }
+  });
+
+  it('PM-12 补头逻辑抛错时请求照发（callback({})），不能把浏览器的网络掐死', () => {
+    const ses = stubSession();
+    pm._installClientHintBridge(ses);
+    let out = 'not-called';
+    ses.rec.listener({ get requestHeaders() { throw new Error('boom'); } }, (r) => { out = r; });
+    expect(out).toEqual({});
+  });
 });

@@ -740,6 +740,33 @@ sheet**，因此它既不在语义树里，也不受页面点击控制；**而�
 
 ## 配置（环境变量）
 
+### 浏览器身份（UA / client hints）
+
+身份的**唯一来源**是 `src/shared/browser_identity.cjs`：UA 字符串、UA-CH 元数据
+（brands / platform / platformVersion / architecture）、Accept-Language 全部由
+`buildIdentity()` 按**真实运行时**算出来。规矩只有一条 —— 任何两个字段不许互相打脸。
+
+事故（2026-11-01）：UA 曾经写死成 macOS 的 `Chrome/130`，而 `navigator.platform`
+是 Win32、`sec-ch-ua-platform` 是 Windows、WebGL 报 Windows 的 D3D11。风控看到的
+不是"这是个 Mac 浏览器"，而是"这个浏览器的 UA 被改过"—— 藏指纹的操作自己成了
+最响的指纹，表现为百度频繁弹滑块验证、Google 登录页报"此浏览器可能不安全"。
+
+三层，各补各的，缺一不可：
+
+| 层 | 走哪条 API | 覆盖什么 | 实测 |
+|---|---|---|---|
+| UA 字符串 + UA-CH 元数据 | CDP `Network.setUserAgentOverride`（带 `userAgentMetadata`） | `navigator.userAgent`、`navigator.userAgentData.*`、XHR/fetch 的 `sec-ch-ua*` | 生效（`override_applied_tabs`） |
+| Accept-Language | 同一条 CDP 命令的 `acceptLanguage` | 请求头**和** `navigator.languages`（同一个字符串喂两处） | ⚠️ 不许带 `;q=0.9`：带了会产出 `zh;q=0.9` 这种假 BCP47 标签，且 header 叠成 `…;q=0.9;q=0.9`。首选列表只写 `zh-CN,zh`，q 值由内核补 |
+| 文档导航的 critical hints | `session.webRequest.onBeforeSendHeaders`（只在缺失时补，只挂 https/wss） | 导航请求的 `sec-ch-ua` / `-mobile` / `-platform` | **必须**在这一层补：Electron 33 的导航请求根本不发这三个头，而同页 fetch 会发。CDP 覆盖、`Emulation.setUserAgentOverride`、先 `Network.enable` 三条路都试过都无效；同机 Chrome 156 无头访问同一 echo 服务三个头齐全 |
+
+`ui.server_info` 的 `identity` 字段把这几层的结果原样报出来（含
+`navigation_hints_bridge` / `navigation_hints_added`），"补没补上"是查询出来的，
+不是猜的。
+
+还没修的已知差距（不影响一致性，影响的是"像不像新 Chrome"）：内核版本仍落后
+（130 vs 156，要靠升 Electron）、`window.chrome.loadTimes/csi` 仍为空、
+读树时写进真实 DOM 的 `data-ai-id` 属性站点可见。
+
 | 变量 | 默认 | 作用 |
 |---|---|---|
 | `AI_BROWSER_PORT` | 9223 | WS / MCP 探测端口 |
@@ -747,12 +774,14 @@ sheet**，因此它既不在语义树里，也不受页面点击控制；**而�
 | `AI_BROWSER_ERROR_BANNER` | 开 | `0` 关闭主进程异常的窗口内横幅（日志照记；e2e 截图对比用，它会改变窗口布局） |
 | `AI_BROWSER_ERROR_DIALOG` | 关 | `1` 强制改用原生模态框（阻塞主进程 8 秒，只用于人工盯着看启动崩溃） |
 | `AI_BROWSER_SELFTEST` | 关 | `crash` 在就绪后注入一次未捕获异常，用于自检错误链路 |
-| `AI_BROWSER_UA` | Chrome 130 UA | 伪装 UA，去掉 Electron 指纹 |
+| `AI_BROWSER_UA` | 按真实平台生成 | 覆盖 UA 字符串。UA-CH 的 `platform` 会**跟着 UA 里写的平台**走，不留矛盾；UA 里认不出的平台仍用真实平台 |
 | `AI_BROWSER_FOCUS` | `auto` | `auto`=只伪造页面内焦点态，不抢真实窗口焦点；`always`=旧行为；`never`=都不做。**不决定窗口是否显示** |
 | `AI_BROWSER_WATCHDOG` | 开 | `0`/`off`/`false`/`no` 关闭网络看门狗 |
 | `AI_BROWSER_WATCHDOG_URLS` | `example.com, baidu.com` | 看门狗探测目标（任一可达即算存活） |
 | `AI_BROWSER_NETWORK_CAPTURE` | 开 | `0` 关闭默认抓包 |
-| `AI_BROWSER_CANVAS_HOOK` | 开 | `0` 关闭 canvas 绘制记录注入 |
+| `AI_BROWSER_CANVAS_HOOK` | **关** | 站点能一眼看见我们改过 `getContext`，所以默认不开。`on`/`1`/`all`=全站开；`a.com,b.chaoxing.com`=只在这些域（含子域）开；`0`/`off`=关。agent 临时需要就在 tab 上 `ui.canvas_configure{reload:true}` |
+| `AI_BROWSER_POPUP_SHIM` | **关** | `window.open("")` 兼容垫片的开关，形状同上（`on` / 域名列表 / `0`）。它替换页面可见的原生 `window.open`，代价由全站付；老站模式在原生路径下回到"返回 null"。同时决定 preload 桥要不要暴露给这个域 |
+| `AI_BROWSER_CLIENT_HINTS` | 开 | `0` 关闭"给文档导航补 `sec-ch-ua*`"的出口钩子。只用于二分定位（关掉后导航请求回到内核那套：没有这三个头） |
 | `AI_BROWSER_DIALOG_POLICY` | `auto` | `alert/confirm/beforeunload` 的应答策略：`auto` / `accept` / `dismiss` / `manual`（不自动应答，交给人） |
 | `AI_BROWSER_PAINT_AUDIT` | 开 | `0` 关闭"加载成功但屏幕纯白"的自检与自救（唯一用途：精确测量导航时延） |
 | `AI_BROWSER_GPU` | `auto` | `on`/`off` 强制硬件或软件合成。`auto` = 默认硬件加速；连续两次 GPU 进程崩溃（2 分钟内）写 `~/.ai-browser/.gpu-off` 并自动重启到软件合成 |

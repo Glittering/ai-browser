@@ -1,11 +1,12 @@
 // main/page_manager.js — Multi-tab page lifecycle manager v2
 // One Electron process, one WS server, multiple tabs.
 // Agent routes via tab ID. Tab 0 is default.
-import { ipcMain, BrowserView, nativeImage, webContents } from 'electron';
+import { ipcMain, BrowserView, nativeImage, webContents, app } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { config } from '../shared/config.js';
+import identityUtil from '../shared/browser_identity.cjs';
 import axExtractor from './axExtractor.js';
 import { NetworkMonitor, MAX_POST_DATA_SIZE } from './network_monitor.js';
 import { CanvasMonitor, isCanvasHookEnabled } from './canvas_monitor.js';
@@ -117,7 +118,8 @@ const findRefExpr = findRefUtil.findRefExpr;
 const findDescExpr = findRefUtil.findDescExpr;
 
 
-// canvas 绘制调用记录：默认开。关闭开关 AI_BROWSER_CANVAS_HOOK=0。
+// canvas 绘制调用记录：**默认关闭**（它替换页面可见的原生 getContext）。
+// 开启方式见 canvas_monitor.isCanvasHookEnabled；单页临时开启用 ui.canvas_configure。
 const CANVAS_BRIDGE_KEY = '__aiCanvasBridge';
 
 // 网络抓包默认开：只在有订阅时才启用会导致首屏/导航阶段的请求全丢（POST body、
@@ -372,6 +374,57 @@ class PageManager {
     // 用于二分"某站点的显示问题是不是这条钩子造成的"。
     if (process.env.AI_BROWSER_MEDIA_INLINE !== '0') this.mediaInline.install(session);
     this._installPermissionHandler();
+    this._installClientHintBridge(session);
+  }
+
+  /**
+   * 给文档导航补上 UA-CH 的三个 critical client hints。
+   *
+   * 为什么必须在这一层补：Electron 33 的导航请求不带 sec-ch-ua*，而页面内的
+   * fetch 带 —— 同一个浏览器对同一台服务器"两种请求两套说法"，站点把它当成
+   * 指纹异常。CDP / Emulation 两条内核路径都试过（结论与实测数据见
+   * shared/browser_identity.cjs 的 uaClientHintsOf 注释），内核不发的东西
+   * 只能在请求出口补。
+   *
+   * 三条约束：
+   *   - 只在**缺失**时补。Blink 自己会发的请求保持内核的输出，不覆盖。
+   *   - 只挂 https/wss。真 Chrome 在明文连接上也不发 critical hints，
+   *     给 http 补头反而是新的不一致。
+   *   - 值来自 config.identity.metadata，与 UA、navigator.userAgentData 同源。
+   *
+   * 关闭：AI_BROWSER_CLIENT_HINTS=0（只用于二分定位，不是常规配置）。
+   */
+  _installClientHintBridge(session) {
+    this._clientHintBridge = false;
+    this._clientHintAdded = 0;
+    if (!identityUtil.isEnabledByDefault(process.env.AI_BROWSER_CLIENT_HINTS)) return false;
+    if (!session || typeof session.webRequest?.onBeforeSendHeaders !== 'function') return false;
+    const headers = identityUtil.uaClientHintsOf(config.identity.metadata);
+    try {
+      session.webRequest.onBeforeSendHeaders({ urls: ['https://*/*', 'wss://*/*'] }, (details, callback) => {
+        try {
+          const req = (details && details.requestHeaders) || {};
+          const has = (name) => Object.keys(req).some((k) => k.toLowerCase() === name);
+          let added = false;
+          for (const name of Object.keys(headers)) {
+            if (!headers[name] || has(name)) continue;
+            req[name] = headers[name];
+            added = true;
+          }
+          if (added) this._clientHintAdded++;
+          callback({ requestHeaders: req });
+        } catch (e) {
+          // 补头失败绝不能拖住请求：原样放行。
+          recordError('client_hint_bridge_failed', { message: String((e && e.message) || e).slice(0, 200) });
+          callback({});
+        }
+      });
+      this._clientHintBridge = true;
+      return true;
+    } catch (e) {
+      recordError('client_hint_bridge_failed', { message: String((e && e.message) || e).slice(0, 200) });
+      return false;
+    }
   }
 
   /** webContents → tabId。找不到返回 undefined（调用方各自决定怎么兜底）。 */
@@ -1048,6 +1101,16 @@ class PageManager {
     // 打断当前这次 loadURL 的 Promise —— 如果不区分，agent 收到的就是
     // {ok:false, error:"ERR_ABORTED (-3) loading 'file://.../error_page.html'"}，
     // 它会以为自己的导航请求坏了，而实际上错误页已经接管、信息全在那儿。
+    // window.open 垫片按域安装：newTab 只按**建标签页时**那个 URL 判过一次，
+    // 之后导航到白名单里的老站（同一 tab 内跳转登录页很常见）要在这里补判。
+    // 必须等注册完成再发起导航 —— addScriptToEvaluateOnNewDocument 只对**之后**
+    // 的 document 生效，抢跑就等于这一页白名单命中却没有垫片。
+    // 不在白名单（默认）时这里是一个立即 resolve 的 false，不付任何延迟。
+    if (this._popupShimWanted(url) && !this._windowOpenShimTabs.has(tid)) {
+      try {
+        await withDeadline(this._ensureWindowOpenShim(tid, view, url), 2000, 'navigate_popup_shim');
+      } catch (_) { /* 注册慢/挂住：照常导航，代价是这一页没有垫片，而不是打不开 */ }
+    }
     const pending = wc.loadURL(url);
     // 导航状态机也在这里维护：此前只有 new_tab 的占位流程会写 _tabNavState，
     // 于是 ui.navigate 期间 list_tabs 一直报 'ready' —— agent 看到 ready 就去
@@ -3889,8 +3952,11 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     // window.open 垫片不在这里调：它返回的 Promise 要被下面的首次导航等
     // （见文件末尾 navWhenShimReady），在这里提前调会消耗掉首次注入。
 
-    // Mask automation fingerprint: remove Electron from UA
+    // 身份：先按 Electron 的方式设 UA（覆盖 CDP 就绪之前的请求），再把
+    // UA-CH 元数据交给内核。两步用的是**同一个** config.identity，
+    // 所以 UA、sec-ch-ua、navigator.userAgentData 不会各说一套。
     view.webContents.setUserAgent(config.userAgent);
+    this._applyIdentity(tabId, view);
 
     // beforeunload：Electron 侧的等价物。**不处理它会静默拦住导航** —— 既没有
     // 对话框、也没有报错，表现成"点了链接/调了 navigate，页面就是不动"。
@@ -3958,9 +4024,11 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     // 不响应（实测 Runtime.enable 直接挂死）。
     // newTab 仍同步返回 tabId（调用方依赖），导航推迟到 hook 装完；安装失败或超时
     // 也照常导航 —— 绝不能因为要录 canvas 就把 tab 卡死。
-    // hook 关闭时（当前默认）走原来的同步导航：把导航推迟成异步会引入时序抖动
-    // （实测 richtext 偶发 110/111），这个代价不值得为一个未验证通过的功能付。
-    if (isCanvasHookEnabled(process.env.AI_BROWSER_CANVAS_HOOK)) {
+    //
+    // 默认不装（见 canvas_monitor.isCanvasHookEnabled）：hook 替换的是页面可见的
+    // 原生 getContext，站点一次 toString 就能发现。只有 AI_BROWSER_CANVAS_HOOK
+    // 命中这个 host、或这个 tab 被 ui.canvas_configure 显式点名过，才付这个代价。
+    if (this._canvasHookWanted(tabId, url)) {
       // CDP 的 await 命令在页面加载**之后**才可用（刚创建的 tab 上会挂死），
       // 所以装 hook 的时机放在首次加载完成。代价是首屏已经画完的内容拿不回来
       // （configure({reload:true}) 可以补齐）。
@@ -3991,7 +4059,7 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
       const proceed = () => {
         if (proceeded) return;
         proceeded = true;
-        Promise.resolve(this._ensureWindowOpenShim(tabId, view)).finally(() => {
+        Promise.resolve(this._ensureWindowOpenShim(tabId, view, targetUrl)).finally(() => {
           // 失败也放行：宁可这个 tab 没有垫片，也不能把它卡在占位页。
           signalReady();
           if (targetUrl && wc0 && !wc0.isDestroyed()) {
@@ -5233,6 +5301,10 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
   // are reference-counted so the shared debugger is detached only when the last
   // network AND runtime subscriber both leave.
   _cdpTabs = new Map();            // tabId -> { wc, domains:Set<'Network'|'Runtime'> }
+  _identityApplied = new Set();    // 已通过 CDP 下发 UA-CH 元数据的 tab（供 server_info 观测）
+  // 被 ui.canvas_configure 显式点名的 tab：不受全局开关影响。
+  // "默认关"必须留一条**当前这一页**就能打开的路，否则能力等于没了。
+  _canvasHookForced = new Set();
   _networkSubscribers = new Set(); // sessionIds currently using network events
   _runtimeSubscribers = new Set(); // sessionIds currently using js_error events
 
@@ -5248,9 +5320,30 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
   //    截不到页面代码的调用。
   // 2. 用 Runtime.addBinding 安装上报通道（binding 名每 tab 随机，避免跨 tab 串台），
   //    回传在 CDP 的 Runtime.bindingCalled 里收取。
+  /**
+   * 这个 tab 该不该装 canvas hook。两种命中：
+   *   · 被 ui.canvas_configure 显式点过名（本 tab 生命周期内一直算点名）；
+   *   · AI_BROWSER_CANVAS_HOOK 的域名列表命中这个 URL 的 host。
+   * 判据只看"这一页要不要"，不看"agent 有没有在读" —— 读 canvas 之前必须先
+   * configure，那条就是显式点名，不需要在这里再猜一次。
+   */
+  _canvasHookWanted(tabId, url) {
+    if (this._canvasHookForced.has(tabId)) return true;
+    let host = '';
+    try { host = new URL(url).hostname; } catch (_) { /* 相对地址 / about:blank：按未命中 */ }
+    return isCanvasHookEnabled(process.env.AI_BROWSER_CANVAS_HOOK, host);
+  }
+
   async _ensureCanvasHook(tabId, view) {
-    if (!isCanvasHookEnabled(process.env.AI_BROWSER_CANVAS_HOOK)) {
-      this.canvasMonitor.markHook(tabId, false, ['canvas hook disabled via AI_BROWSER_CANVAS_HOOK']);
+    const currentUrl = (() => {
+      try { return view.webContents.getURL(); } catch (_) { return ''; }
+    })();
+    if (!this._canvasHookWanted(tabId, currentUrl)) {
+      this.canvasMonitor.markHook(tabId, false, [
+        'canvas hook 未启用：默认关闭（改的是页面可见的原生 getContext）。'
+        + '要读这一页的 canvas 语义就调 ui.canvas_configure，它会强制装到当前 tab；'
+        + '要长期开启某类站点用 AI_BROWSER_CANVAS_HOOK=host1,host2',
+      ]);
       return false;
     }
     const DEBUG = process.env.AI_BROWSER_CANVAS_DEBUG === '1';
@@ -5390,6 +5483,9 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     if (opts.clear) this.canvasMonitor.clear(tid);
     const view = this._getView(tid);
     if (view) {
+      // canvas_configure 就是"显式点名"：这一页要读 canvas 语义，所以即便全局
+      // 开关关着（默认）也给这个 tab 装上。
+      this._canvasHookForced.add(tid);
       await this._ensureCanvasHook(tid, view);
       // 只有调用方显式要求才重载：hook 对"安装之前已经画完"的内容无能为力，
       // 重载是唯一能拿到完整绘制历史的办法 —— 但它会丢掉用户当前状态，
@@ -5626,7 +5722,28 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     return placeholder.placeholderUrlFor(path.join(__dirname, '../renderer/loading.html'), targetUrl);
   }
 
-  _ensureWindowOpenShim(tabId, view) {
+  /**
+   * 这个 URL 的站点要不要 window.open 垫片（AI_BROWSER_POPUP_SHIM）。
+   *
+   * 默认**关**：垫片替换的是页面可见的原生 `window.open`，站点一次 toString
+   * 就看得见；而它服务的只是一个很窄的老站写法（`window.open("")` 之后
+   * 给返回的窗口赋 location）。把全站付的指纹代价换成按域开，值。
+   * 老站模式在原生路径下的表现回到垫片出现之前：window.open 返回 null。
+   */
+  _popupShimWanted(url) {
+    const policy = identityUtil.parseHostSwitch(process.env.AI_BROWSER_POPUP_SHIM);
+    if (policy.mode === 'all') return true;
+    if (policy.mode === 'off') return false;
+    let host = '';
+    try { host = new URL(url).hostname; } catch (_) { /* 空 url / 相对地址：按未命中 */ }
+    return identityUtil.hostMatches(host, policy.hosts);
+  }
+
+  _ensureWindowOpenShim(tabId, view, url) {
+    const targetUrl = url || (() => {
+      try { return view && view.webContents ? view.webContents.getURL() : ''; } catch (_) { return ''; }
+    })();
+    if (!this._popupShimWanted(targetUrl)) return Promise.resolve(false);
     if (this._windowOpenShimTabs.has(tabId)) return Promise.resolve(true);
     this._windowOpenShimTabs.add(tabId);
     // async IIFE：注入要 await（Page.enable → addScript 有序），但函数本身
@@ -5667,6 +5784,77 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
         return false;
       }
     })();
+  }
+
+  /**
+   * 把浏览器身份交给内核：UA + UA-CH 元数据 + Accept-Language 一次下发。
+   *
+   * 为什么不能只靠 webContents.setUserAgent：那条改的**只有 UA 字符串**，
+   * 内核的 client hints 仍按自己那一套算。实测（2026-11-01，postman-echo）：
+   * 文档导航请求里 sec-ch-ua 三个头**一个都不发**，而同页 fetch 却发
+   * `"Chromium";v="130"`（没有 Google Chrome 品牌），UA 却写着
+   * `Macintosh … Chrome/130.0.0.0` —— UA / 头 / 页面 JS 三处各说一套。
+   * CDP 这条带上 userAgentMetadata，由内核同时供给 header 与
+   * navigator.userAgentData，不需要往页面 world 注入任何脚本。
+   *
+   * 时序：命令在 renderer 刚就绪时**响应回不来**（本文件多处踩过），所以
+   * 发了不等；生效与否由 ui.server_info 的 identity 字段暴露，不靠猜。
+   */
+  _applyIdentity(tabId, view) {
+    try {
+      const wc = view.webContents;
+      if (!wc || wc.isDestroyed() || typeof wc.debugger?.sendCommand !== 'function') return false;
+      if (!this._cdpTabs.has(tabId)) {
+        wc.debugger.attach('1.3');
+        const entry = { wc, domains: new Set() };
+        this._cdpTabs.set(tabId, entry);
+        wc.debugger.on('message', (_event, method, params) => this._onCdpMessage(tabId, method, params));
+        this._ensureDialogWatch(tabId, view);
+      }
+      let locale = '';
+      try { locale = app.getLocale(); } catch (_) { /* app 未就绪：Accept-Language 走内核默认 */ }
+      const p = wc.debugger.sendCommand('Network.setUserAgentOverride', {
+        userAgent: config.identity.userAgent,
+        acceptLanguage: identityUtil.acceptLanguageOf(locale),
+        userAgentMetadata: config.identity.metadata,
+      });
+      if (p && typeof p.catch === 'function') {
+        p.catch((e) => recordError('identity_override_failed', {
+          tab: tabId,
+          message: String((e && e.message) || e).slice(0, 300),
+          note: 'UA-CH 元数据未生效，页面读到的 navigator.userAgentData 会与 UA 不一致',
+        }));
+      }
+      this._identityApplied.add(tabId);
+      return true;
+    } catch (e) {
+      recordError('identity_override_failed', {
+        tab: tabId,
+        message: String((e && e.message) || e).slice(0, 300),
+        note: 'CDP 会话没建起来，身份只落到 webContents.setUserAgent 那一层',
+      });
+      return false;
+    }
+  }
+
+  /**
+   * 当前身份 + 已下发到内核的 tab 列表。ui.server_info 用它回答
+   * "这一版到底有没有把 UA-CH 送进去"，而不是让人去猜 UA 与 hints 是否同源。
+   */
+  identityInfo() {
+    const md = config.identity.metadata;
+    return {
+      user_agent: config.identity.userAgent,
+      chrome_version: config.identity.chromeVersion,
+      platform: md.platform,
+      platform_version: md.platformVersion,
+      brands: md.brands.map((b) => `${b.brand};v="${b.version}"`),
+      override_applied_tabs: Array.from(this._identityApplied),
+      // 导航请求的 sec-ch-ua* 由 webRequest 出口补（内核不发，见 uaClientHintsOf
+      // 注释）。这两条让"补没补上、补了多少次"可查，不靠猜。
+      navigation_hints_bridge: this._clientHintBridge === true,
+      navigation_hints_added: this._clientHintAdded || 0,
+    };
   }
 
   // 抓包用的 Network 域：默认在 tab 创建后、首个导航前启用。

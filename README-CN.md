@@ -52,6 +52,9 @@ macOS 用户也可以直接用打包好的 `.dmg`（Release 里），不用装 N
 这个场景之所以值得看：**纯 Canvas 应用里没有任何 DOM 节点**，所以基于 DOM / accessibility tree 的方案在这里是全瞎的；而截图方案要烧视觉 token，还不知道坐标和字体。打开 `AI_BROWSER_CANVAS_HOOK=1` 后，AI Browser 直接在 2D 绘制调用层把 `fillText` 的字符串截获下来。
 
 > canvas 捕获默认关闭，用环境变量 `AI_BROWSER_CANVAS_HOOK=1` 启动才会装上——这是取舍，不是遗漏。
+> 更准的用法是按域开（`AI_BROWSER_CANVAS_HOOK=b.chaoxing.com,excalidraw.com`）或在需要的那一页
+> 现场装：`browse_canvas {operation:"configure", reload:true}`。包一层 `getContext` 是站点
+> 一次 `toString` 就能看见的痕迹，不能让全站替几页白板买单。
 
 ## 17 个 MCP 工具（常用的就这几个）
 
@@ -173,5 +176,38 @@ agent 的任务一点不受影响。
 最想要的输入不是 star，是**日志**。
 
 跑不通的时候，别急着关掉——把 `browse_errors` 的输出或贴到 [GitHub Discussions](https://github.com/Glittering/ai-browser/discussions)，那才是让这个项目变好的地方。
+
+### 站点弹滑块验证 / "此浏览器可能不安全"
+
+风控不检测"自动化"这个概念，它检测的是**一个浏览器自己的字段互相打脸**。
+我们踩过（2026-11-01 与同机 Chrome 156 对照实测）：UA 写死 `Macintosh … Chrome/130`，
+而 `navigator.platform=Win32`、`sec-ch-ua-platform="Windows"`、WebGL 报 Windows 的
+D3D11 显卡。这个组合读起来的不是"这是个 Mac 浏览器"，而是"这个浏览器被人改过"——
+于是百度几乎每次搜索都弹滑块、Google 直接给异常页。
+
+现在身份由**一个函数**按**真实运行时**算（`src/shared/browser_identity.cjs`），分三层交付：
+UA + UA-CH 元数据走 CDP；Accept-Language 只给干净的首选列表（不能带 `;q=0.9`，那个值会
+一并进 `navigator.languages`）；文档导航请求的 `sec-ch-ua*` 由请求出口补——Electron 内核
+在导航请求上**根本不发**这三个头（页面里的 `fetch` 却发），试过 CDP 覆盖、
+`Emulation.setUserAgentOverride`、先 `Network.enable` 三条路都不行。
+
+别猜，直接问：
+
+```bash
+node bin/ai-browser.cjs call ui.server_info
+# → identity: {user_agent, chrome_version, platform, platform_version, brands[],
+#              navigation_hints_bridge, override_applied_tabs[]}
+```
+
+还没消掉的真实差距：
+
+- **内核落后 26 个大版本**（`Chrome/130` vs 现在的 `Chrome/156`）。自洽，但本身就是
+  "浏览器太旧"的信号；唯一的解法是升 Electron，那是发版级动作，不是补丁。
+- **`window.chrome.loadTimes` / `.csi` 仍为空**（老 Chrome 的遥测桩），权重低，还没补。
+- **读树时会往真实 DOM 写 `data-ai-id`**（百度首页实测 70 个）。它是 CDP 选择器路径的
+  承重墙，拆它是一次重构而不是一个开关——站点脚本看得见它，这是目前最响的痕迹。
+- **canvas 记录与 `window.open` 垫片会改页面可见的原生方法**：两者现在都**默认关**
+  （`AI_BROWSER_CANVAS_HOOK` / `AI_BROWSER_POPUP_SHIM`，支持 `on` / 域名列表），
+  `__ai_browser__` 也不再暴露给站点页面。
 
 仓库：https://github.com/Glittering/ai-browser · MIT

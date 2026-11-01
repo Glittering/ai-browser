@@ -7,17 +7,30 @@
 //
 // 本文件用 vm 真加载 bridge.cjs（stub 掉 electron 与三个兄弟模块），
 // 断言暴露面是白名单 —— 不是 grep 源码，而是拿到运行时真实的 exposeInMainWorld 入参。
+//
+// 2026-11-01 加了第二层判据：**这个桥只对自家 document 打开**。之前
+// exposeInMainWorld 无条件执行，等于给每一个站点页面的 window 都挂上
+// `__ai_browser__`（实测百度页面可见）。B6/B7 钉住这条，href 由用例注入。
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+
+const require = createRequire(import.meta.url);
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const BRIDGE = join(ROOT, 'src/preload/bridge.cjs');
 
+// 桥的暴露判据（shouldExposeBridge）直接 require 这份实现，测试与生产同一套代码：
+// 在这里重写一遍判据等于没测。
+const identityUtil = require('../src/shared/browser_identity.cjs');
+
 /** 在 vm 里加载 bridge.cjs，返回它暴露出去的对象与所有 IPC send 记录。 */
-function loadBridge() {
+function loadBridge(opts = {}) {
+  const href = opts.href || 'file:///app/src/renderer/download.html';
+  const env = opts.env || {};
   const code = readFileSync(BRIDGE, 'utf8');
   const exposed = {};
   const sends = [];
@@ -32,6 +45,7 @@ function loadBridge() {
     './extractor.cjs': { extractTree: () => ({ id: 'root', children: [] }), extractPageContext: () => ({}) },
     './actions.cjs': { executeAction: () => ({}) },
     './watcher.cjs': { startTracking: () => {} },
+    '../shared/browser_identity.cjs': identityUtil,
   };
   const sandbox = {
     require: (id) => {
@@ -39,7 +53,11 @@ function loadBridge() {
       throw new Error('unexpected require: ' + id);
     },
     document: { readyState: 'loading', addEventListener() {} },
-    window: { addEventListener() {} },
+    // URL 是全局构造器，真实 preload 的 world 里有；vm 里必须补，否则
+    // shouldExposeBridge 的 new URL(href) 直接抛错、判据永远走 false 分支。
+    URL: (0, URL),
+    process: { env },
+    window: { addEventListener() {}, location: { href } },
     setTimeout: () => 0,
     console: { error() {}, log() {} },
     module: { exports: {} },
@@ -82,5 +100,32 @@ describe('preload 暴露面白名单', () => {
     const tree = sends.find((s) => s.channel === 'ai:tree');
     expect(tree, 'ai:extract 没有回发 ai:tree').toBeTruthy();
     expect(tree.payload.id).toBe(7);
+  });
+
+  it('B6 站点页面拿不到桥：window 上不许出现 __ai_browser__', () => {
+    const { exposed } = loadBridge({ href: 'https://www.baidu.com/' });
+    expect(exposed.__ai_browser__, '桥暴露到了站点主世界 —— 扫一遍 window 就能认出我们')
+      .toBeUndefined();
+  });
+
+  it('B7 桥只在两种 document 上打开：自家界面页 / 显式开了 popup 垫片的域', () => {
+    const own = loadBridge({ href: 'file:///app/src/renderer/download.html' });
+    expect(own.exposed.__ai_browser__, '自家下载页必须拿得到 dl 通道').toBeTruthy();
+
+    const gated = loadBridge({
+      href: 'https://course.example.chaoxing.com/x',
+      env: { AI_BROWSER_POPUP_SHIM: 'chaoxing.com' },
+    });
+    expect(gated.exposed.__ai_browser__, '垫片本体在主 world，它发的消息要走这个桥')
+      .toBeTruthy();
+
+    const notMine = loadBridge({
+      href: 'https://www.baidu.com/',
+      env: { AI_BROWSER_POPUP_SHIM: 'chaoxing.com' },
+    });
+    expect(notMine.exposed.__ai_browser__, '白名单外的站点仍然被贴了我们的标记').toBeUndefined();
+
+    const all = loadBridge({ href: 'https://any.site/', env: { AI_BROWSER_POPUP_SHIM: 'on' } });
+    expect(all.exposed.__ai_browser__, 'AI_BROWSER_POPUP_SHIM=on 应当全域开（含桥）').toBeTruthy();
   });
 });

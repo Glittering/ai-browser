@@ -9,8 +9,10 @@
    命中就给 `read_expr`（**顶层可求值的完整表达式**，直接喂 `browse_evaluate`）。
    有模型 → 读整张图的结构（图形类型/坐标/尺寸/文本），写完能**回读校验**。**这是首选。**
 2. 没有已知库 → `browse_canvas {operation:"list"}` + `read` 截获 `fillText` 文本
-   （需 `AI_BROWSER_CANVAS_HOOK=1`；**WebGL 是黑盒**，捕获不到文本，只能 `capture` 拿 PNG，
-   自己承担视觉成本）。纯 canvas 应用**不要 OCR**。
+   （**默认关闭**：包一层 `getContext` 是站点一次 `toString` 就能看见的痕迹，不能让全站付这个
+   代价。当前 tab 用 `browse_canvas {operation:"configure", reload:true}` 现装现读；长期按域开
+   用 `AI_BROWSER_CANVAS_HOOK=host1,host2`，全站开用 `=1`。**WebGL 是黑盒**，捕获不到文本，
+   只能 `capture` 拿 PNG，自己承担视觉成本）。纯 canvas 应用**不要 OCR**。
 3. 都没有 → 只能靠坐标动作 + 帧指纹确认"画面变了"，但**读不出"画的是什么"**（如实告知，别假装）。
 
 在 canvas 上落点用坐标动作，不要找元素：
@@ -54,3 +56,20 @@ browse_act { action:"upload", target:"<id>", file:"/abs/path/to/file.pdf" }
 
 树里的 `context` 会带 modal / required hint / toast / 登录态 / 统计。
 点了之后先看 `context.modals`，不要靠截图猜弹窗有没有出现。
+
+老站写法 `var w = window.open(""); w.location = url`（先开空窗再赋值地址）默认**不通**：
+原生路径下 `window.open` 返回 null。兼容垫片会替换页面可见的原生 `window.open`，
+站点一次 `Function.prototype.toString` 就看得出来，所以它**默认关**，只给点名的域开：
+
+```
+AI_BROWSER_POPUP_SHIM=example-old.com npm start   // 逗号分隔，含子域；=1 全站开
+```
+
+判断依据：
+
+```
+browse_evaluate {js:"/\\[native code\\]/.test(Function.prototype.toString.call(window.open))"}
+```
+
+`true` 说明这一页拿到的是原生 `window.open`（没装垫片）。别为了让某个弹窗出来就把 `=1`
+当默认配置——那是把全站的风控代价换成一页的方便。

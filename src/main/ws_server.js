@@ -714,6 +714,9 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null, 
                 started_at: serverStartedAt,
                 ws_port: port,
                 platform: process.platform,
+                // 身份：UA / UA-CH 品牌 / 平台，以及哪些 tab 真的下发了元数据。
+                // 排查"风控说我们 UA 和 hints 不一致"时，这是第一手证据。
+                ...(pageManager.identityInfo ? { identity: pageManager.identityInfo() } : {}),
                 // 渲染路径：{gpu:true|false, reason:'default'|'env'|'fallback'}。
                 // 白屏/缩放类缺陷的复现与"这条路有没有关系"都要靠它。
                 ...(pageManager.renderPath ? { render_path: pageManager.renderPath } : {}),

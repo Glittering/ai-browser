@@ -82,7 +82,10 @@ function startServer() {
 
 async function spawnElectron(port) {
   const electronPath = require('electron');
-  const childEnv = { ...process.env, ...windowEnv('window_open'), AI_BROWSER_PORT: String(port), AI_BROWSER_WATCHDOG: '0' };
+  // 垫片现在**默认关**（它替换页面可见的原生 window.open，站点一次 toString 就看得见，
+  // 不能让全站付这个代价）。本套件测的正是"老站写法"那条路，所以显式全开：
+  // `on` 同时打开注入侧的垫片和 preload 的桥（垫片本体在主 world，消息要经桥送出来）。
+  const childEnv = { ...process.env, ...windowEnv('window_open'), AI_BROWSER_PORT: String(port), AI_BROWSER_WATCHDOG: '0', AI_BROWSER_POPUP_SHIM: 'on' };
   delete childEnv.ELECTRON_RUN_AS_NODE;
   if (!childEnv.AI_BROWSER_USER_DATA) childEnv.AI_BROWSER_USER_DATA = require('node:path').join(require('node:os').tmpdir(), `ai-browser-e2e-winopen-${port}`);
   // stderr 收下来不丢：这条链路的失败几乎都发生在主进程侧（IPC 有没有收到、

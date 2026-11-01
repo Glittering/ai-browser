@@ -755,6 +755,40 @@ Both paths are switchable: `AI_BROWSER_ERROR_BANNER=0` disables the bar, `AI_BRO
 forces the modal box — the latter blocks the main process, so it is only for staring at a startup
 crash on purpose.
 
+### A site calls it a captcha or "this browser may not be secure"
+
+Risk control does not detect "automation" as a concept; it looks for a browser whose own fields
+disagree. Ours did (measured 2026-11-01 against the same machine's Chrome 156): the UA said
+`Macintosh … Chrome/130`, `navigator.platform` said `Win32`, `sec-ch-ua-platform` said `"Windows"`,
+and WebGL reported a Windows D3D11 adapter. That combination does not read as "a Mac browser", it
+reads as "someone edited this browser" — hence Baidu's slide captcha on almost every search and
+Google's interstitial. So identity is computed by **one** function from the **real** runtime
+(`src/shared/browser_identity.cjs`) and delivered in three layers: UA + UA-CH metadata through CDP,
+Accept-Language as a clean preferred list (no `;q=0.9` — that value also lands in
+`navigator.languages`), and the navigation-time `sec-ch-ua*` headers, which Electron's engine does
+not emit at all on document requests (page-initiated `fetch` does), added at the request egress.
+
+Ask the app instead of guessing:
+
+```bash
+node bin/ai-browser.cjs call ui.server_info   # → identity: {user_agent, chrome_version, platform,
+#   platform_version, brands[], navigation_hints_bridge, override_applied_tabs[]}
+```
+
+What is still genuinely different, and what to do about it:
+
+- **The engine is 26 majors behind** (`Chrome/130` vs a current `Chrome/156`). Consistent, but an
+  "outdated browser" signal on its own. The only cure is upgrading Electron — a dependency bump, so
+  it is a deliberate release, not a patch.
+- **`window.chrome.loadTimes` / `.csi` are absent** (old Chrome telemetry stubs). Low weight, not
+  yet filled.
+- **`data-ai-id` is written into the live DOM while reading the tree** (70 attributes on Baidu's
+  homepage). It is load-bearing for the CDP selector path, so removing it is a refactor, not a
+  switch — site scripts *can* see it. This is the loudest tell left.
+- **The canvas recorder and the `window.open` shim patch page-visible natives.** Both are now
+  opt-in (`AI_BROWSER_CANVAS_HOOK`, `AI_BROWSER_POPUP_SHIM`), and the `__ai_browser__` bridge is no
+  longer exposed to site pages at all — see the canvas section above.
+
 ### The element is clearly on the page but not in the tree
 
 Before you write a site-specific script, work down this list. The reflex — "pin it with a
@@ -983,6 +1017,18 @@ Two limits you should know:
   explicitly invoked, and it costs *your* agent's vision tokens.
 
 Disable entirely with `AI_BROWSER_CANVAS_HOOK=0`.
+
+**It is off by default.** Wrapping `getContext` is something the page can see — one
+`Function.prototype.toString.call(HTMLCanvasElement.prototype.getContext)` and the site knows its
+canvas API was patched (measured on Baidu, 2026-11-01). The recorder is the loudest automation tell
+this browser carried, and every site paid for it while only canvas apps gained from it. So:
+
+- per tab, on demand: `browse_canvas(operation: "configure", reload: true)` installs it and gives
+  the full history for that page;
+- for a whole origin: `AI_BROWSER_CANVAS_HOOK=b.chaoxing.com,excalidraw.com` (comma-separated,
+  subdomains included);
+- everywhere: `AI_BROWSER_CANVAS_HOOK=1` — what v2.4 and earlier did, and what risk controls
+  noticed.
 
 ### Boundaries worth knowing before you rely on them
 

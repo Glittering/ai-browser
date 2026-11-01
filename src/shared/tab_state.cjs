@@ -59,6 +59,10 @@ const PER_TAB = [
   // 键是 `__aiCanvasReport_<tabId>_<rand>`，值是 tabId —— 每次重装 hook 都生成
   // 一个新名字，所以这里只能按**值**清，否则每次 configure 都留一条永不释放。
   { field: '_canvasBindings', byValue: true },
+  // ---- canvas hook 的"这一页显式点名过"记账 ----
+  { field: '_canvasHookForced' },
+  // ---- 身份（UA-CH 元数据）下发记账 ----
+  { field: '_identityApplied' },
 ];
 
 /**

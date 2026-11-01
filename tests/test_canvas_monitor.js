@@ -154,10 +154,20 @@ describe('canvas_monitor — 模式与生命周期', () => {
     expect(out.warnings).toEqual(['cdp debugger not attached', 'another']);
   });
 
-  it('CM-12: isCanvasHookEnabled 只把明确的关闭值当关闭', () => {
-    for (const v of ['0', 'off', 'OFF', 'false', 'no', ' 0 ']) expect(isCanvasHookEnabled(v)).toBe(false);
-    for (const v of ['1', 'on', 'true', 'yes', '']) expect(isCanvasHookEnabled(v)).toBe(true);
-    expect(isCanvasHookEnabled(undefined), '环境变量没设 = 开').toBe(true);
-    expect(isCanvasHookEnabled(null)).toBe(true);
+  it('CM-12: isCanvasHookEnabled 默认关；开=全部，逗号列表=按 host', () => {
+    // 默认关：这个 hook 替换的是页面可见的原生 getContext，一次 toString 就露馅
+    // （2026-11-01 实测是站点侧最强痕迹之一），不能让所有网站替它付代价。
+    for (const v of [undefined, null, '', '0', 'off', 'OFF', 'false', 'no', ' 0 ']) {
+      expect(isCanvasHookEnabled(v, 'www.baidu.com'), `关闭语义：${JSON.stringify(v)}`).toBe(false);
+    }
+    for (const v of ['1', 'on', 'true', 'yes', 'all']) {
+      expect(isCanvasHookEnabled(v, 'any.site'), `全开语义：${v}`).toBe(true);
+    }
+    // 域名列表：命中含子域，不命中一律不装。
+    expect(isCanvasHookEnabled('excalidraw.com', 'excalidraw.com')).toBe(true);
+    expect(isCanvasHookEnabled('excalidraw.com', 'm.excalidraw.com')).toBe(true);
+    expect(isCanvasHookEnabled('excalidraw.com', 'notexcalidraw.com'), '后缀必须按域边界匹配').toBe(false);
+    expect(isCanvasHookEnabled('a.com,b.com', 'b.com')).toBe(true);
+    expect(isCanvasHookEnabled('a.com', ''), '拿不到 host 时不装').toBe(false);
   });
 });

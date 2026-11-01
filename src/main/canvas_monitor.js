@@ -7,6 +7,8 @@
 // 有界是硬要求：canvas 密集的页面（游戏、图表）每帧几十次调用，不设上限
 // 会直接把内存吃光。超出时淘汰最旧的记录，并在 dropped_calls 里如实累计。
 
+import identityUtil from '../shared/browser_identity.cjs';
+
 const MAX_CALLS_PER_TAB = 5000;
 const MAX_BYTES_PER_TAB = 4 * 1024 * 1024;
 
@@ -273,16 +275,29 @@ export class CanvasMonitor {
 }
 
 /**
- * 环境变量开关，默认**开启**。关闭：AI_BROWSER_CANVAS_HOOK=0（或 off/false/no）。
+ * Canvas hook 的开关（AI_BROWSER_CANVAS_HOOK），**默认关闭**。
  *
- * 注意：hook 只能在页面首次加载**完成之后**安装（CDP 的 await 命令在刚创建的
- * tab 上会挂死），所以首屏已经画完的内容拿不回来 —— 需要完整历史就用
- * ui.canvas_configure({ reload: true })。
+ * 为什么默认关掉：hook 要在页面 main world 里替换
+ * `HTMLCanvasElement.prototype.getContext`，站点一行
+ * `Function.prototype.toString.call(...)` 就看到的不是 `[native code]`。
+ * 实测（2026-11-01，百度）：这是我们带进站点的最强自动化痕迹之一，
+ * 而代价由**所有**网站付，收益只归"要读 canvas 语义"的那几站。
+ *
+ * 三种取值：
+ *   不设置 / off / 0        → 全站关闭；agent 需要时在 tab 上显式
+ *                             ui.canvas_configure（会强制装到那一页）
+ *   on / 1 / all            → 所有 tab 都装
+ *   a.com,b.example.org     → 只在这些域（含子域）装
  */
-export function isCanvasHookEnabled(envValue) {
-  if (typeof envValue !== 'string') return true;
-  const v = envValue.trim().toLowerCase();
-  return !(v === '0' || v === 'off' || v === 'false' || v === 'no');
+export function isCanvasHookEnabled(envValue, host) {
+  const policy = parseCanvasPolicy(envValue);
+  if (policy.mode === 'all') return true;
+  if (policy.mode === 'off') return false;
+  return !!host && identityUtil.hostMatches(host, policy.hosts);
+}
+
+export function parseCanvasPolicy(envValue) {
+  return identityUtil.parseHostSwitch(envValue);
 }
 
 export default CanvasMonitor;

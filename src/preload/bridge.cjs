@@ -8,6 +8,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 const { extractTree, extractPageContext } = require("./extractor.cjs");
 const { executeAction } = require("./actions.cjs");
 const { startTracking } = require("./watcher.cjs");
+const identityUtil = require("../shared/browser_identity.cjs");
 
 // Watch event → push to main via IPC
 function sendEvent(event, data) {
@@ -18,7 +19,30 @@ function sendEvent(event, data) {
 // IPC EXPOSURE
 // ============================================================
 
-contextBridge.exposeInMainWorld("__ai_browser__", {
+// **这个桥只对自家的 document 打开。**
+//
+// exposeInMainWorld 把属性写进页面的 main world —— 之前它挂在每一个标签页上，
+// 百度、Google 的 window 上就都多了一个 `__ai_browser__`。任何想识别"这不是
+// 正常浏览器"的脚本，扫一遍 window 就能拿到（实测 2026-11-01 百度页面可见）。
+// 我们的界面页需要它（下载结果页查进度、window.open 垫片发导航），
+// 站点页面不需要，就一律不给。
+//
+// file: 协议覆盖 loading / error / download 这些我们自己的页面；站点侧只有当
+// 这个 host 显式开了 window.open 垫片（AI_BROWSER_POPUP_SHIM）才给，因为垫片
+// 本体在主 world，只能经这个桥把消息送出来。
+function shouldExposeBridge() {
+  var href = '';
+  try { href = window.location.href || ''; } catch (e) { return false; }
+  if (href.indexOf('file:') === 0) return true;
+  var host = '';
+  try { host = new URL(href).hostname; } catch (e) { return false; }
+  var policy = identityUtil.parseHostSwitch(process.env.AI_BROWSER_POPUP_SHIM);
+  if (policy.mode === 'all') return true;
+  if (policy.mode === 'hosts') return identityUtil.hostMatches(host, policy.hosts);
+  return false;
+}
+
+const BRIDGE_SURFACE = {
   // ⚠️ 这里曾经有 `sendTree` / `sendDiff`（直通 `ai:tree` / `ai:diff`）。
   // 它们把"往主进程灌数据"的出口交给了页面主世界：页面脚本循环 id=1..N 就能
   // 撞上在途的 getTree，让 agent 读到一棵伪造的树（把"确认支付"换成"取消"这类）。
@@ -39,15 +63,18 @@ contextBridge.exposeInMainWorld("__ai_browser__", {
   },
   // 我们自己的界面页（renderer/download.html）用的最小通道：
   // 查这条下载的进度、打开文件、在 Finder 中显示。
-  // ⚠️ 但它挂在**每个**标签页的 window 上（包括站点页面），所以主进程侧必须
-  // 校验 sender 的 URL 是不是自家 renderer 页面 —— 见 index.js 的 isChromeSender。
-  // 站点页面即使调到这里，也只会拿到 {found:false}。
+  // 站点页面既拿不到这个桥（shouldExposeBridge），主进程侧也仍然校验 sender
+  // 的 URL 是不是自家 renderer 页面 —— 见 index.js 的 isChromeSender，两层各自独立。
   dl: {
     record: function() { return ipcRenderer.invoke('dl:record'); },
     open: function(p) { ipcRenderer.send('dl:open', p); },
     reveal: function(p) { ipcRenderer.send('dl:reveal', p); }
   }
-});
+};
+
+if (shouldExposeBridge()) {
+  contextBridge.exposeInMainWorld("__ai_browser__", BRIDGE_SURFACE);
+}
 
 // Extract tree request — echo back the request id so the main process can
 // match this response to the caller (concurrent requests / multi-tab safe).
