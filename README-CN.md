@@ -152,6 +152,28 @@ data: { reason: "group-full", limit: 8, tabs: [{tab, url, draft?, downloading?},
 `muted: true`；按住的是**输出不是播放**，`currentTime` 照旧前进，所以 agent 看到的那一页
 没有"变卡"。整体关掉这条：`AI_BROWSER_BG_MUTE=0`。
 
+**受信输入打的是你指的那一页，不只是人眼前那一页。** Chromium 会把发往
+`visibilityState: hidden` 文档的模拟输入**丢弃** —— 不报错、不排队、也不改投给别的标签页。
+窗口从未显示过时，只有一页自报 visible：拿到过 CDP 页面焦点伪造的那一页，而产品平时只把它
+给"人眼前那一页"。旧形态最坏的地方不是丢，是丢完 `ui.act` 还回 `success:true` —— 回执在说谎。
+现在每个受信输入动作（`click`/`hover`/`drag`/`wheel`/`type`/`setContent`/`clear`/`press`/`paste`）
+投递之前先问那一页一句"你现在 visible 吗"，收不到就把同一招补给那一页，再问一次：**不动 z 序、
+不显示窗口、不改 `activeTab`、不改声音归属**，而且**不做恢复**（那一招是粘的，来回开关会让每个
+动作都把页面推一遍 visible→hidden→visible，而站点正拿它决定要不要暂停视频）。
+两次都收不到时事件**一发都不投**，回执是 `success:false` + `input_blocked:true` + 那一页的
+可见性，并给出出路（`ui.evaluate` 走 JS 路径，或把窗口显示出来一次）。
+2026-11-03 逐杠杆实测：置顶、`webContents.focus()`、摘了重挂、`setBounds`、
+`setBackgroundThrottling(false)`、`Page.setWebLifecycleState{active}` 全都送不进去；
+Chromium 130 里没有 `Emulation.setPageVisibilityOverride` 这条命令。顺带还证伪了
+"活动页一定 visible"—— `AI_BROWSER_FOCUS=never` 下它自己也是 hidden，所以这道闸对**每一个**
+受信输入动作都要问一次（一发 800ms 上限的 CDP 读）。`AI_BROWSER_INPUT_FOCUS=0` 关掉的只是
+"补那一招"，**"别说谎"这一半关不掉**。
+
+`npm run multiagent`（80 条）钉住正面那半边 —— M11 在一个从未显示的窗口里点后台标签页、往它
+键入，而对照页与 `activeTab` 一动不动；`npm run input_routing`（15 条，起两个实例）钉住诚实那
+半边（`AI_BROWSER_INPUT_FOCUS=0` 与 `AI_BROWSER_FOCUS=never`）。两个套件同时继续覆盖自动工作区、
+上限与拒绝清单、组间互不影响、页面自己弹窗时牺牲谁、以及被按住的页仍在播。
+
 站点写 `window.open(url, name, 'width=420,height=520,left=120,top=80')` 请求的是一个**浮层**
 （登录框、支付二维码都这么写）。本项目没有独立窗口，这类请求以前把第三参数整份丢掉，于是
 420×520 的登录框长成整号标签页、还按 1280px 排版自己。现在它按请求的矩形摆在父页上面：

@@ -18,6 +18,10 @@
 // 后面几条是同一套归属机制长出来的新责任（2026-11-03 对照 Chromium 之后补）：
 //   M8b 组满时页面自己弹窗：牺牲品的排除条件（写了一半的页不许关，宁可超限）
 //   M10 声音只跟人眼前那一页：agent 的后台页不出声，但**照旧在播**（静音 ≠ 暂停）
+//   M11 后台那一页也收得到受信输入：M2/M8b 不再需要先把页顶到人眼前才点得动
+//
+// ⚠️ 这个套件是**隐藏窗口**跑的（见 _window_mode.cjs）—— 那正是多 agent 的真实形态，
+// 也正是 M11 那条缺陷只在其中现形的形态。可见窗口里所有页都收得到输入，测不出来。
 //
 // Run: npm run multiagent
 
@@ -473,21 +477,20 @@ async function main() {
       const g = (lt.groups || []).find((x) => x.mine);
       return { id: g && g.id, count: g && g.count, limit: g && g.limit, tabs: lt.tabs || [], evicted: lt.evicted || [] };
     };
-    // 每一发 ui.act 之前先把那一页提到人眼前。
+    // 每一发 ui.act 打的都是**没顶到人眼前**的那一页 —— 这里不再先把页提上去。
     //
-    // 不是偷懒，是把两件事分开钉：**这一段的主题是"淘汰保护"**，而隐藏窗口里
-    // 没置顶的那一页根本收不到受信输入（2026-11-03 实测：document.visibilityState
-    // =hidden 的页面上，CDP 的 mousePressed/mouseReleased 与键盘事件被整条丢弃，
-    // click 静默无效、type 报 Input not verified）。那是另一个缺陷，自己的钉子
-    // 在自己的提交里（M11）；这里先把输入送得到，才谈得上保护生效没生效。
-    const raise = async (tid) => { await rpc(D, 'ui.set_active_tab', { tab: tid }); await sleep(150); };
+    // 早先这一段每条 act 之前都要 set_active_tab 一次，因为隐藏窗口里没置顶的那一页
+    // 根本收不到受信输入（2026-11-03 实测：hidden 文档上 CDP 的 mousePressed/mouseReleased
+    // 与键盘事件被整条丢弃，click 静默无效、type 报 Input not verified）。那个缺陷
+    // 自己的钉子在 M11，修好之后这里必须回到"自然形态"：**置顶是个 workaround，
+    // 留着它就等于把这一段的输入路径永远测成前台那一条**（淘汰保护照旧测得到，
+    // 但"后台页点不动"这个故障会重新变得无人看守）。
     const g0 = await gOf();
     check('M8b 先把本组填到上限', ids.every(Boolean) && g0.count === 4 && g0.limit === 4, JSON.stringify(g0).slice(0, 200));
 
     // ① 阳性对照：什么都没保护时，行为照旧 —— 最久没用的那一页被挤掉
     const popRef = await findRef(D, t4, (n) => n.id === 'pop' || String(n.label || '') === '弹一屏');
     check('M8b 弹窗按钮定位得到（不是占位页上的空气）', !!popRef, String(popRef));
-    await raise(t4);
     const click1 = await rpc(D, 'ui.act', { action: 'click', target: popRef, tab: t4 });
     await sleep(1200);
     const g1 = await gOf();
@@ -510,25 +513,29 @@ async function main() {
     //    直接 crash 会把后面的 M10 一起吞掉，什么证据都留不下。
     const p1 = popupTab ? popupTab.id : t4;
     if (popupTab && !await waitPath(D, p1, '/popup-child')) check('M8b 弹窗那一页已到位', false, String(await text(D, p1, 'location.href')));
+    // 草稿要写在**每一页**上，包括当弹窗源的那一页 p1。② 要证的是"没有任何一页可以
+    // 牺牲 → 宁可超限"，而 p1 是 window.open 刚建出来的新页、按 usedAt 排最新 ——
+    // 不给它也造一份草稿，它就永远是那个可以被关掉的牺牲品，断言红得和 protecting
+    // 无关。（早先靠 raise(p1) 把它变成 activeTab 来排除，那是 workaround 顺带遮住的
+    // 另一件事，现在显式做。）
+    const draftTabs = p1 === t4 ? [t2, t3, t4] : [t2, t3, t4, p1];
     const typedAll = [];
-    for (const tid of [t2, t3, t4]) {
+    for (const tid of draftTabs) {
       const ref = await findRef(D, tid, (n) => n.id === 't' || n.role === 'textbox');
-      await raise(tid);
       typedAll.push(await rpc(D, 'ui.act', { action: 'type', target: ref, text: '写到一半', tab: tid }));
     }
-    check('M8b 三页草稿都造得出来', typedAll.every((r) => r.ok && r.result.success !== false),
+    check('M8b 可牺牲的页每一页都造出草稿', typedAll.every((r) => r.ok && r.result.success !== false),
       JSON.stringify(typedAll.map((r) => r.result || r.error)).slice(0, 240));
     check('M8b 草稿真的在页面里（不是只记在账上）',
       (await text(D, t2, 'document.getElementById("t").value')) === '写到一半', '');
     const popRef2 = await findRef(D, p1, (n) => n.id === 'pop' || String(n.label || '') === '弹一屏');
     check('M8b 弹窗那一页也带按钮（每一代都能再弹一次）', !!popRef2, String(popRef2));
-    await raise(p1);
     await rpc(D, 'ui.act', { action: 'click', target: popRef2, tab: p1 });
     await sleep(1200);
     const g2 = await gOf();
     const alive2 = new Set(g2.tabs.map((t) => t.id));
-    check('M8b 有没提交输入的页不被牺牲（三页全有草稿 → 一页都没关）',
-      g2.evicted.length === 0 && alive2.has(t2) && alive2.has(t3) && alive2.has(t4),
+    check('M8b 有没提交输入的页不被牺牲（组里每一页都写着草稿 → 一页都没关）',
+      g2.evicted.length === 0 && alive2.has(t2) && alive2.has(t3) && alive2.has(t4) && alive2.has(p1),
       JSON.stringify({ evicted: g2.evicted, alive: Array.from(alive2) }).slice(0, 240));
     check('M8b 宁可超限：本组页数超了上限，也不吞掉正在写的东西',
       g2.count > g2.limit, JSON.stringify({ count: g2.count, limit: g2.limit }));
@@ -540,7 +547,7 @@ async function main() {
     const list = (rejected.data && rejected.data.tabs) || [];
     check('M8b 满了的拒绝回执把"关掉会丢东西"的页标出来',
       !rejected.ok && rejected.data && rejected.data.reason === 'group-full'
-      && list.filter((x) => x.draft === true).length >= 3, JSON.stringify(list).slice(0, 260));
+      && list.filter((x) => x.draft === true).length >= draftTabs.length, JSON.stringify(list).slice(0, 260));
     D.close();
   }
 
@@ -574,10 +581,9 @@ async function main() {
       JSON.stringify(humanTab).slice(0, 200));
 
     const playRef = await findRef(F, aud, (n) => n.id === 'play' || String(n.label || '') === '放');
-    // 放音这一下要先把它顶到人眼前：隐藏窗口里没置顶的那一页收不到受信输入
-    // （2026-11-03 实测，M11 管这件事），而 Chromium 的自动播放策略只认真实手势。
-    // 这不影响本段的主题 —— 要钉的是"**按住声音之后播放有没有一起停掉**"，
-    // 而那一段是在回到后台之后测的。
+    // 这里先把它顶到人眼前，是为了**声音归属**那条断言（顶上去 → 放开），不是为了
+    // 把点击送进去 —— 后台页点得不动是 M11 的事。Chromium 的自动播放策略只认真实
+    // 手势，而 ui.act 走的正是 CDP 受信输入，所以两种置顶状态下这一发都该点得动。
     const raised = await rpc(F, 'ui.set_active_tab', { tab: aud });
     await sleep(250);
     check('M10 顶到人眼前 → 声音放开', raised.ok && (await rowOf(F, aud)).muted === undefined,
@@ -623,6 +629,85 @@ async function main() {
     check('M10 关掉有声的那一页之后，新的人眼前那一页不出声状态正常',
       !!nowActive && nowActive.muted === undefined, JSON.stringify(nowActive).slice(0, 200));
     F.close();
+  }
+
+  // ---- M11 没顶到人眼前的那一页也收得到受信输入 ----
+  //
+  // 这一条是上面所有阶段的地基，也是 2026-11-03 逐杠杆实测换来的结论：窗口从未显示过
+  // 时，页面自报 document.visibilityState:'visible' 的**唯一条件**是它拿到过 CDP 的
+  // Emulation.setFocusEmulationEnabled（产品平时只给活动页）；没拿到的页一律 hidden，
+  // 而 Chromium 对 hidden 文档**丢弃**模拟输入 —— 不报错、不排队、也不改投给别人。
+  // 旧形态最坏的地方不是丢，是丢完还回 `{success:true, clicked_via:'cdp-click'}`。
+  //
+  // 所以这一段要的四件事按顺序是：前提成立（那一页自己报 hidden）→ 动作真的落进
+  // **那一页** → 别的地方一动不动（丢弃不是改投）→ 闸门没有顺手搬动任何东西
+  // （z 序 / activeTab / 声音归属照旧）。判据在 shared/input_routing.cjs，
+  // 执行侧的钉子是 PM-51..59，这里钉的是真实 Chromium。
+  stage('M11');
+  console.log('\n[M11] 后台那一页不用顶到人眼前：点击与键入照样落地，而且没人被搬动');
+  {
+    const G = new Browser(WS_PORT);
+    await G.ready(10000);
+    await rpc(G, 'ui.hello', { label: 'Probe-G' });
+    // 本组的**第一**页会自动显示出来（替换启动页），M11 要的是"出生起就在后台"的那种
+    // 形状 —— 所以先占住前台那一页，再开第二页并明确 show:false。
+    const rFront = await rpc(G, 'ui.new_tab', { url: `${base}/front-page` });
+    const front = rFront.result && rFront.result.tab;
+    check('M11 前台那一页已就绪（它是"什么都没串台"的对照组）',
+      !!front && await waitPath(G, front, '/front-page'), JSON.stringify(rFront).slice(0, 160));
+    const rBack = await rpc(G, 'ui.new_tab', { url: `${base}/back-page`, show: false });
+    const back = rBack.result && rBack.result.tab;
+    check('M11 后台页已就绪，且回执明说它没显示',
+      !!back && rBack.result.shown === false && await waitPath(G, back, '/back-page'),
+      JSON.stringify(rBack).slice(0, 160));
+
+    // 前提必须是**页面自己报的** hidden，而不是测试假设的"它在后台"。这一句红了
+    // 说明环境变了（比如窗口被谁显示出来了），后面所有断言都失去意义。
+    const visBefore = await text(G, back, 'document.visibilityState');
+    check('M11 前提：后台那一页自报 hidden（旧形态下它的输入会被整条丢弃）',
+      visBefore === 'hidden', String(visBefore));
+
+    const tabs0 = (await rpc(G, 'ui.list_tabs', {})).result.tabs || [];
+    const active0 = tabs0.filter((t) => t.active).map((t) => t.id);
+    const refBtn = await findRef(G, back, (n) => n.id === 'b' || String(n.label || '') === '按钮');
+    const refIn = await findRef(G, back, (n) => n.id === 't' || n.role === 'textbox');
+    check('M11 后台页的按钮与输入框定位得到（读层本来就不受可见性影响）', !!refBtn && !!refIn, refBtn + ' / ' + refIn);
+
+    const clickBack = await rpc(G, 'ui.act', { action: 'click', target: refBtn, tab: back });
+    check('M11 后台页点击回执 success，而且没有 input_blocked',
+      clickBack.ok && clickBack.result && clickBack.result.success !== false && clickBack.result.input_blocked !== true,
+      JSON.stringify(clickBack.result || clickBack.error).slice(0, 220));
+    check('M11 **点击真的落进那一页**（旧形态这里是 idle，而回执照样写 success）',
+      (await text(G, back, 'document.getElementById("r").textContent')) === 'clicked-by-back-page',
+      String(await text(G, back, 'document.getElementById("r").textContent')));
+
+    const typeBack = await rpc(G, 'ui.act', { action: 'type', target: refIn, text: '后台也写', tab: back });
+    check('M11 后台页的键入也落地（键盘事件与鼠标事件是两条 CDP 路径）',
+      typeBack.ok && typeBack.result.success !== false
+      && (await text(G, back, 'document.getElementById("t").value')) === '后台也写',
+      JSON.stringify({ res: typeBack.result || typeBack.error, val: await text(G, back, 'document.getElementById("t").value') }).slice(0, 240));
+
+    // 负证据①：丢弃**不是**改投。事件被吞掉的时候，对照组那一页一次都没被点过。
+    check('M11 对照页一动不动（串台会表现成"success 而且别人的页面变了"，那是另一种坏）',
+      (await text(G, front, 'document.getElementById("r").textContent')) === 'idle',
+      String(await text(G, front, 'document.getElementById("r").textContent')));
+
+    // 负证据②：闸门只补焦点态，不搬东西。置顶 / 改 activeTab / 改声音归属都不在
+    // 它的授权范围内（PM-58 在桩里钉同一条，这里钉真实窗口）。
+    const tabs1 = (await rpc(G, 'ui.list_tabs', {})).result.tabs || [];
+    const rowBack = tabs1.find((t) => t.id === back) || {};
+    check('M11 activeTab 没有被换走（修输入不是把页搬到人眼前）',
+      JSON.stringify(tabs1.filter((t) => t.active).map((t) => t.id)) === JSON.stringify(active0),
+      JSON.stringify({ before: active0, after: tabs1.filter((t) => t.active).map((t) => t.id) }));
+    check('M11 那一页仍在后台、仍被按住声音（补焦点态不许顺带改这两件事）',
+      rowBack.active !== true && rowBack.muted === true, JSON.stringify(rowBack).slice(0, 200));
+    const ws = await rpc(G, 'ui.window', {});
+    check('M11 窗口照旧没有显示出来（这是"后台跑"的全部意义）',
+      ws.ok && ws.result && ws.result.visible === false, JSON.stringify(ws.result || ws.error).slice(0, 200));
+
+    await rpc(G, 'ui.close_tab', { tab: back });
+    await rpc(G, 'ui.close_tab', { tab: front });
+    G.close();
   }
   C.close();
 

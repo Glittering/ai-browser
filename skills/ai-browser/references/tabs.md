@@ -96,5 +96,19 @@ browse_tabs {"op":"switch","tab":7,"show":true}
 单实例启动时也可以用 `AI_BROWSER_START_HIDDEN=1` 让窗口从头就不出现。
 用户点 Dock 图标随时叫回来，落在他上次看的那一页，你的任务不受影响。
 
+**"点击照旧"是有前提的，而浏览器替你把了这个前提。** Chromium 会**丢弃**发往
+`document.visibilityState=hidden` 那份文档的模拟输入 —— 隐藏窗口里只有拿到过页面焦点伪造
+的那一页算 visible，而它平时只给"人眼前那一页"。现在每个受信输入动作（click / hover / type /
+press / drag / wheel / paste / setContent / clear）投递之前，浏览器会先问那一页一句
+"你现在 visible 吗"，收不到就补给那一页一发焦点伪造再问一次：**不动 z 序、不显示窗口、
+不改 `activeTab`、不改声音归属**。所以你打别人的后台标签页、打自己刚开的第二第三页，
+都该真的落到位（`npm run multiagent` 的 M11 钉的就是这件事）。
+
+⚠️ 两次都问不到（`AI_BROWSER_INPUT_FOCUS=0`、或 `AI_BROWSER_FOCUS=never` 那种组合）时，
+动作**不会执行**，回执是 `success:false` + `input_blocked:true` —— 这是"什么都没发生"，
+不是"点了没反应"。别重试：换 `ui.evaluate` 走 JS 路径，或先 `ui.window {visible:true}`
+把窗口显示出来一次（此后每一页都一路收得到）。看到 `input_blocked` 还照着 success 的
+经验再点一次，就会把一次点击变成两次。
+
 ⚠️ 只有隐藏窗口**不等于**没人看：用户可能正盯着你那一页。别在页面上做会让人
 误解的连续操作（比如连续删除）。

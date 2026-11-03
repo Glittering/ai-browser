@@ -49,6 +49,11 @@ const SUITES = [
   // multiagent —— 多个 agent 并用：各自的目标、互不干扰、目标被关掉要报错
   // background —— 窗口隐藏/最小化时全能力可用（无头式无人值守）
   'multiagent', 'background',
+  // input_routing —— 收不到输入时**不许说成功**（2026-11-03 逐杠杆实测）。它起**两个**
+  // 实例：一个 AI_BROWSER_INPUT_FOCUS=0（不补救，但照旧如实失败；再顶上去做阳性对照），
+  // 一个 AI_BROWSER_FOCUS=never（隐藏窗口里连活动页都收不到 → 只能失败）。两种配置都是
+  // spawn 时定的 env，进程内切不了开关，所以合成一个套件、分两个阶段。
+  'input_routing',
   // icon —— 应用图标的两条渲染路径必须同尺寸（bundle 的 icns vs 源码启动的
   //         dock.setIcon）。用户报"图标一会大一会小"就是这条不一致（2026-10-29）。
   'icon',

@@ -660,6 +660,42 @@ agent 在后台开的视频页会一路响，人找不到那个喇叭去关它�
 由 M10 钉住：agent 的音频页出生即 muted → 顶到人眼前点开播放 → 回后台 → 断言仍然 muted
 且 `currentTime` 仍在走（顺带钉住"静音 ≠ 暂停"和"手势真的进了那一页"）。
 
+**受信输入的路由**。窗口从未显示过时，一份文档自报 `document.visibilityState:'visible'`
+的**唯一条件**是它拿到过 CDP 的 `Emulation.setFocusEmulationEnabled` —— 产品平时只给
+"人眼前那一页"（那就是 `AI_BROWSER_FOCUS=auto` 的本体）。其余页一律 hidden，而 Chromium
+对 hidden 文档**丢弃**模拟输入：不报错、不排队、也不改投给别的标签页，事件就是没了。
+旧形态最坏的地方不是丢，是丢完 `ui.act` 还回 `{success:true, clicked_via:'cdp-click'}`
+—— 回执在说谎，agent 只能原地重试。
+
+所以受信输入动作（`click`/`hover`/`drag`/`wheel`/`type`/`setContent`/`clear`/`press`/`paste`）
+投递之前多一道闸：**问一句 → 收不到就把那一招补给这一页 → 再问一句 → 还不行就如实失败**。
+
+```
+量到 visible      → 直接投递（活动页走的还是这一条，一次往返都不多）
+量到 hidden       → 补一发焦点伪造，再量一次；翻成 visible 就投递
+补完还是 hidden    → 事件一发都不投，回 success:false + input_blocked:true + visibility
+量不到（无 CDP 会话 / 探针超时 800ms）→ 放行：观测能力不足不许反过来让一个动作失败
+```
+
+补的那一招**不是新机制**，是产品每天都在用的 `_focusWebContents`，这里给到"要操作但收不到"
+的那一页。它不动 z 序、不显示窗口、不改 `activeTab`、不改声音归属，也**不做恢复** —— 那一招
+是粘的，来回开关会让每个动作都把页面推一遍 visible→hidden→visible，而站点正拿它决定要不要
+暂停视频。`upload` 不在名单里（走 `DOM.setFileInputFiles`，JS 路径收得到），只读与控制类
+动作也不问。
+
+判据在 `shared/input_routing.cjs`（纯函数，`tests/test_input_routing.js` 钉），执行侧是
+`page_manager._inputGate`（PM-51..59），真实 Chromium 上的正反两面各有套件：`npm run
+multiagent` 的 **M11**（没顶到人眼前的一页点得动、键得进，而对照页与 `activeTab` 一动不动）、
+`npm run input_routing`（关掉补救 / `AI_BROWSER_FOCUS=never` 时**如实失败**，页面也说没发生）。
+
+同一次实测顺手证伪了两条一直被当成常识的推断，都写进了代码注释：
+① 置顶（`setTopBrowserView`）、`webContents.focus()`、摘了重挂、`setBounds`、
+`setBackgroundThrottling(false)`、`Page.setWebLifecycleState{active}` 全都**不能**让一份
+hidden 文档收到输入（`Emulation.setPageVisibilityOverride` 在 Chromium 130 里根本不存在）；
+② **"活动页一定 visible"是假的** —— `AI_BROWSER_FOCUS=never` 下活动页自己也是 hidden，
+那种组合里 `ui.act` 的受信输入结构性地送不进去，只能失败，不能假装成功。因此这道闸对
+**每一个**受信输入动作都要问一次（包括自己那一页），代价是一发 800ms 上限的 CDP 读。
+
 **看 ≠ 拥有**。人点开 agent 的页只是"看"（`activeTab` 变了，会话目标不变）；用户的标签页
 也不因为有 agent 在跑而变得只读。要让用户接管（登录/扫码/支付），agent 用
 `ui.set_active_tab {show:true}` 把页面顶到人眼前。
@@ -671,15 +707,15 @@ agent 在后台开的视频页会一路响，人找不到那个喇叭去关它�
 往下弹会被裁掉，要能弹就得每次悬停把标签栏长高、把页面下推，那正是本文件另一头
 "渲染三宗罪"的来源。
 
-回归：`npm run multiagent`（69 断言，M7–M10 覆盖自动工作区 / 上限 / 组间隔离 / 弹窗挤位时
-牺牲谁 / 声音只跟人眼前那一页）。
+回归：`npm run multiagent`（80 断言，M7–M11 覆盖自动工作区 / 上限 / 组间隔离 / 弹窗挤位时
+牺牲谁 / 声音只跟人眼前那一页 / 后台那一页也收得到受信输入）。
 
 ---
 
 ## 后台：窗口不显示时照样把活干完
 
 用户的要求：*"跟无头浏览器一样无感知运行，并且随时可以点开，使用它，还不影响 agent
-进行任何任务"*。这以前**做不到**，三处硬伤都在这一节里。
+进行任何任务"*。这以前**做不到**，四处硬伤都在这一节里（第四条 2026-11-03 才量出来）。
 
 ### 1. 隐藏必须是稳定状态
 
@@ -700,10 +736,15 @@ agent 在后台开的视频页会一路响，人找不到那个喇叭去关它�
 
 ### 2. 没有合成表面 = 截不到图（最隐蔽的一条）
 
-没挂进窗口的 `BrowserView` **没有合成表面**：读树 / 点击 / 输入 / 导航全部正常
-（走渲染进程和 CDP 输入），但 `ui.screenshot` 拿 **0 字节**、`ui.paint_check` 直接
+没挂进窗口的 `BrowserView` **没有合成表面**：读树 / 导航全部正常（走渲染进程和 CDP），
+但 `ui.screenshot` 拿 **0 字节**、`ui.paint_check` 直接
 `no-frame`。而截图正是 agent 判断"这一页到底画出什么"的唯一手段 —— 于是"后台标签页"
 会变成一个看不见也拍不到的黑盒。
+
+⚠️ 这句话原先还包含"点击 / 输入也正常"，2026-11-03 逐杠杆实测**证伪**：挂进窗口只解决了
+**表面**，而模拟输入丢不丢取决于那一份文档自报 `visibilityState` 是不是 `visible` ——
+没拿到过页面焦点伪造的页一律 hidden，事件发出去就没了，回执却仍是 `success:true`。
+现在这一条由"受信输入的路由"那道闸负责（见上面标签页那一节），和表面无关。
 
 现在：**所有标签页都挂进窗口，用 z 序决定谁在上面**（`setTopBrowserView`，
 不再 `removeBrowserView` 全部再 add 一个）。代价是每个标签页都占一份合成资源
@@ -722,6 +763,25 @@ agent 在后台开的视频页会一路响，人找不到那个喇叭去关它�
 重载风暴。人把窗口点开时（`ui.window visible:true`）反过来补一次自检（700ms 后），
 兜住"agent 在后台把页面搞白了、人一打开正好看到"。
 
+### 4. 隐藏窗口里，收不到输入的那一页会**吞掉事件**
+
+第四条和"表面"无关，是同一节里最隐蔽的一条：**Chromium 会丢弃发往
+`document.visibilityState = 'hidden'` 那份文档的 CDP 模拟输入**。窗口从未显示过时，一份文档
+自报 visible 的唯一条件是它拿到过 `Emulation.setFocusEmulationEnabled`，而产品平时只给活动页 ——
+于是"agent 在后台开的第二、第三页点不动"不是我们的实现坏了，是内核按规格办事。最坏的是旧形态
+下事件没了还回 `success:true`。
+
+那轮逐杠杆实测（结论记在 `shared/input_routing.cjs` 顶部）：置顶、
+`webContents.focus()`、摘了重挂、`setBounds`、`setBackgroundThrottling(false)`、`invalidate`、
+`Page.setWebLifecycleState{active}` 一律无效；`Emulation.setPageVisibilityOverride` 在
+Chromium 130 里不存在；`window.showInactive()` 有效但窗口真的出来。能用的只有产品本来就在用的
+那一招，所以修法是**把它给到要操作的那一页**，而不是发明新机制 —— 判据、补救与如实失败的完整
+说明在上面的"受信输入的路由"。
+
+顺带被证伪的还有"活动页一定 visible"：`AI_BROWSER_FOCUS=never` 下它自己也是 hidden。这一条
+是那条 env 的**已知边界** —— 那种组合里窗口隐藏时模拟输入做不到，`ui.act` 一律如实失败，
+而不是假装成功。
+
 ### 已知边界（写下来，免得被当 bug 修）
 
 - **同一个标签页上的并发动作不协调**：两个 agent 同时往同一个输入框里打字，值校验会
@@ -731,7 +791,7 @@ agent 在后台开的视频页会一路响，人找不到那个喇叭去关它�
 - 窗口隐藏时 `capturePage()` 仍会返回空（遮挡），截图走的是 CDP
   `captureScreenshot({fromSurface:true})` 那条路 —— 见「取帧两条铁律」。
 
-回归：`npm run multiagent`（69 断言）、`npm run background`（37 断言），两个都在 `e2e:all` 里。
+回归：`npm run multiagent`（80 断言）、`npm run background`（37 断言），两个都在 `e2e:all` 里。
 
 ## 下载：显示还是存下来（"点证书下载卡在正在打开…"）
 
@@ -906,7 +966,7 @@ sheet**，因此它既不在语义树里，也不受页面点击控制；**而�
 | `AI_BROWSER_ERROR_DIALOG` | 关 | `1` 强制改用原生模态框（阻塞主进程 8 秒，只用于人工盯着看启动崩溃） |
 | `AI_BROWSER_SELFTEST` | 关 | `crash` 在就绪后注入一次未捕获异常，用于自检错误链路 |
 | `AI_BROWSER_UA` | 按真实平台生成 | 覆盖 UA 字符串。UA-CH 的 `platform` 会**跟着 UA 里写的平台**走，不留矛盾；UA 里认不出的平台仍用真实平台 |
-| `AI_BROWSER_FOCUS` | `auto` | `auto`=只伪造页面内焦点态，不抢真实窗口焦点；`always`=旧行为；`never`=都不做。**不决定窗口是否显示** |
+| `AI_BROWSER_FOCUS` | `auto` | `auto`=只伪造页面内焦点态，不抢真实窗口焦点；`always`=旧行为；`never`=窗口与页面焦点都不碰。**不决定窗口是否显示**。⚠️ `never` 的代价实测过（2026-11-03）：隐藏窗口里每一页都自报 hidden，`ui.act` 的受信输入会被 Chromium 整条丢弃 —— 那种组合下动作只能如实失败（见 `AI_BROWSER_INPUT_FOCUS` 那行的判据） |
 | `AI_BROWSER_WATCHDOG` | 开 | `0`/`off`/`false`/`no` 关闭网络看门狗 |
 | `AI_BROWSER_WATCHDOG_URLS` | `example.com, baidu.com` | 看门狗探测目标（任一可达即算存活） |
 | `AI_BROWSER_NETWORK_CAPTURE` | 开 | `0` 关闭默认抓包 |
@@ -922,6 +982,7 @@ sheet**，因此它既不在语义树里，也不受页面点击控制；**而�
 | `AI_BROWSER_DOWNLOAD_DIR` | `<userData>/downloads` | 下载落盘根目录（每 tab 一个子目录） |
 | `AI_BROWSER_TAB_LIMIT` | 8 | 每个 agent 组的标签页上限（人的组不限）。`ui.new_tab` 超了**拒绝**并给可关清单；页面自己弹窗超了则牺牲一页，没有可牺牲的就允许超限 |
 | `AI_BROWSER_BG_MUTE` | 开 | `0`/`off` 关掉"agent 的后台页不出声"。开着时除"人眼前那一页"和"人的组"一律 `setAudioMuted(true)` —— 按住的是**输出增益**，不是播放，`currentTime` 照旧前进，所以这条规则不会把 agent 眼里的页面变成"卡住" |
+| `AI_BROWSER_INPUT_FOCUS` | 开 | `0`/`off` 只关掉"给收不到输入的那一页补一发焦点伪造"，**不**关掉"别说谎"：量到 hidden 而没补救时照样回 `success:false` + `input_blocked:true`，而不是旧的 `success:true`。留着它的唯一用途是二分定位（怀疑焦点伪造本身把某一站点的前后台逻辑带偏时）。判据、实测过的杠杆清单与失败形状见"受信输入的路由"一节 |
 
 **窗口必须显示**（人可随时介入），但 agent 操作不得夺走键盘焦点 —— 这是产品不变量，
 由 `e2e/focus_ws.cjs` 专门验证（含"不应发生"的阳性对照组）。
@@ -930,17 +991,20 @@ sheet**，因此它既不在语义树里，也不受页面点击控制；**而�
 
 > 数字**每次发版后按实测更新**（`npm test` / `npm run e2e:all` 的最终摘要）。
 > 2026-11-01 v2.5.1 基线：单测 **100 文件 / 1324 条**、e2e **27 套件 / 831 断言**。
-> 下面的清单是 28 项（v2.5.1 之后进了 `shot`），那两个数字还没重测 —— 发版时按实测覆盖。
+> 下面的清单是 29 项（v2.5.1 之后进了 `shot` 与 `input_routing`），那两个数字还没重测 —— 发版时按实测覆盖。
 
 - 单元：`npm test` —— Vitest，100 文件 / 1324 条，0 skip。
 - 端到端：各 `npm run <suite>` 自起 Electron（隔离 profile）：
   `smoke` / `capabilities` / `richtext` / `network` / `value` / `canvas` / `modeldiff` /
   `audit` / `nav` / `focus` / `interact` / `upload` / `view` / `readcov` / `window_open` /
   `dialog` / `wrapper` / `paint` / `layout` / `shot` / `download` / `multiagent` / `background` /
-  `icon` / `app_model` / `security` / `contract` / `lifecycle`。
+  `input_routing` / `icon` / `app_model` / `security` / `contract` / `lifecycle`。
   **改动不得破坏任何一项。** 一次跑全部：`npm run e2e:all`（27 套件 / 831 断言）。
   - `security`：页面 → 控制面、页面 → 宿主 两条攻击链的回归。它会起**两个**实例
     （第二个带 `AI_BROWSER_WS_ALLOW_ORIGIN=1` 做阳性对照），断言"拦住"而不是"服务没起来"。
+  - `input_routing`：收不到输入时**不许说成功**。同样起**两个**实例，因为要测的两种配置
+    （`AI_BROWSER_INPUT_FOCUS=0` / `AI_BROWSER_FOCUS=never`）都是 spawn 时定的 env。
+    端口走自己的 `AI_BROWSER_INPUT_ROUTING_PORT`，不占 `AI_BROWSER_PORT` 那个连续段。
   - `contract`：声明 = 实现（`subset` / `focused_only` / `mode` / `wait` condition / `id:null`）。
   另外两个**不进全量**：`npm run flicker`（要屏幕录制权限 + 窗口真的在屏幕上）、
   `npm run realsites`（依赖外网）。

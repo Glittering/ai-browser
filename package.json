@@ -94,6 +94,7 @@
     "flicker": "node e2e/flicker_ws.cjs",
     "download": "node e2e/download_ws.cjs",
     "multiagent": "node e2e/multiagent_ws.cjs",
+    "input_routing": "node e2e/input_routing_ws.cjs",
     "background": "node e2e/background_ws.cjs",
     "icon:check": "node scripts/check_icon.cjs",
     "icons": "env -u ELECTRON_RUN_AS_NODE node_modules/electron/dist/Electron.app/Contents/MacOS/Electron --no-sandbox --disable-gpu scripts/render_icon.cjs",

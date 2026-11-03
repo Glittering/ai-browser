@@ -375,12 +375,20 @@ Three things used to make "run it in the background" impossible, and all three a
 ```bash
 AI_BROWSER_START_HIDDEN=1 npm start   # run with no window at all; click the Dock icon to bring it up
 AI_BROWSER_FOCUS=always npm start     # pre-1.2 behaviour: show + moveTop + focus on every action
-AI_BROWSER_FOCUS=never npm start      # same as the default now: never touch window state
+AI_BROWSER_FOCUS=never npm start      # never touch window state *or* page focus — see the caveat below
+AI_BROWSER_INPUT_FOCUS=0 npm start    # don't emulate page focus for a tab that can't receive input
 ```
 
 While it is hidden, everything still works — read the tree, click, type, scroll, upload, download,
 answer dialogs, capture network, screenshot, `paint_check`. Click the Dock icon at any moment and the
 window appears showing the tab *you* were looking at; the agents keep working on theirs.
+
+⚠️ "click and type work while hidden" is a promise the browser now *makes* true, not a property of
+Chromium: simulated input is dropped on any document reporting `visibilityState: hidden`, so each
+trusted-input action first checks that tab and, if needed, gives it the page-focus emulation the front
+tab already has (see *Tab groups* above). `AI_BROWSER_FOCUS=never` switches that emulation off
+altogether, and then a hidden window genuinely cannot receive simulated input — `ui.act` fails with
+`input_blocked: true` instead of reporting success. That is the honest outcome, not a regression.
 
 `npm run focus` asserts the focus behaviour **from the outside** (macOS `lsappinfo`, no accessibility
 permission needed) with a deliberate control group configured to steal focus, so the suite goes red if
@@ -468,7 +476,29 @@ tabs are never muted (Chrome leaves those playing too). Muted tabs carry `muted:
 `browse_tabs {"op":"list"}`. Muting is **output gain, not pause**: `currentTime` keeps advancing, so
 the page the agent reads is not secretly a stalled one. Turn the rule off with `AI_BROWSER_BG_MUTE=0`.
 
-`npm run multiagent` (69 checks) covers it, M7–M10: auto workspace, the cap and its refusal payload,
+**Trusted input reaches the tab you aimed at, not just the visible one.** Chromium *drops* simulated
+input on any document that reports `visibilityState: hidden` — and in a window that was never shown,
+the only page that reports `visible` is the one that got CDP page-focus emulation, which the browser
+normally hands to the front tab alone. The old shape was the worst possible one: the event vanished,
+nothing was clicked, and `ui.act` still answered `{success:true, clicked_via:'cdp-click'}`. So before
+every trusted-input action (`click`/`hover`/`drag`/`wheel`/`type`/`setContent`/`clear`/`press`/`paste`)
+the browser asks that tab "are you visible?", and if it isn't, hands it the same focus emulation it
+already gives the front tab — no z-order change, no window shown, `activeTab` and mute state untouched,
+and nothing is restored afterwards (the emulation is sticky; toggling it would put every page through
+visible→hidden→visible on every action). If a tab still can't receive input, the action is **not
+dispatched** and the receipt says so: `success:false` + `input_blocked:true` + the page's visibility,
+with the escape hatches named (JS path via `ui.evaluate`, or show the window once). Measured 2026-11-03:
+raising the tab (`setTopBrowserView`), `webContents.focus()`, detach+reattach, `setBounds`,
+`setBackgroundThrottling(false)` and `Page.setWebLifecycleState{active}` do **not** deliver input;
+`Emulation.setPageVisibilityOverride` does not exist in Chromium 130. "The active tab is always visible"
+turned out to be false too — under `AI_BROWSER_FOCUS=never` even it reports hidden and input is dropped,
+which is why every trusted-input action pays one short (800ms-capped) probe. `AI_BROWSER_INPUT_FOCUS=0`
+turns off the *emulation* only; honesty about the failure is not switchable.
+
+`npm run multiagent` (80 checks) covers the positive half — M11 clicks and types into a background tab
+in a never-shown window while the control tab and `activeTab` stay put. `npm run input_routing`
+(15 checks, two instances) covers the honest-failure half under `AI_BROWSER_INPUT_FOCUS=0` and
+`AI_BROWSER_FOCUS=never`. Both also pin the rest of it: auto workspace, the cap and its refusal payload,
 that one full group does not affect anybody else's, who gets evicted when a popup needs the space, and
 that a muted tab is still playing.
 
@@ -894,7 +924,7 @@ not bugs. The full write-up, including why the first measurement of this was wro
 ## Test & dev
 
 ```bash
-npm test             # vitest — 1024 tests across 73 files
+npm test             # vitest — 1462 tests across 104 files
 npm run smoke        # Electron contract layer, offline fixture      — 31 checks
 npm run capabilities # text fields, canvas, page source, network, DOM editing — 54 checks
 npm run richtext     # rich-text editors, nested menus, forms, errors, tags, upload — 117 checks
@@ -912,10 +942,11 @@ npm run wrapper      # "in the tree but won't click" = matched a container, not 
 npm run paint        # blank-page self-check: verdicts, bounded ladder, no false alarms — 23 checks
 npm run layout       # geometry invariants + "no twitching" (zero extra repaints on nav) — 25 checks
 npm run download     # "clicked download": viewable media must display, the rest must save — 23 checks
-npm run multiagent   # several agents at once: own tab each, no cross-talk, eviction + mute rules — 69 checks
+npm run multiagent   # several agents at once: own tab each, no cross-talk, eviction + mute + input reaches background tabs — 80 checks
+npm run input_routing # input that cannot be delivered fails honestly (2 instances: INPUT_FOCUS=0 / FOCUS=never) — 15 checks
 npm run background   # window hidden/minimized: every capability still works (headless-like) — 37 checks
 npm run flicker      # frame-level: no frame may render the page shrunk (needs screen recording) — 6 checks
-npm run e2e:all      # 一次跑完上面全部 22 个套件（每个独立端口）+ 可信汇总 — 743 checks
+npm run e2e:all      # 一次跑完 run_all 里全部 29 个套件（每个独立端口）+ 可信汇总
 npm run verify:app   # boot the packaged /Applications app and assert on it — 22 checks
 npm run realsites    # navigate/read/act against a matrix of real sites
 ```

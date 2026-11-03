@@ -74,6 +74,9 @@ import screenshotOpts from '../shared/screenshot_opts.cjs';
 import popupGeometry from '../shared/popup_geometry.cjs';
 // 谁的声音能出喇叭（纯函数）：音频没有 z 序，agent 在后台开的页会一路响到人看不见它。
 import tabAudio from '../shared/tab_audio.cjs';
+// 这一页收不收得到 CDP 受信输入（纯函数）：hidden 文档会被 Chromium 直接丢弃模拟输入，
+// 而回执过去照样写 success:true。判据见文件顶部那段实测。
+import inputRouting from '../shared/input_routing.cjs';
 // 跨进程子帧（OOPIF）判定与自动路由回执（纯函数）：默认读法检测到不可读
 // 子帧时自己补一次 AX 读取，调用方无需知道 ax:true 的存在。
 import frameProbe from '../shared/frame_probe.cjs';
@@ -2312,6 +2315,105 @@ class PageManager {
     }
   }
 
+  /**
+   * 问页面一句"你现在是不是 visible"。
+   *
+   * 为什么让页面自己报而不是主进程推断：能收信输入的条件就是 document 的可见性，
+   * 而"窗口可见与否""显示过一次没有"只是与它相关的旁证 —— 相关不等于一致，
+   * 猜错的代价是事件又被吞掉一次。哪天平台改了规则，这里跟着事实走。
+   *
+   * 和 _pageProbe 同一条降级规矩：量不到就返回 null，调用方按"没这个问题"处理。
+   * 观测能力不足不能反过来让一个本来能成的动作失败。
+   * 上限 800ms（比指纹的 1.5s 更短）：这一发要给**每一个**受信输入动作付一次，
+   * 主线程被占住时它必须很快让路，否则 ui.act 的固有延迟会被我们的探针抬高一截。
+   */
+  async _visibilityState(tid) {
+    const view = this._getView(tid);
+    if (!view) return null;
+    try {
+      const d = view.webContents.debugger;
+      if (!d || typeof d.isAttached !== 'function' || !d.isAttached()) return null;
+      const call = d.sendCommand('Runtime.evaluate', {
+        expression: '(function(){try{return String(document.visibilityState);}catch(e){return null;}})()',
+        returnByValue: true,
+      });
+      const timer = new Promise((r) => setTimeout(() => r(null), 800));
+      const r = await Promise.race([call.catch(() => null), timer]);
+      const v = r && r.result && r.result.value;
+      return typeof v === 'string' && v ? v : null;
+    } catch (_e) {
+      return null;
+    }
+  }
+
+  /**
+   * 让某一页**自认为在前台**：只补那发 CDP 焦点伪造，不动 z 序、不动窗口、不动 activeTab。
+   *
+   * 复用 _focusWebContents —— 它就是 AI_BROWSER_FOCUS=auto 的本体（"只伪造页面内焦点态，
+   * 不抢真实窗口焦点"），产品每个活动页都在用它。这里不是新招，是把同一招给到那一页，
+   * 让投得进模拟输入。实测（tools 探针，逐杠杆）：
+   *   置顶 setTopBrowserView → document 照旧 hidden、事件照旧没
+   *   webContents.focus() / remove+addBrowserView / setBounds / setBackgroundThrottling
+   *     / invalidate / Page.setWebLifecycleState{active} → 全部无效
+   *   Emulation.setFocusEmulationEnabled{enabled:true} → 一次就翻转，点击与键入都落到位
+   *
+   * **不做恢复**：这一招是粘的（关掉会让页面在每次动作里经历 visible→hidden→visible 的
+   * 抖动，而站点正拿它决定"要不要暂停视频 / 要不要发曝光"），并且活动页本来就是这状态。
+   * 拿不到视图 → false，调用方按"没修好"处理（然后如实失败）。
+   */
+  _emulatePageFocus(tid) {
+    const view = this._getView(tid);
+    if (!view || !isAlive(view)) return false;
+    this._focusWebContents(view);
+    return true;
+  }
+
+  /** 焦点策略（如实失败时要把原因说给调用方）。 */
+  _focusPolicy() {
+    return String(process.env.AI_BROWSER_FOCUS || 'auto').toLowerCase();
+  }
+
+  /**
+   * 受信输入之前的那道闸：问一句 → 收不到就补一招 → 再问一句 → 还不行就给出失败回执。
+   *
+   * 存在的理由（2026-11-03 逐杠杆实测，全部记录在 shared/input_routing.cjs 顶部）：
+   * 窗口从未显示过时，页面自报 visible 的唯一条件是它拿到过 CDP 焦点伪造；没拿到的页
+   * 一律 hidden，而 Chromium 对 hidden 文档**丢弃**模拟输入 —— 发出去不报错、不排队、
+   * 也不改投给别人（另一页的计数器一次都没涨，所以不是串台）。旧形态最坏的地方不是丢，
+   * 是丢完还回 `{success:true, clicked_via:'cdp-click'}`。
+   *
+   * 补的那一招不是新机制：`_focusWebContents` 就是 AI_BROWSER_FOCUS=auto 的本体，
+   * 产品对每个活动页每天都在用。这里把它给到"要操作但收不到输入"的那一页 ——
+   * **不动 z 序、不动窗口、不动 activeTab、不动静音与会话归属**。
+   *
+   * 活动页也问（曾以为它一定 visible：AI_BROWSER_FOCUS=never 下它就是 hidden，
+   * 而且照样谎报成功）。观测失败（量不到）一律放行：探针能力不足不能反过来让一个
+   * 本来能成的动作失败。
+   *
+   * @returns {Promise<object|null>} null = 放行；否则就是应当直接回给调用方的失败回执
+   */
+  async _inputGate(action, target, tid) {
+    if (!inputRouting.trustedInputAction(action)) return null;
+    let vis = await this._visibilityState(tid);
+    if (inputRouting.needsVisibilityFix({ action, visibility: vis })) {
+      this._emulatePageFocus(tid);
+      // 补完再量一次：要的是事实，不是"我做了应该有用的那件事"。
+      vis = await this._visibilityState(tid);
+    }
+    if (!inputRouting.shouldRefuse({ visibility: vis })) return null;
+    return this._annotateActResult({
+      success: false,
+      error: inputRouting.notReceivableError({
+        action, tabId: tid, visibility: vis, focusPolicy: this._focusPolicy(),
+      }),
+      ...(vis ? { visibility: vis } : {}),
+      // 说清楚"什么都没发生"：调用方熟悉的旧回执是 success:true，不点破它就会照着
+      // 旧经验重试，于是一次点击变成两次。
+      input_blocked: true,
+      action,
+    }, action, target, tid);
+  }
+
   async executeAction(action, target, params = {}, tabId) {
     const ms = actionDeadlineMs(action, params);
     const tid = tabId !== undefined ? tabId : this.activeTab;
@@ -2351,6 +2453,10 @@ class PageManager {
       }
     }
     const probeBefore = await this._pageProbe(tid, action);
+    // 这道闸在做的事与为什么必须做，见 _inputGate 的注释（一句话版：hidden 文档会被
+    // Chromium 丢弃模拟输入，而旧回执照样写 success:true）。
+    const gate = await this._inputGate(action, target, tid);
+    if (gate) return gate;
     try {
       const res = await withDeadline(
         this._executeActionInner(action, target, params, tabId),
@@ -2405,6 +2511,7 @@ class PageManager {
           deadline_ms: ms,
           action,
           ...(dlg ? { dialog: dlg, retry: 'verify_first' } : {}),
+        ...(dlg ? { dialog: dlg, retry: 'verify_first' } : {}),
         }, action, target, tid);
       }
       throw e;
@@ -5845,14 +5952,24 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
    *
    * AI_BROWSER_FOCUS:
    *   auto   (默认) **完全不碰窗口状态**：不 show、不 moveTop、不 focus。
-   *                  CDP 受信输入（Input.dispatchKeyEvent / dispatchMouseEvent）在窗口
-   *                  非前台、最小化、甚至隐藏时依然生效（加上已有的
-   *                  disable-backgrounding-occluded-windows / disable-renderer-backgrounding /
-   *                  disable-background-timer-throttling，后台窗口不会被降频或丢事件）。
+   *                  改的是**页面侧**：给这一页一发 CDP 焦点伪造，让 document 的
+   *                  焦点态与可见性自认正常（见 _focusWebContents）。
+   *                  ⚠️ 这里原先写的是"CDP 受信输入在窗口隐藏时依然生效，后台窗口
+   *                  不会被丢事件" —— 那句话 2026-11-03 被逐杠杆实测**证伪**：被丢的
+   *                  正是模拟输入，条件是那一份文档自报 hidden。不 show 窗口这件事
+   *                  依然成立（而且是不变量），但"输入送得进去"靠的是下面那一招，
+   *                  不是窗口状态。判据与补救见 _inputGate / shared/input_routing.cjs。
+   *                  降频那一半仍然是真的：disable-backgrounding-occluded-windows /
+   *                  disable-renderer-backgrounding / disable-background-timer-throttling
+   *                  让后台窗口不降频 —— 定时器与 rAF 照跑，被丢弃的只有模拟输入。
    *                  这是"无头式运行"的前提：窗口隐藏必须是**稳定状态**，而不是
    *                  "下一次操作就弹回来"。
    *   always        旧行为：每次都 show + moveTop + focus（需要抢焦点时用）。
-   *   never         与 auto 相同（保留这个名字是为了兼容老配置）。
+   *   never         窗口照旧完全不碰（这一条与 auto 相同，保留名字是为兼容老配置）。
+   *                 但页面侧那一招**一并关掉**，代价有实测那么实在：隐藏窗口里
+   *                 每一页都自报 hidden，于是 ui.act 的受信输入结构性地送不进去 ——
+   *                 那种组合下 _inputGate 一律如实失败（e2e/input_routing_ws.cjs 的
+   *                 [B] 阶段钉的就是这个），而不是假装成功。
    *
    * ⚠️ 2026-10-28 之前 auto 会"窗口被最小化/隐藏就 restore + showInactive"，
    * 依据是当时的产品不变量"窗口必须真实可见"。多 agent 并用之后这条不变量反过来

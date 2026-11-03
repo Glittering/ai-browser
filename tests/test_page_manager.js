@@ -1009,3 +1009,170 @@ describe('淘汰保护：草稿页与下载中的页不被牺牲', () => {
     expect(pm.tabs.get(next).webContents.isMuted(), '新页按自己的归属重算').toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 受信输入前的可见性闸门（shared/input_routing.cjs 的执行侧）
+//
+// 钉的是 2026-11-03 逐杠杆实测换来的那条事实：窗口从未显示过时，页面自报
+// document.visibilityState:'visible' 的**唯一条件**是它拿到过 CDP 的
+// Emulation.setFocusEmulationEnabled；没拿到的页一律 hidden，而 Chromium 对 hidden
+// 文档**丢弃**模拟输入 —— 发出去不报错、不排队、也不改投给别人，而旧回执照样写
+// success:true。判据本身在纯函数里钉（tests/test_input_routing.js），这里只钉执行：
+// 命令发没发、发了几发、失败回执长什么样、以及有没有顺手把 z 序 / activeTab 改了。
+// ---------------------------------------------------------------------------
+describe('动作之前先确认这一页收得到输入（hidden 文档会吞掉 CDP 输入）', () => {
+  const agentGroup = (sessionId) => pm.ensureGroup(sessionId, null, { capped: true }).id;
+
+  // 背景：先有一页在"人眼前"，再开一页 agent 的后台页 —— 后者的 debugger 换成
+  // 可观测的桩：记下每一发 CDP 命令，并按给定序列回答"你现在 visible 吗"。
+  // 用**序列**而不是布尔，是因为闸门补完那一招会再问一次，测试要能分别描述
+  // "补完就翻成 visible"和"补完还是 hidden"这两种真实结果。
+  function observeCdp(tid, visibilityAnswers) {
+    const wc = pm.tabs.get(tid).webContents;
+    wc.debugger.attached = true;
+    const cmds = [];
+    let n = 0;
+    wc.debugger.sendCommand = async (method, params) => {
+      cmds.push({ method, params });
+      const expr = params && params.expression;
+      // 两条 Runtime.evaluate 靠**长度**分开：可见性探针是一句极短的读，页面指纹
+      // 探针是一大段 JS。刻意不去匹配实现里的具体语句 —— 改措辞会让这个桩静默
+      // 走错分支，而分错的样子（指纹那边拿到字符串）会直接让断言变红。
+      const isVisProbe = method === 'Runtime.evaluate' && typeof expr === 'string' && expr.length < 200;
+      if (isVisProbe) {
+        const v = visibilityAnswers[Math.min(n, visibilityAnswers.length - 1)];
+        n += 1;
+        return v === undefined || v === null ? {} : { result: { value: v } };
+      }
+      // 指纹探针给 __err 形状 → _pageProbe 降级成 null（不然会走 canvas 三采样白等）。
+      return { result: { value: { __err: 'stub' } } };
+    };
+    const methods = () => cmds.map((c) => c.method);
+    const emulate = () => cmds.filter((c) => c.method === 'Emulation.setFocusEmulationEnabled');
+    return { wc, cmds, methods, emulate };
+  }
+
+  const bgTab = (sessionId, url = 'https://a.example/compose') => {
+    pm.newTab('https://human.example/');                  // 人眼前那一页（挡住新页被自动顶上去）
+    return pm.newTab(url, { show: false, group: agentGroup(sessionId) });
+  };
+
+  it('PM-51 量到 hidden → 补一发焦点伪造；补完翻成 visible 就放行', async () => {
+    const tid = bgTab('s8');
+    const cdp = observeCdp(tid, ['hidden', 'visible']);
+    const activeBefore = pm.activeTab;
+    const gate = await pm._inputGate('click', 'e:1', tid);
+    expect(gate, '补完已经收得到 → 放行（这正是"第二个 agent 点不动"的解）').toBe(null);
+    expect(cdp.emulate(), '一次就翻转，是实测出来的').toHaveLength(1);
+    expect(cdp.emulate()[0].params.enabled).toBe(true);
+    expect(pm.activeTab, '这一招不许动 activeTab').toBe(activeBefore);
+  });
+
+  it('PM-52 补完还是 hidden → 只补一次，然后如实失败、输入事件一发都不投', async () => {
+    const tid = bgTab('s9');
+    const cdp = observeCdp(tid, ['hidden']);
+    const res = await pm.executeAction('click', 'e:1', {}, tid);
+    expect(res.success).toBe(false);
+    expect(res.input_blocked, '调用方熟悉的旧回执是 success:true，必须有个字段点破"什么都没发生"').toBe(true);
+    expect(res.visibility).toBe('hidden');
+    expect(res.error).toContain('was NOT delivered');
+    expect(res.error).toContain('Nothing was clicked or typed');
+    expect(cdp.methods().filter((m) => m.startsWith('Input.')), '被丢弃的事件不算失败，伪装成功才算失败').toEqual([]);
+    expect(cdp.emulate(), '补一次是修，补两次是抖').toHaveLength(1);
+  });
+
+  it('PM-53 本来就 visible → 一发伪造都不发（常规路径不多做事）', async () => {
+    const tid = bgTab('s10');
+    const cdp = observeCdp(tid, ['visible']);
+    expect(await pm._inputGate('type', 'e:1', tid)).toBe(null);
+    expect(cdp.emulate()).toHaveLength(0);
+    expect(cdp.methods().filter((m) => m === 'Runtime.evaluate'), '问一次就够').toHaveLength(1);
+  });
+
+  it('PM-54 只读与控制类动作连可见性都不问（upload 走 JS 路径，hidden 照样收）', async () => {
+    const tid = bgTab('s11');
+    const cdp = observeCdp(tid, ['hidden']);
+    for (const a of ['get_value', 'reload', 'repaint', 'upload', 'scroll']) {
+      expect(await pm._inputGate(a, 'e:1', tid), a + ' 不该被闸').toBe(null);
+    }
+    expect(cdp.cmds, '一次都不该有').toEqual([]);
+  });
+
+  it('PM-55 量不到（没有 CDP 会话）→ 放行，而且一次命令都不试', async () => {
+    const tid = bgTab('s12');
+    const wc = pm.tabs.get(tid).webContents;
+    const tried = [];
+    wc.debugger.sendCommand = async (m) => { tried.push(m); return {}; };
+    wc.debugger.attached = false;          // 没有 debugger 会话的那条老路的形状
+    expect(await pm._visibilityState(tid)).toBe(null);
+    expect(await pm._inputGate('click', 'e:1', tid), '观测能力不足不许反过来让动作失败').toBe(null);
+    expect(tried, '没 attach 就一次都不发（发出去只会拿到一个 reject）').toEqual([]);
+    expect(wc.debugger.attached, '也不许由闸门去补 attach —— 那是别人的生命周期').toBe(false);
+  });
+
+  it('PM-56 AI_BROWSER_INPUT_FOCUS=0 关掉的是"那一招"，不是"别说谎"', async () => {
+    process.env.AI_BROWSER_INPUT_FOCUS = '0';
+    try {
+      const tid = bgTab('s13');
+      const cdp = observeCdp(tid, ['hidden']);
+      const gate = await pm._inputGate('click', 'e:1', tid);
+      expect(cdp.emulate(), '开关关掉就不补').toHaveLength(0);
+      expect(gate && gate.success, '但退路退到如实报错，不是退到假装成功').toBe(false);
+      expect(gate.input_blocked).toBe(true);
+      expect(gate.error).toContain('AI_BROWSER_INPUT_FOCUS=0');
+    } finally {
+      delete process.env.AI_BROWSER_INPUT_FOCUS;
+    }
+  });
+
+  it('PM-57 AI_BROWSER_FOCUS=never 下这一招根本做不到：一发的伪造都不许有，文案点名原因', async () => {
+    // 这一格是同一次实测里顺手证伪的：never 时**连活动页都是 hidden**，模拟输入
+    // 一样被丢，而旧回执照样写 success:true。那种组合结构性地做不到，只能说。
+    process.env.AI_BROWSER_FOCUS = 'never';
+    try {
+      const tid = bgTab('s14');
+      const cdp = observeCdp(tid, ['hidden']);
+      const gate = await pm._inputGate('click', 'e:1', tid);
+      expect(cdp.emulate(), '策略不许伪造，伪造一发都不许发').toHaveLength(0);
+      expect(gate.success).toBe(false);
+      expect(gate.error).toContain('AI_BROWSER_FOCUS=never');
+    } finally {
+      delete process.env.AI_BROWSER_FOCUS;
+    }
+  });
+
+  it('PM-58 闸门只动那一页的焦点态：z 序、窗口、别人的页一概不碰', async () => {
+    const human = 1;
+    const tid = bgTab('s15');
+    const cdp = observeCdp(tid, ['hidden', 'visible']);
+    const other = observeCdp(human, ['visible']);
+    const win = pm.window;
+    const hits = [];
+    win.setTopBrowserView = () => hits.push('setTopBrowserView');
+    win.addBrowserView = () => hits.push('addBrowserView');
+    win.getBrowserViews = () => [pm.tabs.get(human), pm.tabs.get(tid)];
+    win.show = () => hits.push('show');
+    win.focus = () => hits.push('focus');
+    const origSetBounds = win.setBounds || (() => {});
+    win.setBounds = () => { hits.push('setBounds'); origSetBounds(); };
+
+    expect(await pm._inputGate('click', 'e:1', tid)).toBe(null);
+    expect(hits, '置顶 / 重挂 / 显示窗口 / 抢焦点 / 重排 全部实测无效，闸门一律不许做').toEqual([]);
+    expect(other.emulate(), '只补要操作的那一页，不把八页各伪造一遍').toHaveLength(0);
+    expect(pm.activeTab).toBe(human);
+    expect(pm.tabs.get(tid).webContents.isMuted(), '也不许顺手改静音归属').toBe(true);
+  });
+
+  it('PM-59 可见性探针的三种降级形状一律返回 null，绝不抛', async () => {
+    const tid = bgTab('s16');
+    expect(await pm._visibilityState(9866), '拿不到视图').toBe(null);
+    const wc = pm.tabs.get(tid).webContents;
+    wc.debugger.attached = true;
+    wc.debugger.sendCommand = async () => { throw new Error('CDP 会话断了'); };
+    expect(await pm._visibilityState(tid), '命令 reject').toBe(null);
+    wc.debugger.sendCommand = async () => ({ result: { value: { nested: 'not a string' } } });
+    expect(await pm._visibilityState(tid), '回来的不是字符串（页面被改写过 / 拿到了别的东西）').toBe(null);
+    wc.debugger.sendCommand = async () => { throw new Error('不该被等到'); };
+    expect(await pm._inputGate('click', 'e:1', tid), '探针坏了也要放行').toBe(null);
+  });
+});

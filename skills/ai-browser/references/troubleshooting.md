@@ -18,6 +18,18 @@
 - **别在登录态失效时继续点。** 先 `browse_auth_state`，`auth_wall.detected=true` 就停下来找用户。
 - **别在用户正操作窗口时 `browse_quit`。** 它会关掉整个窗口和进程。
 
+## 回执说"没送达"（`input_blocked`）
+
+`browse_act` 回 `success:false` + `input_blocked:true` 时，**事件一发都没投**，那一页什么都没发生。
+这不是"点了没反应"（那种是页面自己的事，`page_changed:false` 才轮得到它），而是浏览器知道这一页
+收不到模拟输入 —— Chromium 会丢弃发往 `visibilityState:hidden` 文档的键鼠事件，而补救之后仍然收不到
+（通常是你设了 `AI_BROWSER_INPUT_FOCUS=0` 或 `AI_BROWSER_FOCUS=never`）。
+
+**照着 success 的经验再点一次，就会把一次点击变成两次。** 三条出路按代价排：
+① 改走 JS 路径（`browse_evaluate` 直接改值 / 派发合成事件 —— 富文本框架可能不认）；
+② `browse_tabs {"op":"window","visible":true}` 把窗口显示出来**一次**，此后每一页都一路收得到；
+③ 去掉那两个 env，让浏览器自己补给那一页一发焦点伪造（默认就是这条，不动 z 序也不抢你的鼠标）。
+
 ## 读树的省 token 参数
 
 | 参数 | 作用 |
