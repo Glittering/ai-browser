@@ -38,6 +38,8 @@ const PER_TAB = [
   { field: '_windowOpenShimTabs' },
   { field: '_windowOpenShimReady' },
   { field: '_popupRects' },          // 这一页是浮层时它请求的矩形；漏清 = 新 tab 继承弹窗尺寸
+  { field: '_mutedTabs' },           // Set：被我们按住声音的页；漏清 = 新 tab 生下来就"没声音"，而没人按住过它
+  { field: '_tabHasDraft' },         // 这一页有没提交的输入（淘汰保护）；漏清 = 新 tab 永远挤不掉
   // ---- 导航状态机 ----
   { field: '_tabNavState' },
   { field: '_pendingNavUrl' },       // 键 = tab，值 = 正在打开（还没 commit）的地址

@@ -73,17 +73,41 @@ function decideOpen({ group, count, limit }) {
   };
 }
 
+/** 哪些动作等于"在这一页留下了还没提交的内容"（草稿保护的置位/清除条件）。
+ *  mark：把文字送进页面。clear：把文字清掉 —— 没有内容可丢了，保护跟着解除。
+ *  点击/键盘/滚动都不算：它们改的是页面状态，不是"别人写了一半的东西"。 */
+const DRAFT_MARK = ['type', 'setContent', 'paste'];
+const DRAFT_CLEAR = ['clear'];
+
+/** @returns {'mark'|'clear'|null} 这个动作对草稿状态的影响。 */
+function draftEffect(action) {
+  const a = String(action || '');
+  if (DRAFT_MARK.indexOf(a) >= 0) return 'mark';
+  if (DRAFT_CLEAR.indexOf(a) >= 0) return 'clear';
+  return null;
+}
+
 /**
  * 弹窗（页面里 window.open / target=_blank）把组撑满时，牺牲哪一页。
  *
  * 为什么弹窗不能像 ui.new_tab 一样直接拒绝：这个弹窗是**页面脚本要的**，拒绝
  * 等于让站点的流程断在半路（OAuth 回调、打印预览、编辑器子窗口）。所以这里退一步，
- * 挑一页最不心疼的关掉。三条排除：
+ * 挑一页最不心疼的关掉。排除的条件按 Chrome Memory Saver 那张"不许丢弃"清单裁到
+ * 我们模型里真实存在的几条（我们的淘汰比 Chrome 的 discard 更狠 —— 整页关掉、
+ * 状态全没，所以保护必须更紧，不是更松）：
  *   - 正在被打开的那个（except，关了自己等于什么都没发生）
  *   - 人眼前那一页（activeTab，人正在看）
  *   - 有对话框挂着的（那是"等人点"的状态，关掉就把人的操作吞了）
+ *   - **有没提交的输入的**（draft：填了一半的表单、写了一半的私信。关掉等于把
+ *     人或者 agent 几分钟的工作删了，而且 reload 回不去那个草稿）
+ *   - **有进行中的下载的**（downloading：关掉标签页会连带取消那条下载）
+ * "正在放声音"这一条不在这里判，因为架构已经把它消化掉了：agent 的后台页从出生起
+ * 就被按住声音（shared/tab_audio.cjs），能出声的只有人眼前那一页（= activeTab，
+ * 上面已经排除）和人自己开的页（不归这个组管）。
  * 剩下的按"最久没用"排序（usedAt 由 page_manager 在导航/动作时刷新）。
  * 没有候选就返回 null，调用方只好允许超限 —— 宁可多一页，不要吞掉正在用的页。
+ * 这一条比 Chrome 更松（Chrome 会撑破上限），是有意的：超限只多占一份内存，
+ * 选错牺牲品丢的是别人正在做的事。
  */
 function pickEvictable({ tabs, except, activeTab }) {
   const list = Array.isArray(tabs) ? tabs : [];
@@ -91,7 +115,7 @@ function pickEvictable({ tabs, except, activeTab }) {
   for (const t of list) {
     if (!t || t.id === undefined || t.id === null) continue;
     if (t.id === except || t.id === activeTab) continue;
-    if (t.dialog) continue;
+    if (t.dialog || t.draft || t.downloading) continue;
     const at = Number(t.usedAt) || 0;
     if (!best || at < best.usedAt) best = { id: t.id, usedAt: at, url: t.url || '' };
   }
@@ -108,5 +132,6 @@ module.exports = {
   limitFromEnv,
   colorFor,
   decideOpen,
+  draftEffect,
   pickEvictable,
 };

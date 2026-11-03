@@ -631,6 +631,35 @@ MCP 层（`src/main/mcp_server.js` 的 tool handler）必须把这个执行期�
 `ui.list_tabs` 的 `evicted`（回采一次即清空）—— 不说的话 agent 会以为那页自己消失了。
 没有候选就允许超限：宁可多一页，不吞正在用的页。
 
+**牺牲品的两条排除条件**（2026-11-03 补）。上面那句清单里再加两样：**这一页有没提交的
+输入**、**这一页有进行中的下载**。理由不是"Chrome 有"，是我们淘汰的方式比它狠 —— Chrome
+的 discard 之后表单还在、回来能填，我们一关是全没。判据在 `tab_group.pickEvictable`
+（`t.dialog || t.draft || t.downloading` 三条都不进候选）。
+草稿的账只记在主进程，不需要探 DOM：人能打字的只有置顶那一页（它本来就不进候选），而
+agent 的打字全部经过 `executeAction` —— 所以账是全的。`type`/`setContent`/`paste` 记上，
+`clear` 和**主框架** `did-navigate` 清掉；页内导航（pushState / hash）**不清**，SPA 发评论、
+发私信走的正是后者，跟着清等于这条保护从来没生效过。下载只认 `progressing`，`interrupted`
+不算保护 —— 否则一次失败的下载把那页永久钉住。
+拒绝清单同样带上这两样（`data.tabs[].draft` / `.downloading`）：agent 自己挑页关掉时，
+这是它唯一能用的信息。
+
+**声音**。所有标签页挂在同一个窗口上，"谁在人眼前"是 z 序决定的，而**音频没有 z 序**：
+agent 在后台开的视频页会一路响，人找不到那个喇叭去关它。所以除两种情况之外一律按住
+（`webContents.setAudioMuted(true)`）：
+
+```
+① 人眼前那一页（activeTab）   ② 人的组（人开几页是他的事，Chrome 也只按住别人的后台）
+其余 = agent 的后台页 → 从出生就按住；上限、组、会话都无关
+```
+
+判据在 `shared/tab_audio.cjs`（纯函数，`tests/test_tab_audio.js` 钉住），`AI_BROWSER_BG_MUTE=0`
+整体关掉，`ui.list_tabs` 里被按住的页多带 `muted: true`（不带 = 没按住）。
+
+按住的是**输出，不是播放**：Chromium 只改增益，`currentTime` 照旧前进。写成 pause 就把
+"听不见"变成了"这一页没在播"，而后者是站点故障 —— agent 会照着它去判断页面坏了。这一条
+由 M10 钉住：agent 的音频页出生即 muted → 顶到人眼前点开播放 → 回后台 → 断言仍然 muted
+且 `currentTime` 仍在走（顺带钉住"静音 ≠ 暂停"和"手势真的进了那一页"）。
+
 **看 ≠ 拥有**。人点开 agent 的页只是"看"（`activeTab` 变了，会话目标不变）；用户的标签页
 也不因为有 agent 在跑而变得只读。要让用户接管（登录/扫码/支付），agent 用
 `ui.set_active_tab {show:true}` 把页面顶到人眼前。
@@ -642,7 +671,8 @@ MCP 层（`src/main/mcp_server.js` 的 tool handler）必须把这个执行期�
 往下弹会被裁掉，要能弹就得每次悬停把标签栏长高、把页面下推，那正是本文件另一头
 "渲染三宗罪"的来源。
 
-回归：`npm run multiagent`（46 断言，M7–M9 覆盖自动工作区 / 上限 / 组间隔离）。
+回归：`npm run multiagent`（69 断言，M7–M10 覆盖自动工作区 / 上限 / 组间隔离 / 弹窗挤位时
+牺牲谁 / 声音只跟人眼前那一页）。
 
 ---
 
@@ -701,7 +731,7 @@ MCP 层（`src/main/mcp_server.js` 的 tool handler）必须把这个执行期�
 - 窗口隐藏时 `capturePage()` 仍会返回空（遮挡），截图走的是 CDP
   `captureScreenshot({fromSurface:true})` 那条路 —— 见「取帧两条铁律」。
 
-回归：`npm run multiagent`（32 断言）、`npm run background`（37 断言），两个都在 `e2e:all` 里。
+回归：`npm run multiagent`（69 断言）、`npm run background`（37 断言），两个都在 `e2e:all` 里。
 
 ## 下载：显示还是存下来（"点证书下载卡在正在打开…"）
 
@@ -890,6 +920,8 @@ sheet**，因此它既不在语义树里，也不受页面点击控制；**而�
 | `AI_BROWSER_MEDIA_INLINE` | 开 | `0` 关闭"图片/音视频/PDF 即使带 `Content-Disposition: attachment` 也按内容类型显示"，回到"一律当下载"。用于二分"某站点的显示问题是不是这条钩子造成的" |
 | `AI_BROWSER_START_HIDDEN` | 关 | `1` = 后台模式：进程起来但**不出窗口**（无人值守）。Dock 图标点击或 `ui.window{visible:true}` 随时把窗口叫回来；所有页面能力不受影响 |
 | `AI_BROWSER_DOWNLOAD_DIR` | `<userData>/downloads` | 下载落盘根目录（每 tab 一个子目录） |
+| `AI_BROWSER_TAB_LIMIT` | 8 | 每个 agent 组的标签页上限（人的组不限）。`ui.new_tab` 超了**拒绝**并给可关清单；页面自己弹窗超了则牺牲一页，没有可牺牲的就允许超限 |
+| `AI_BROWSER_BG_MUTE` | 开 | `0`/`off` 关掉"agent 的后台页不出声"。开着时除"人眼前那一页"和"人的组"一律 `setAudioMuted(true)` —— 按住的是**输出增益**，不是播放，`currentTime` 照旧前进，所以这条规则不会把 agent 眼里的页面变成"卡住" |
 
 **窗口必须显示**（人可随时介入），但 agent 操作不得夺走键盘焦点 —— 这是产品不变量，
 由 `e2e/focus_ws.cjs` 专门验证（含"不应发生"的阳性对照组）。

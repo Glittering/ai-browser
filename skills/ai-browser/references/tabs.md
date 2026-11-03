@@ -28,7 +28,7 @@
 
 ```
 -32001 your tab group is full (8/8) — close one before opening another
-data.tabs = [{tab, url}, ...]
+data.tabs = [{tab, url, draft?, downloading?}, ...]
 ```
 
 （MCP / 工具层收到的这次失败，会以工具结果 `isError: true` + `Error: your tab group is full (8/8) — close one before opening another`
@@ -37,9 +37,24 @@ data.tabs = [{tab, url}, ...]
 先把不用的关掉（`browse_tabs {"op":"close","tab":N}`）再开。上限存在的意义不是
 刁难：后台运行时没人看得见你的标签页，不设限就会一路开到内存告急。
 
+`draft: true` = 那一页有你还没提交的输入（打过字、之后没有整页导航）；
+`downloading: true` = 那一页正在下载。**优先关两者都没有的那一页** —— 这里淘汰的
+方式是整页关闭，表单和进度一起没，不是 Chrome 那种"回头还能填"。
+
 页面自己弹的窗口（`window.open` / `target=_blank`）不能拒绝 —— 站点的脚本在等它。
-那种情况下会顶掉本组里**最久没用、不在人眼前、也没有挂着对话框**的那一页，
-并在下一次 `browse_tabs {"op":"list"}` 的 `evicted` 里告诉你。
+那种情况下会顶掉本组里**最久没用、不在人眼前、没有挂着对话框、也没有上面那两样东西**
+的那一页，并在下一次 `browse_tabs {"op":"list"}` 的 `evicted` 里告诉你。
+一页都不该牺牲时，这组会**临时超限一页**而不是拒绝你。
+
+## 你那几页的声音是关着的
+
+窗口里"谁在人眼前"是层叠顺序决定的，而**声音没有层叠顺序** —— 你在后台开视频，
+它会一路响，用户找不到喇叭去关。所以你的非当前页从打开那刻起就被**按住声音**
+（`list` 里带 `muted: true` 的就是），人眼前那一页和用户自己的页不受这条规则影响。
+
+按住的是输出，不是播放：那页的时间还在走（`ui.evaluate` 读 `audio.currentTime`
+会前进），所以你看到的页面没有因为这条规则变卡。想让某一页真的出声，先把它
+`switch` 到人眼前。
 
 ## 把页面交给用户
 

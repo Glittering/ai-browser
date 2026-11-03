@@ -132,7 +132,7 @@ agent 建连后自报家门（MCP 和 CLI 都会发 `ui.hello`）。此后它**�
 
 ```
 -32001 your tab group is full (8/8) — close one before opening another
-data: { reason: "group-full", limit: 8, tabs: [{tab, url}, ...] }
+data: { reason: "group-full", limit: 8, tabs: [{tab, url, draft?, downloading?}, ...] }
 ```
 
 过 MCP 这一层，它会以**工具结果** `isError: true` + `Error: your tab group is full (8/8) — close one before opening another`
@@ -140,7 +140,17 @@ data: { reason: "group-full", limit: 8, tabs: [{tab, url}, ...] }
 
 只有一种例外：页面自己弹的窗口（`window.open` / `target=_blank`）没法拒绝（站点脚本在等它），
 这时会关掉本组里"最久没用、不在人眼前、没有挂着对话框"的那一页，并在 `list` 的 `evicted`
-里告诉你。
+里告诉你。候选里还要再排除两种**关掉会丢东西**的页：这一页有没提交的输入（写过 `type` /
+`setContent` / `paste` 之后没有整页导航），以及这一页有进行中的下载。本项目淘汰的方式是
+整页关闭，比 Chrome 的 discard 狠（discard 之后表单还在，我们一关全没），所以保护只能更紧。
+实在没有候选就允许超限 —— 宁可多一页，不吞你正在用的页。上面那两条也会标在拒绝清单里
+（`tabs[].draft` / `tabs[].downloading`），因为轮到你决定关哪个时，那是唯一的依据。
+
+**声音只跟人眼前那一页。**所有标签页挂在同一个窗口上，"谁在人眼前"靠 z 序，而音频没有 z 序
+—— agent 在后台开的视频页会一路响，你找不到那个喇叭去关它。现在除两种情况外一律按住：
+你正在看的那一页，和你自己开的页（Chrome 也照样放它们）。被按住的页在 `list` 里带
+`muted: true`；按住的是**输出不是播放**，`currentTime` 照旧前进，所以 agent 看到的那一页
+没有"变卡"。整体关掉这条：`AI_BROWSER_BG_MUTE=0`。
 
 站点写 `window.open(url, name, 'width=420,height=520,left=120,top=80')` 请求的是一个**浮层**
 （登录框、支付二维码都这么写）。本项目没有独立窗口，这类请求以前把第三参数整份丢掉，于是

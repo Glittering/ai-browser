@@ -154,6 +154,21 @@ export class DownloadMonitor {
     return { ok: true, downloads: m ? Array.from(m.values()) : [], dir: this.baseDir };
   }
 
+  /**
+   * 这一页有没有**还没结束**的下载。
+   *
+   * 存在的理由只有一个：标签页上限挤掉一页时会连带取消它正在进行的下载，
+   * 所以淘汰判据（shared/tab_group.cjs 的 pickEvictable）要能问出这一条。
+   * 'interrupted' 不算保护：它已经停了，关掉这一页不会让情况更坏，而"卡住的下载
+   * 永远占住一页"会让上限失效。
+   */
+  hasActive(tabId) {
+    const m = this._byTab.get(tabId);
+    if (!m) return false;
+    for (const r of m.values()) if (r.state === 'progressing') return true;
+    return false;
+  }
+
   clearTab(tabId) {
     this._byTab.delete(tabId);
   }

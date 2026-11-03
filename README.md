@@ -443,7 +443,7 @@ Each group is capped (8 by default, `AI_BROWSER_TAB_LIMIT`). Opening past the ca
 
 ```
 -32001 your tab group is full (8/8) — close one before opening another
-data: { reason: "group-full", limit: 8, tabs: [{tab, url}, ...] }
+data: { reason: "group-full", limit: 8, tabs: [{tab, url, draft?, downloading?}, ...] }
 ```
 
 Over MCP the agent receives this as a tool result with `isError: true` and the readable text
@@ -451,11 +451,26 @@ Over MCP the agent receives this as a tool result with `isError: true` and the r
 acts on, not a JSON-RPC protocol error. The `data` fields above are the raw-WS detail.
 
 Popups cannot be refused (the page's script is waiting for the window), so in that one case the least
-recently used tab in the group — never the visible one, never one with a dialog open — is closed
-instead, and reported in `browse_tabs {"op":"list"}` as `evicted`.
+recently used tab in the group is closed instead — never the visible one, never one with a dialog
+open, and since 2026-11-03 also never one holding **unsubmitted input** (a `type`/`setContent`/`paste`
+that hasn't been followed by a real navigation) or an **in-progress download**. The reason for the
+last two is that eviction here is a full tab close, harsher than Chrome's discard: a discard leaves
+the form, our close leaves nothing. If nothing qualifies, the group is allowed one tab over the cap —
+better a page too many than a page you were working on swallowed. Whatever got closed is reported in
+`browse_tabs {"op":"list"}` as `evicted`, and the two protections are marked in the refusal payload
+(`tabs[].draft` / `tabs[].downloading`) because when it's *your* turn to decide what to close, that's
+the only evidence you have.
 
-`npm run multiagent` (46 checks) covers it, M7–M9: auto workspace, the cap and its refusal payload,
-and that one full group does not affect anybody else's.
+**Sound follows the visible tab only.** Every tab lives in one window and z-order decides which one
+the human sees — audio has no z-order, so an agent's background video plays out loud and there is no
+speaker to find. Non-active tabs of an agent group are muted from birth; the tab in front and your own
+tabs are never muted (Chrome leaves those playing too). Muted tabs carry `muted: true` in
+`browse_tabs {"op":"list"}`. Muting is **output gain, not pause**: `currentTime` keeps advancing, so
+the page the agent reads is not secretly a stalled one. Turn the rule off with `AI_BROWSER_BG_MUTE=0`.
+
+`npm run multiagent` (69 checks) covers it, M7–M10: auto workspace, the cap and its refusal payload,
+that one full group does not affect anybody else's, who gets evicted when a popup needs the space, and
+that a muted tab is still playing.
 
 ---
 
@@ -897,7 +912,7 @@ npm run wrapper      # "in the tree but won't click" = matched a container, not 
 npm run paint        # blank-page self-check: verdicts, bounded ladder, no false alarms — 23 checks
 npm run layout       # geometry invariants + "no twitching" (zero extra repaints on nav) — 25 checks
 npm run download     # "clicked download": viewable media must display, the rest must save — 23 checks
-npm run multiagent   # several agents at once: own tab each, no cross-talk, gone tab errors — 46 checks
+npm run multiagent   # several agents at once: own tab each, no cross-talk, eviction + mute rules — 69 checks
 npm run background   # window hidden/minimized: every capability still works (headless-like) — 37 checks
 npm run flicker      # frame-level: no frame may render the page shrunk (needs screen recording) — 6 checks
 npm run e2e:all      # 一次跑完上面全部 22 个套件（每个独立端口）+ 可信汇总 — 743 checks

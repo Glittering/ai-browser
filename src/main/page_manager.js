@@ -72,6 +72,8 @@ import { normalizeInputText, skeletalInputText } from '../shared/input_verify.js
 import screenshotOpts from '../shared/screenshot_opts.cjs';
 // window.open 的窗口特性 → 视图几何（纯函数）：站点请求的 420×520 浮层不该长成整号标签页。
 import popupGeometry from '../shared/popup_geometry.cjs';
+// 谁的声音能出喇叭（纯函数）：音频没有 z 序，agent 在后台开的页会一路响到人看不见它。
+import tabAudio from '../shared/tab_audio.cjs';
 // 跨进程子帧（OOPIF）判定与自动路由回执（纯函数）：默认读法检测到不可读
 // 子帧时自己补一次 AX 读取，调用方无需知道 ax:true 的存在。
 import frameProbe from '../shared/frame_probe.cjs';
@@ -260,6 +262,18 @@ class PageManager {
     // 都要按它自己的矩形判，不能拿整号内容区当"应该占满的地方"—— 那是"弹窗被纠正成
     // 整屏"的成因。清理走 shared/tab_state.cjs 的 PER_TAB。
     this._popupRects = new Map();
+    // 这一页当前**被我们按住**声音的集合。用 Set 而不是 Map 是为了把"默认状态"
+    // 表示成"不在集合里"：setAudioMuted 每次都会走一遍 native audio 层，切一次标签页
+    // 给所有页各设一遍是纯浪费，而"没被按住"根本不需要记。判据在 shared/tab_audio.cjs。
+    // 清理走 shared/tab_state.cjs 的 PER_TAB。
+    this._mutedTabs = new Set();
+    // tabId -> 这一页有还没提交的内容（填了一半的表单 / 写了一半的私信）。
+    // 存在的理由：**淘汰是整页关掉**，比 Chrome 的 discard 更狠 —— discard 至少留着
+    // 表单，我们一关就全没。所以 Chrome"不许丢弃"清单里能落到本项目的几条都要落到这里。
+    // 为什么用主进程记账而不是问页面：本架构里人只能在他看得见的那一页打字，而那一页
+    // 正是 activeTab（已经排除）；剩下会留草稿的只有走 ui.act 的 agent，一条不漏。
+    // 清理走 shared/tab_state.cjs 的 PER_TAB。
+    this._tabHasDraft = new Map();
     // tabId -> Promise<void>：该 tab 的垫片**注册完成**的信号（不是"注入成功"，
     // 失败也 resolve —— 调用方要的是"可以往下走了"，不是"一切顺利"）。
     // 存在的唯一理由：window.open("") 派生的 tab 里，ai:window_open_nav 必须等
@@ -686,6 +700,10 @@ class PageManager {
           url: isAlive(view) ? view.webContents.getURL() : null,
           usedAt: this._tabUsedAt.get(id) || 0,
           dialog: this._openDialogs.has(id) ? true : undefined,
+          // 淘汰的两条例外条件（判据在 shared/tab_group.cjs 的 pickEvictable）。
+          // 只给真值：这条记录会进 listGroups 的回执，字段该出现时才出现。
+          draft: this._tabHasDraft.get(id) === true ? true : undefined,
+          downloading: this.downloadMonitor.hasActive(id) ? true : undefined,
         });
       }
     }
@@ -727,6 +745,21 @@ class PageManager {
     this._tabUsedAt.set(tabId, Date.now());
   }
 
+  /**
+   * 记 / 销"这一页有还没提交的内容"。
+   *
+   * 置位：ui.act 的 type / setContent / paste（见 shared/tab_group.cjs 的 draftEffect）。
+   * 清除：clear 动作、主框架导航（表单已经被提交或整页换掉了，没有草稿可丢）。
+   * 页内导航（pushState / #hash）**不**清：那正是"提交后不重载页面"的现代写法，
+   * 站内 SPA 的发私信、发评论走的就是这条路 —— 清早了等于保护不存在。
+   * 保险起见这条路留了个反向兜底：真被保护住的组宁可超限，也不牺牲正在用的页。
+   */
+  _setDraft(tabId, hasDraft) {
+    if (tabId === undefined || tabId === null) return;
+    if (hasDraft) this._tabHasDraft.set(tabId, true);
+    else this._tabHasDraft.delete(tabId);
+  }
+
   /** 标签栏/接口用的分组清单（空组已在上面的清理里去掉，这里再滤一遍保险）。 */
   listGroups() {
     const out = [];
@@ -754,6 +787,9 @@ class PageManager {
   moveToGroup(tabId, groupId) {
     if (!this.tabs.has(tabId)) return false;
     this._tabGroup.set(tabId, groupId || tabGroup.HUMAN_GROUP);
+    // 归属一换，"这页的声音该不该出喇叭"的答案就可能跟着换：人接手 agent 的页
+    // 之后切走，它变成"人自己开的后台页"，按 Chrome 的行为应该继续响。
+    this._applyMute(tabId);
     return true;
   }
 
@@ -2280,6 +2316,10 @@ class PageManager {
     const ms = actionDeadlineMs(action, params);
     const tid = tabId !== undefined ? tabId : this.activeTab;
     this.touchTab(tid);
+    // 草稿保护：把文字送进页面的动作会留下一份"还没提交的东西"。判据只有一份
+    // （shared/tab_group.cjs 的 draftEffect），这里只负责记账。
+    const draftEffect = tabGroup.draftEffect(action);
+    if (draftEffect) this._setDraft(tid, draftEffect === 'mark');
     // 见 navigate 里的同一句：动过手的页面不再是"启动页"。
     this._spendStartupPrivilege();
     // 本次动作的起始时刻：用来判断"有没有对话框是在这一次动作里被应答的"，
@@ -4239,6 +4279,10 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     // 被显示过"的标签页永远带着节流：定时器被拉长到 1s、rAF 停摆，站点的轮询/
     // 动画/自动保存全部变慢，而 agent 看起来只是"这一页有点慢"。
     try { view.webContents.setBackgroundThrottling(false); } catch (_) { /* 老版本没有这个方法 */ }
+    // 声音在**出生的这一刻**就定下来。放在这里而不是等 setActive：agent 在后台开一页
+    // 视频，从 newTab 到"人点开它"之间可能隔几分钟，晚设一步就是先响几分钟。
+    // 如果这一页马上要顶到人眼前，下面的 setActive 会把它放开。
+    this._applyMute(tabId);
 
     // Tabs created after a subscribe should inherit the CDP domains already
     // active, so network_response / js_error keep flowing without re-subscribing.
@@ -4264,6 +4308,11 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
       const policy = this.dialogPolicy || dialogPolicy.policyFromEnv();
       if (dialogPolicy.allowUnload({ policy })) e.preventDefault();
     });
+
+    // 主框架换了一份文档 = 页面上那份草稿已经不存在了（提交走了，或者人重新加载）。
+    // 只认这一条，不认页内导航：SPA 发私信、发评论走的是 pushState，那时候草稿
+    // 还在（或者刚变成"提交出去的内容"），跟着清等于保护从来没生效过。
+    view.webContents.on('did-navigate', () => this._setDraft(tabId, false));
 
     // Intercept window.open / new-window → create new tab instead
     view.webContents.setWindowOpenHandler(({ url: urlToOpen, features }) => {
@@ -5167,12 +5216,17 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
       this.networkMonitor.setActiveTab(this.activeTab);
       if (!first.done) {
         const nextView = this._getView(this.activeTab);
-        this.window.addBrowserView(nextView);
+        // 走 _attachView 而不是裸 this.window.addBrowserView：窗口正在销毁时后者会抛，
+        // 而这一抛会把后面的重排、_syncMute 全跳过 —— 结果 activeTab 已经换了，
+        // 视图和声音却还停在刚关掉的那一页上。
+        this._attachView(nextView);
         this._layoutView(nextView);
         // Force repaint
         nextView.webContents.setBackgroundThrottling(false);
       }
     }
+    // 关掉的如果是"人眼前那一页"，activeTab 已经换人，声音的归属要跟着重算。
+    this._syncMute();
     return true;
   }
 
@@ -5277,6 +5331,9 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
         // 报旧数字等于让 agent 按一块已经不存在的地方行动；getBounds 也会随视图一起
         // 销毁，所以套在 live 之外再兜一层（list_tabs 不能因为一个 tab 抛错而整发失败）。
         ...(this._popupRects.has(id) ? { popup: this._livePopupRect(view) } : {}),
+        // 这一页被我们按住了声音。**必须说出来**：截图里视频在动、喇叭却没声，或者人
+        // 反馈"这页没声音"，唯一的判据就是这个字段，不能靠猜。没静音时不给字段。
+        ...(this._mutedTabs.has(id) ? { muted: true } : {}),
       });
     }
     return list;
@@ -5316,6 +5373,36 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     this.startupTab = null;
   }
 
+  /**
+   * 按 shared/tab_audio.cjs 的判据把这一页的声音按住 / 放开。
+   *
+   * 只在**状态真的变化**时调 setAudioMuted。状态取本进程记的那份，不读
+   * webContents.isMuted()：页面自己也能把 <video> 关掉，那个值会把"我们按住的"和
+   * "页面本来就静音的"混成一件事，而回执里的 `muted` 必须是前者。
+   * 抛错静默 —— 视图正在销毁时这一步本来就没有意义。
+   */
+  _applyMute(tabId) {
+    const view = this._getView(tabId);
+    if (!isAlive(view)) return;
+    const mute = tabAudio.shouldMute({
+      tabId,
+      activeTab: this.activeTab,
+      group: this.groupOfTab(tabId),
+    });
+    if (this._mutedTabs.has(tabId) === mute) return;
+    try { view.webContents.setAudioMuted(mute); } catch (_) { /* 视图正在销毁 */ }
+    if (mute) this._mutedTabs.add(tabId);
+    else this._mutedTabs.delete(tabId);
+  }
+
+  /**
+   * 全表重算。切标签页 / 关标签页之后调 —— 这两件事改变的正是"谁在人眼前"，
+   * 也就是判据里的 activeTab。新建标签页只算自己那一条（见 newTab 里的 _applyMute）。
+   */
+  _syncMute() {
+    for (const tabId of this.tabs.keys()) this._applyMute(tabId);
+  }
+
   setActive(tabId) {
     if (!this.tabs.has(tabId)) return false;
     // 「人眼前还是启动页」这个特权是一次性的：一旦有人（人点了标签页、或 agent 显式
@@ -5340,6 +5427,10 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
       this._focusWebContents(view);
       view.webContents.setBackgroundThrottling(false);
     }
+    // "谁在人眼前"变了，声音的归属也就变了：新顶上来的一页放开，被顶下去的
+    // agent 页按住（人的页照旧响）。放在 if (view) 外面是因为 view 拿不到时
+    // activeTab 也已经改了，全表重算比"只动这一页"更诚实。
+    this._syncMute();
     return true;
   }
 

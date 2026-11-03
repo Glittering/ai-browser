@@ -70,7 +70,8 @@ vi.mock('electron', async () => {
     // 存下 handler，测试才能真的调用它 —— window.open 的两条入口之一
     // （setWindowOpenHandler）的几何判据只能这么测（PM-33）。
     setWindowOpenHandler(fn) { this.windowOpenHandler = fn; }
-    setAudioMuted() {}
+    setAudioMuted(m) { this.audioMuted = m; }
+    isMuted() { return this.audioMuted === true; }
     setZoomFactor(z) { this.zoom = z; }
     getZoomFactor() { return this.zoom; }
     insertCSS() { return Promise.resolve('k'); }
@@ -811,5 +812,200 @@ describe('window.open 弹窗按请求的几何呈现（不再长成整号标签�
     expect(pm._popupRects.has(tid)).toBe(false);
     const next = pm.newTab('https://b.example/');
     expect(pm.tabs.get(next).getBounds(), '新 tab 必须铺满，而不是继续当浮层').toEqual(FULL);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 声音只跟人眼前那一页（2026-11-03 对照 Chromium 吸收的第 1 项）
+//
+// 所有标签页挂在同一个窗口上，可见性靠 z 序，**音频没有 z 序**：agent 在后台开的
+// 视频页会一路响，而人找不到那个喇叭图标去关它。判据在 shared/tab_audio.cjs，
+// 这里钉的是"接线"：什么时候算、什么时候重算、回执说不说实话。
+// ---------------------------------------------------------------------------
+describe('后台标签页静音：agent 的后台页不出声，人的页照旧', () => {
+  const agentGroup = (sessionId, limit) => {
+    const g = pm.ensureGroup(sessionId, null, { capped: true });
+    if (limit) g.limit = limit;
+    return g.id;
+  };
+
+  it('PM-37 agent 的后台页从出生就是静音的（不等第一次 setActive）', () => {
+    const human = pm.newTab('https://human.example/');      // 人眼前那一页
+    const bg = pm.newTab('https://a.example/video', { show: false, group: agentGroup('s1') });
+    expect(pm.tabs.get(bg).webContents.isMuted(), '从 newTab 那一刻就按住，晚设一步就是先响几分钟').toBe(true);
+    expect(pm.tabs.get(human).webContents.isMuted()).toBe(false);
+  });
+
+  it('PM-38 人点开那一页 → 放开；被顶下去的 agent 页 → 按住；人的页切走了也照旧响', () => {
+    const before = pm.newTab('https://human.example/');
+    const bg = pm.newTab('https://a.example/', { show: false, group: agentGroup('s1') });
+    pm.setActive(bg);
+    expect(pm.tabs.get(bg).webContents.isMuted(), '人点开就该听见').toBe(false);
+    expect(pm.tabs.get(before).webContents.isMuted(), '人自己的页切走了也不许静音（Chrome 不这么做）').toBe(false);
+    pm.setActive(before);
+    expect(pm.tabs.get(bg).webContents.isMuted(), '回到后台就重新按住').toBe(true);
+  });
+
+  it('PM-39 agent 把某一页顶到人眼前也算"眼前"（判据是 activeTab，不是谁点的）', () => {
+    pm.newTab('https://human.example/');
+    const gid = agentGroup('s1');
+    const a = pm.newTab('https://a.example/', { show: false, group: gid });
+    const b = pm.newTab('https://b.example/', { show: false, group: gid });
+    pm.setActive(a);
+    expect(pm.tabs.get(a).webContents.isMuted()).toBe(false);
+    expect(pm.tabs.get(b).webContents.isMuted()).toBe(true);
+    pm.setActive(b);
+    expect(pm.tabs.get(a).webContents.isMuted()).toBe(true);
+    expect(pm.tabs.get(b).webContents.isMuted()).toBe(false);
+  });
+
+  it('PM-40 只在状态真的变化时调 setAudioMuted（切一次页把八页各设一遍是纯浪费）', () => {
+    pm.newTab('https://human.example/');
+    const bg = pm.newTab('https://a.example/', { show: false, group: agentGroup('s1') });
+    const wc = pm.tabs.get(bg).webContents;
+    const calls = [];
+    wc.setAudioMuted = (m) => { calls.push(m); wc.audioMuted = m; };
+    pm._mutedTabs.delete(bg);      // 抹掉出生那一次的记账，让"第一次真的按下"被数到
+    pm._syncMute();
+    pm._syncMute();
+    pm._syncMute();
+    expect(calls, '第一次之后状态没变，不该再往下调').toEqual([true]);
+    // 反过来也一样：放开一次就够
+    pm.setActive(bg);
+    pm._syncMute();
+    expect(wc.isMuted()).toBe(false);
+  });
+
+  it('PM-41 关掉人眼前那一页之后，声音归属跟着重算（换人就是换判据）', () => {
+    const gid = agentGroup('s1');
+    const a = pm.newTab('https://a.example/', { show: false, group: gid });   // 第一页：自动到人眼前
+    const b = pm.newTab('https://b.example/', { show: false, group: gid });
+    pm.setActive(b);
+    expect(pm.tabs.get(a).webContents.isMuted(), 'a 回到后台，按住').toBe(true);
+    expect(pm.tabs.get(b).webContents.isMuted()).toBe(false);
+    pm.closeTab(b);
+    expect(pm.activeTab).toBe(a);
+    expect(pm.tabs.get(a).webContents.isMuted(), '它现在是新的"人眼前那一页"').toBe(false);
+  });
+
+  it('PM-42 人接手 agent 的页之后切走 → 放开（归属换了，判据就得跟着换）', () => {
+    pm.newTab('https://human.example/');
+    const bg = pm.newTab('https://a.example/', { show: false, group: agentGroup('s1') });
+    expect(pm.tabs.get(bg).webContents.isMuted()).toBe(true);
+    pm.moveToGroup(bg, 'human');
+    expect(pm.tabs.get(bg).webContents.isMuted(), '现在它是人自己开的后台页 = Chrome 行为，继续响').toBe(false);
+  });
+
+  it('PM-43 AI_BROWSER_BG_MUTE=0 一律不静音，而且连账都不留', () => {
+    process.env.AI_BROWSER_BG_MUTE = '0';
+    try {
+      pm.newTab('https://human.example/');
+      const bg = pm.newTab('https://a.example/', { show: false, group: agentGroup('s1') });
+      expect(pm.tabs.get(bg).webContents.isMuted()).toBe(false);
+      expect(pm._mutedTabs.has(bg), '关掉开关后连账都不该留：集合里有的才是真被按住的').toBe(false);
+      expect(pm.listTabs().find((t) => t.id === bg).muted).toBeUndefined();
+    } finally {
+      delete process.env.AI_BROWSER_BG_MUTE;
+    }
+  });
+
+  it('PM-44 listTabs 把静音说出去（视频在动却没声音，判据只能是这个字段）', () => {
+    pm.newTab('https://human.example/');
+    const bg = pm.newTab('https://a.example/', { show: false, group: agentGroup('s1') });
+    const byId = new Map(pm.listTabs().map((t) => [t.id, t]));
+    expect(byId.get(bg).muted).toBe(true);
+    expect(byId.get(1).muted, '没静音的页不该带这个字段').toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 淘汰保护：整页关掉之前，先看它有没有"还没提交的东西"
+//
+// 我们的淘汰比 Chrome 的 discard 狠（discard 至少留着表单，我们一关全没），所以保护
+// 必须更紧。判据在 shared/tab_group.cjs，这里钉的是"事实从哪儿来"：草稿 = 主进程
+// 记账（架构保证人只能在看得见的那页打字，而那正是 activeTab，已经排除在外）；
+// 下载 = DownloadMonitor.hasActive。
+// ---------------------------------------------------------------------------
+describe('淘汰保护：草稿页与下载中的页不被牺牲', () => {
+  const fillGroup = (sessionId, limit) => {
+    const gid = pm.ensureGroup(sessionId, null, { capped: true }).id;
+    if (limit) pm.groupMeta(gid).limit = limit;
+    pm.newTab('https://human.example/');                     // 人眼前那一页
+    const old = pm.newTab('https://old.example/compose', { show: false, group: gid });
+    const opener = pm.newTab('https://opener.example/', { show: false, group: gid });
+    pm._tabUsedAt.set(old, 100);          // 最久没用 —— 本来该它当牺牲品
+    pm._tabUsedAt.set(opener, 900);
+    return { gid, old, opener };
+  };
+
+  it('PM-45 默认照旧：最久没用的那一页被牺牲（没有保护时不许改变既有行为）', () => {
+    const { gid, old, opener } = fillGroup('s2', 2);
+    expect(pm.pickEvictableInGroup(gid, opener)).toBe(old);
+  });
+
+  it('PM-46 这一页有没提交的输入 → 不牺牲它；没有别的可牺牲就宁可超限', () => {
+    const { gid, old, opener } = fillGroup('s3', 2);
+    pm._setDraft(old, true);
+    expect(pm.pickEvictableInGroup(gid, opener), '写了一半的私信被关掉 = 把几分钟的工作删了').toBe(null);
+    pm._setDraft(old, false);
+    expect(pm.pickEvictableInGroup(gid, opener), '销掉保护就回到原样').toBe(old);
+  });
+
+  it('PM-47 进行中的下载 → 不牺牲它（关页会连带取消那条下载）', () => {
+    const { gid, old, opener } = fillGroup('s4', 2);
+    expect(pm.downloadMonitor.hasActive(old)).toBe(false);
+    pm.downloadMonitor._byTab.set(old, new Map([['dl-1', { id: 'dl-1', state: 'progressing' }]]));
+    expect(pm.pickEvictableInGroup(gid, opener)).toBe(null);
+    // 已经停下的下载不保护：不然一个失败的下载能永远占住一页，上限就失效了
+    pm.downloadMonitor._byTab.set(old, new Map([['dl-1', { id: 'dl-1', state: 'interrupted' }]]));
+    expect(pm.pickEvictableInGroup(gid, opener)).toBe(old);
+  });
+
+  it('PM-48 保护状态要说得出来：tabsInGroup 带上 draft、downloading', () => {
+    const { gid, old } = fillGroup('s5', 2);
+    pm._setDraft(old, true);
+    pm.downloadMonitor._byTab.set(old, new Map([['dl-1', { id: 'dl-1', state: 'progressing' }]]));
+    const row = pm.tabsInGroup(gid).find((t) => t.id === old);
+    expect(row.draft).toBe(true);
+    expect(row.downloading).toBe(true);
+    const clean = pm.tabsInGroup(gid).find((t) => t.id !== old);
+    expect(clean.draft, '干净的页不该带字段（每一条都会进回执）').toBeUndefined();
+    expect(clean.downloading).toBeUndefined();
+  });
+
+  it('PM-49 type 置位，clear 与主框架导航销位，页内导航不销', () => {
+    pm.newTab('https://human.example/');
+    const tid = pm.newTab('https://a.example/compose', {
+      show: false, group: pm.ensureGroup('s6', null, { capped: true }).id,
+    });
+    // 记账在 executeAction 的第一个 await 之前，所以不用等它跑完（动作本身在这套桩
+    // 里会失败，那是另一件事 —— 这里钉的是"把文字送进页面会留下草稿标记"）。
+    pm.executeAction('type', 'e:div', { text: '写到一半' }, tid).catch(() => {});
+    expect(pm._tabHasDraft.get(tid), 'agent 输入过的页不许被弹窗挤掉').toBe(true);
+
+    pm.executeAction('clear', 'e:div', {}, tid).catch(() => {});
+    expect(pm._tabHasDraft.has(tid), '内容被清掉了就没有草稿可丢，保护该跟着销').toBe(false);
+
+    pm._setDraft(tid, true);
+    pm.tabs.get(tid).webContents.emit('did-navigate', {}, 'https://a.example/other');
+    expect(pm._tabHasDraft.has(tid), '换了文档 = 草稿要么提交了要么没了').toBe(false);
+
+    pm._setDraft(tid, true);
+    // 页内导航（pushState / #hash）**不**销：SPA 发私信、发评论走的就是这条路
+    pm.tabs.get(tid).webContents.emit('did-navigate-in-page', {}, 'https://a.example/#x');
+    expect(pm._tabHasDraft.get(tid), '页内导航不等于内容已经保存').toBe(true);
+  });
+
+  it('PM-50 关掉草稿页之后标记跟着消失：下一个 tab 不许继承别人的草稿', () => {
+    pm.newTab('https://human.example/');                 // 人眼前那一页，别让新页被自动顶上去
+    const gid = pm.ensureGroup('s7', null, { capped: true }).id;
+    const tid = pm.newTab('https://a.example/compose', { show: false, group: gid });
+    pm._setDraft(tid, true);
+    pm.closeTab(tid);
+    expect(pm._tabHasDraft.has(tid)).toBe(false);
+    expect(pm._mutedTabs.has(tid), '静音状态同理').toBe(false);
+    const next = pm.newTab('https://b.example/', { show: false, group: gid });
+    expect(pm._tabHasDraft.has(next), 'tabId 不复用，但判据也不能靠"上一个"').toBe(false);
+    expect(pm.tabs.get(next).webContents.isMuted(), '新页按自己的归属重算').toBe(true);
   });
 });

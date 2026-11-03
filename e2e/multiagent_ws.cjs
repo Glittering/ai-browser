@@ -15,6 +15,9 @@
 //   M3 省略 tab 时打到自己的页面，别人的页面一动不动
 //   M4 真并发：两个会话同时动作，各自的结果互不污染
 //   M5 目标被关掉要**明确报错**，不许就近挑一个页面继续干
+// 后面几条是同一套归属机制长出来的新责任（2026-11-03 对照 Chromium 之后补）：
+//   M8b 组满时页面自己弹窗：牺牲品的排除条件（写了一半的页不许关，宁可超限）
+//   M10 声音只跟人眼前那一页：agent 的后台页不出声，但**照旧在播**（静音 ≠ 暂停）
 //
 // Run: npm run multiagent
 
@@ -82,11 +85,65 @@ const PAGE = (name) => `<!doctype html><html><head><meta charset="utf-8"><title>
 <input id="t" value="">
 </body></html>`;
 
+// 会弹一屏的页面（M8b 用）。弹的是**自己**：这样每一代弹窗都还带着 #pop，
+// 第二轮"全部有草稿"的实验能从刚弹出来的那一页继续发起。
+// __c / __r 是负证据用的：click 落没落地、window.open 返回了什么，只看
+// list_tabs 分不出"没执行"和"执行了但主进程没建页"这两种完全不同的坏。
+const POPUP_PAGE = (name) => `<!doctype html><html><head><meta charset="utf-8"><title>${name}</title></head><body>
+<h1 id="who">${name}</h1>
+<button id="pop" onclick="window.__c=(window.__c||0)+1;window.__r='-';try{var w=window.open('/popup-child','_blank');window.__r=w?'win':'null'}catch(e){window.__r='THROW:'+e.message}return false;">弹一屏</button>
+<input id="t" value="">
+</body></html>`;
+
+/**
+ * 一段真的能播出的声音（8k 采样 / mono / 16bit / 8s 正弦，循环）。
+ *
+ * 存在的理由只有一个：M10 要证明"被按住的页"是**还在播、只是不出声**，而不是被
+ * 顺手暂停了 —— 后者会让 agent 看到的 currentTime 停住，那是另一种完全不同的故障，
+ * 而光看 list_tabs 的 muted 字段分不出这两种。
+ *
+ * 长度必须**远长过一次观测**：早先做 0.4s 的循环，currentTime 在两次采样之间绕回
+ * 起点（实测 0.4 → 0.391 → 0.173），于是"仍在播"被读成"暂停"，红的是断言自己。
+ * 8 秒是这个阶段时长的十倍，绕不回。
+ */
+function wavDataUri() {
+  const rate = 8000;
+  const n = Math.floor(rate * 8);
+  const buf = Buffer.alloc(44 + n * 2);
+  buf.write('RIFF', 0); buf.writeUInt32LE(36 + n * 2, 4); buf.write('WAVE', 8);
+  buf.write('fmt ', 12); buf.writeUInt32LE(16, 16); buf.writeUInt16LE(1, 20);
+  buf.writeUInt16LE(1, 22); buf.writeUInt32LE(rate, 24); buf.writeUInt32LE(rate * 2, 28);
+  buf.writeUInt16LE(2, 32); buf.writeUInt16LE(16, 34);
+  buf.write('data', 36); buf.writeUInt32LE(n * 2, 40);
+  for (let i = 0; i < n; i++) {
+    buf.writeInt16LE(Math.round(Math.sin((2 * Math.PI * 440 * i) / rate) * 12000), 44 + i * 2);
+  }
+  return 'data:audio/wav;base64,' + buf.toString('base64');
+}
+
+// 播放由 #play 的 click 触发：Chromium 的自动播放策略要真实用户手势，而
+// ui.act 走的正是 CDP 受信输入（等价于真人点）。
+//
+// 顺手给这一页加了 autoplay —— 但**没有**放开策略：手势到底有没有传到页面，
+// 由负证据说：click 没带手势又被拦时 play() 会 reject，window.__p 就写成
+// 'err:...'，下面第一条断言立刻红。所以这一条同时在钉"受信输入真的进了这一页"。
+const AUDIO_PAGE = (wav) => `<!doctype html><html><head><meta charset="utf-8"><title>audio</title></head><body>
+<h1 id="who">audio</h1>
+<audio id="a" src="${wav}" loop autoplay controls></audio>
+<button id="play" onclick="var p=document.getElementById('a').play();p&&p.then?p.then(function(){window.__p='ok'},function(e){window.__p='err:'+e.message}):window.__p='ok'">放</button>
+<input id="t" value="">
+</body></html>`;
+
 function startServer() {
   return new Promise((resolve) => {
+    const wavUri = wavDataUri();
     const s = http.createServer((req, res) => {
+      const name = String(req.url || '/').replace(/^\/|\/$/g, '') || 'x';
+      const html = name.indexOf('popup') === 0 ? POPUP_PAGE(name)
+        : name === 'audio-host' ? AUDIO_PAGE(wavUri)
+          : PAGE(name);
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
-      res.end(PAGE(String(req.url || '/').replace('/', '') || 'x'));
+      res.end(html);
     });
     s.listen(0, '127.0.0.1', () => resolve(s));
   });
@@ -383,6 +440,189 @@ async function main() {
     const all = (await rpc(A, 'ui.list_tabs', {})).result.tabs;
     check('M9 每个标签页都带归属', all.every((t) => typeof t.group === 'string' && t.group.length > 0),
       JSON.stringify(all.map((t) => t.group)));
+  }
+
+  // ---- M8b 弹窗挤位时的牺牲品 ----
+  //
+  // 组满时**页面自己**弹出来的窗口不能拒绝（站点的脚本在等它），只能挑一页关掉。
+  // 2026-11-03 对照 Chrome Memory Saver 的"不许丢弃"清单，把两条本项目真实存在的
+  // 状态补成排除条件：有没提交的输入、有进行中的下载。我们的淘汰是整页关闭，比
+  // discard 狠（discard 之后表单还在，我们一关全没），所以保护只能更紧不能更松。
+  stage('M8b');
+  console.log('\n[M8b] 组满时页面弹窗：先牺牲最久没用的；写了一半的页不许被牺牲，宁可超限');
+  {
+    const D = new Browser(WS_PORT);
+    await D.ready(10000);
+    await rpc(D, 'ui.hello', { label: 'Probe-D' });
+    const ids = [];
+    for (let i = 0; i < 4; i++) {
+      const r = await rpc(D, 'ui.new_tab', { url: `${base}/popup-host-${i}` });
+      ids.push(r.result && r.result.tab);
+      await sleep(60);          // usedAt 要有先后，不能让四页撞在同一毫秒
+    }
+    const [t1, t2, t3, t4] = ids;
+    for (const tid of ids) {
+      // 必须等**真的文档**到位：new_tab 会先停在占位页，而占位页里没有 #pop / #t。
+      // 不等就点，findRef 会拿到 null，ui.act 报"element not found"，整段变成假红。
+      if (!await waitPath(D, tid, `/popup-host-${ids.indexOf(tid)}`)) {
+        check('M8b 页面已到位 ' + tid, false, String(await text(D, tid, 'location.href')));
+      }
+    }
+    const gOf = async () => {
+      const lt = (await rpc(D, 'ui.list_tabs', {})).result;
+      const g = (lt.groups || []).find((x) => x.mine);
+      return { id: g && g.id, count: g && g.count, limit: g && g.limit, tabs: lt.tabs || [], evicted: lt.evicted || [] };
+    };
+    // 每一发 ui.act 之前先把那一页提到人眼前。
+    //
+    // 不是偷懒，是把两件事分开钉：**这一段的主题是"淘汰保护"**，而隐藏窗口里
+    // 没置顶的那一页根本收不到受信输入（2026-11-03 实测：document.visibilityState
+    // =hidden 的页面上，CDP 的 mousePressed/mouseReleased 与键盘事件被整条丢弃，
+    // click 静默无效、type 报 Input not verified）。那是另一个缺陷，自己的钉子
+    // 在自己的提交里（M11）；这里先把输入送得到，才谈得上保护生效没生效。
+    const raise = async (tid) => { await rpc(D, 'ui.set_active_tab', { tab: tid }); await sleep(150); };
+    const g0 = await gOf();
+    check('M8b 先把本组填到上限', ids.every(Boolean) && g0.count === 4 && g0.limit === 4, JSON.stringify(g0).slice(0, 200));
+
+    // ① 阳性对照：什么都没保护时，行为照旧 —— 最久没用的那一页被挤掉
+    const popRef = await findRef(D, t4, (n) => n.id === 'pop' || String(n.label || '') === '弹一屏');
+    check('M8b 弹窗按钮定位得到（不是占位页上的空气）', !!popRef, String(popRef));
+    await raise(t4);
+    const click1 = await rpc(D, 'ui.act', { action: 'click', target: popRef, tab: t4 });
+    await sleep(1200);
+    const g1 = await gOf();
+    const alive1 = new Set(g1.tabs.map((t) => t.id));
+    const mine1 = g1.tabs.filter((t) => t.group === g1.id);
+    const popupTab = mine1.filter((t) => t.id !== t1 && t.id !== t2 && t.id !== t3 && t.id !== t4)[0];
+    // 负证据：只看 list_tabs 分不出"onclick 没跑"和"onclick 跑了但主进程没建页"，
+    // 而这两种坏的修法完全不同（前者是点击/读层的问题，后者是 setWindowOpenHandler）。
+    const neg1 = await text(D, t4, 'JSON.stringify({c:window.__c,r:window.__r,href:location.pathname})');
+    check('M8b 弹窗真的开出来了（拒绝等于让站点的流程断在半路）',
+      click1.ok && !!popupTab && /\/popup-child/.test(String(popupTab.url || '')),
+      JSON.stringify({ click: click1.result || click1.error, neg: neg1, mine: mine1.map((t) => t.url) }).slice(0, 320));
+    check('M8b 什么都没保护时照旧牺牲最久没用的那一页，并且**说出来**',
+      g1.evicted.length === 1 && g1.evicted[0].tab === t1 && g1.evicted[0].reason === 'group-full'
+      && !alive1.has(t1) && g1.count === 4,
+      JSON.stringify({ evicted: g1.evicted, count: g1.count }).slice(0, 220));
+
+    // ② 剩下三页都写了一半 → 没有任何一页可以牺牲 → 宁可超限
+    //    ① 失败时退回用 t4 当弹窗源：这一段要证的是"保护生效"，不是"弹窗能开"；
+    //    直接 crash 会把后面的 M10 一起吞掉，什么证据都留不下。
+    const p1 = popupTab ? popupTab.id : t4;
+    if (popupTab && !await waitPath(D, p1, '/popup-child')) check('M8b 弹窗那一页已到位', false, String(await text(D, p1, 'location.href')));
+    const typedAll = [];
+    for (const tid of [t2, t3, t4]) {
+      const ref = await findRef(D, tid, (n) => n.id === 't' || n.role === 'textbox');
+      await raise(tid);
+      typedAll.push(await rpc(D, 'ui.act', { action: 'type', target: ref, text: '写到一半', tab: tid }));
+    }
+    check('M8b 三页草稿都造得出来', typedAll.every((r) => r.ok && r.result.success !== false),
+      JSON.stringify(typedAll.map((r) => r.result || r.error)).slice(0, 240));
+    check('M8b 草稿真的在页面里（不是只记在账上）',
+      (await text(D, t2, 'document.getElementById("t").value')) === '写到一半', '');
+    const popRef2 = await findRef(D, p1, (n) => n.id === 'pop' || String(n.label || '') === '弹一屏');
+    check('M8b 弹窗那一页也带按钮（每一代都能再弹一次）', !!popRef2, String(popRef2));
+    await raise(p1);
+    await rpc(D, 'ui.act', { action: 'click', target: popRef2, tab: p1 });
+    await sleep(1200);
+    const g2 = await gOf();
+    const alive2 = new Set(g2.tabs.map((t) => t.id));
+    check('M8b 有没提交输入的页不被牺牲（三页全有草稿 → 一页都没关）',
+      g2.evicted.length === 0 && alive2.has(t2) && alive2.has(t3) && alive2.has(t4),
+      JSON.stringify({ evicted: g2.evicted, alive: Array.from(alive2) }).slice(0, 240));
+    check('M8b 宁可超限：本组页数超了上限，也不吞掉正在写的东西',
+      g2.count > g2.limit, JSON.stringify({ count: g2.count, limit: g2.limit }));
+    check('M8b 弹窗仍然开出来了（保护的是牺牲品，不是弹窗本身）', g2.count === g2.limit + 1,
+      JSON.stringify({ count: g2.count }).slice(0, 120));
+
+    // ③ 拒绝清单要把带草稿的页标出来：agent 自己决定关哪一页时，这个信息是它唯一能用的
+    const rejected = await rpc(D, 'ui.new_tab', { url: `${base}/popup-denied` });
+    const list = (rejected.data && rejected.data.tabs) || [];
+    check('M8b 满了的拒绝回执把"关掉会丢东西"的页标出来',
+      !rejected.ok && rejected.data && rejected.data.reason === 'group-full'
+      && list.filter((x) => x.draft === true).length >= 3, JSON.stringify(list).slice(0, 260));
+    D.close();
+  }
+
+  // ---- M10 声音只跟人眼前那一页 ----
+  //
+  // 所有标签页挂在同一个窗口上，可见性靠 z 序，**音频没有 z 序**：agent 在后台开的
+  // 视频页会一路响，而人找不到那个喇叭去关它。这条钉住三件事，缺一件就是另一种坏：
+  //   agent 的后台页不出声 / 人眼前那一页照旧出声 / 按住的是**输出**而不是播放本身
+  // 第三件最容易写错成 pause —— 那样 agent 看到的 currentTime 会停住，等于把
+  // "听不见"变成"没在跑"，而后者是站点故障，不是我们要造出来的。
+  stage('M10');
+  console.log('\n[M10] agent 的后台页不出声，但照旧在播（静音 ≠ 暂停）');
+  {
+    const F = new Browser(WS_PORT);
+    await F.ready(10000);
+    await rpc(F, 'ui.hello', { label: 'Probe-F' });
+    const rAud = await rpc(F, 'ui.new_tab', { url: `${base}/audio-host` });
+    const aud = rAud.result && rAud.result.tab;
+    check('M10 agent 的后台页已就绪', !!aud && await waitPath(F, aud, '/audio-host'), JSON.stringify(rAud).slice(0, 160));
+
+    const rowOf = async (conn, id) => (await rpc(conn, 'ui.list_tabs', {})).result.tabs.find((t) => t.id === id) || {};
+    check('M10 后台页从出生就被按住声音', (await rowOf(F, aud)).muted === true,
+      JSON.stringify(await rowOf(F, aud)).slice(0, 200));
+    // "人的那一页"按**组**取，不按 activeTab 取：M8b 之后 activeTab 可能停在某个
+    // agent 的页上，而那一页照规则是被按住的 —— 拿它当"人的页"会红得莫名其妙。
+    const ltf = (await rpc(F, 'ui.list_tabs', {})).result;
+    const humanTab = (ltf.tabs || []).filter((t) => t.group === 'human')[0] || null;
+    check('M10 有一页是人的组（启动那一页不会被淘汰：人组不限数）', !!humanTab,
+      JSON.stringify((ltf.tabs || []).map((t) => t.group)).slice(0, 200));
+    check('M10 人的那一页没有 muted（人组永远不按住声音）', !!humanTab && humanTab.muted === undefined,
+      JSON.stringify(humanTab).slice(0, 200));
+
+    const playRef = await findRef(F, aud, (n) => n.id === 'play' || String(n.label || '') === '放');
+    // 放音这一下要先把它顶到人眼前：隐藏窗口里没置顶的那一页收不到受信输入
+    // （2026-11-03 实测，M11 管这件事），而 Chromium 的自动播放策略只认真实手势。
+    // 这不影响本段的主题 —— 要钉的是"**按住声音之后播放有没有一起停掉**"，
+    // 而那一段是在回到后台之后测的。
+    const raised = await rpc(F, 'ui.set_active_tab', { tab: aud });
+    await sleep(250);
+    check('M10 顶到人眼前 → 声音放开', raised.ok && (await rowOf(F, aud)).muted === undefined,
+      JSON.stringify(await rowOf(F, aud)).slice(0, 200));
+    const played = await rpc(F, 'ui.act', { action: 'click', target: playRef, tab: aud });
+    check('M10 播放按钮点得动', played.ok, JSON.stringify(played).slice(0, 160));
+    await sleep(500);
+    check('M10 play() 没有被自动播放策略拦掉', (await text(F, aud, 'window.__p')) === 'ok',
+      String(await text(F, aud, 'window.__p')));
+
+    // 回到后台：把**别的**那一页顶上去。优先用人的那一页（它不会被按住，
+    // 顶它不影响任何断言），极端情况下（人的页被关光）退回任意一个非 aud 的页。
+    const otherTab = humanTab
+      || (await rpc(F, 'ui.list_tabs', {})).result.tabs.filter((t) => t.id !== aud)[0];
+    await rpc(F, 'ui.set_active_tab', { tab: otherTab.id });
+    await sleep(250);
+    check('M10 回到后台 → 重新按住', (await rowOf(F, aud)).muted === true,
+      JSON.stringify(await rowOf(F, aud)).slice(0, 200));
+    const c0 = Number(await text(F, aud, 'document.getElementById("a").currentTime'));
+    await sleep(500);
+    const c1 = Number(await text(F, aud, 'document.getElementById("a").currentTime'));
+    check('M10 **被按住声音的页仍在播**（currentTime 往前走 = 按住的是输出，不是暂停）',
+      (await rowOf(F, aud)).muted === true && c1 > c0, JSON.stringify({ muted: true, c0, c1 }));
+
+    const back = await rpc(F, 'ui.set_active_tab', { tab: aud });
+    await sleep(250);
+    const c2 = Number(await text(F, aud, 'document.getElementById("a").currentTime'));
+    check('M10 再顶回人眼前 → 放开，而播放一次都没被打断',
+      (await rowOf(F, aud)).muted === undefined && c2 > c1, JSON.stringify({ c1, c2 }).slice(0, 160));
+    // 人的那一页**永远**不按住：它是"人在用"的意思，不是"哪个 agent 的"。
+    // 上面已经在两种置顶状态下各查过一次，这里只补一句：刚被顶下去当背景的那一页
+    // 如果是人的页，它照旧不出声状态不受影响。
+    if (humanTab) {
+      check('M10 人的那一页当背景时也不按住', (await rowOf(F, humanTab.id)).muted === undefined,
+        JSON.stringify(await rowOf(F, humanTab.id)).slice(0, 200));
+    }
+
+    // 关掉的如果是"人眼前那一页"，声音的归属要跟着重算（判据换人）
+    await rpc(F, 'ui.set_active_tab', { tab: aud });
+    await rpc(F, 'ui.close_tab', { tab: aud });
+    await sleep(200);
+    const nowActive = (await rpc(F, 'ui.list_tabs', {})).result.tabs.filter((t) => t.active)[0];
+    check('M10 关掉有声的那一页之后，新的人眼前那一页不出声状态正常',
+      !!nowActive && nowActive.muted === undefined, JSON.stringify(nowActive).slice(0, 200));
+    F.close();
   }
   C.close();
 

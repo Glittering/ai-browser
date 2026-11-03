@@ -581,8 +581,15 @@ export function startWSServer(pageManager, port = config.wsPort, onQuit = null, 
                   data: {
                     reason: 'group-full',
                     group: g.label, limit: cap.limit, count: cap.count,
-                    tabs: open.map((t) => ({ tab: t.id, url: t.url })),
-                    hint: 'browse_tabs {op:"close", tab:<id>} on one you no longer need',
+                    // draft / downloading 必须标出来：agent 接下来要**自己决定关哪一页**，
+                    // 而"关掉这一页会丢半封信 / 会取消正在下的文件"只有主进程知道。
+                    tabs: open.map((t) => ({
+                      tab: t.id, url: t.url,
+                      ...(t.draft ? { draft: true } : {}),
+                      ...(t.downloading ? { downloading: true } : {}),
+                    })),
+                    hint: 'browse_tabs {op:"close", tab:<id>} on one you no longer need'
+                      + ' — prefer a tab without draft/downloading',
                   },
                 },
               });
