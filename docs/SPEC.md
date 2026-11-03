@@ -782,14 +782,71 @@ Chromium 130 里不存在；`window.showInactive()` 有效但窗口真的出来�
 是那条 env 的**已知边界** —— 那种组合里窗口隐藏时模拟输入做不到，`ui.act` 一律如实失败，
 而不是假装成功。
 
+### 5. 非活跃标签页要不要节流 / 冻结：三条路都实测过（2026-11-03）
+
+Chrome 会给后台标签页降频、内存压力大了还会冻结（freeze）整页。要不要吸收这一套，
+用同一份 fixture 把三种做法各量了一遍，没有一种站得住。
+
+fixture：6 个标签页 —— 1 个前台静态 + 1 个后台静态 + 4 个后台 busy
+（`setInterval(…,16)` 每拍做 25 万次 `Math.sqrt`，外加一个 rAF 自计数环）。
+节拍看 `iv/s`（请求 62.5/s），主线程占用看该页自己的 `Performance.ScriptDuration` 增量。
+
+| 做法 | 后台 busy 页的节拍 | 该页主线程 | 整机 RSS / 渲染进程 | 代价 |
+|---|---|---|---|---|
+| **今天**（三根 switch + `setBackgroundThrottling(false)`） | 62.5/s | 44–49ms/s ≈ 0.05 核 | 隐藏 1447MB / 8 个；可见 1515MB / 8 个 | 每页 ≈120MB 常驻；CPU 只有 0.05 核/页 |
+| 交回内核默认（把三根 switch 和那 4 处调用都去掉） | **1.0–1.4/s**（有一页直接 0.0） | 0.0–1.4ms/s | 隐藏 1432MB / 8 个；可见 1438MB / 8 个 | **内存一分没省**；可见窗口里后台页自报 `hidden`，`ui.screenshot` 当场失败 |
+| CDP `Page.setWebLifecycleState{state:'frozen'}` | 62.5/s（命令被接受，页没冻住） | 不变 | 不变 | 页面收不到 `freeze` 事件，副作用是把文档 `hidden → visible`，于是**开始产帧** |
+| 内核 `--process-per-site`（同站共享渲染进程） | 62.5/s | 不变 | 6 页时 **856MB / 3 个**（省 ≈590MB） | 关掉 4 页后 RSS 856→868MB、渲染进程仍 3 —— **关页不还内存**；每页指标变成同进程共享（六行 heap/task 一模一样），"这页吃多少 / 牺牲这一页"全部失去归因；同站命运共享，一页崩同站全没 |
+
+三条结论，按"为什么"记：
+
+1. **不吸收冻结**：Electron 33 里这条 CDP 命令只改生命周期状态字符串，定时器照跑、
+   内存照占，页面自己看不见 `freeze` 事件；它唯一的实际效果是把文档翻成 visible，
+   反而开始生产帧。省不到东西，还引入一个新状态要处理。
+2. **不吸收降频**：它省的是 CPU（每页 0.05 核），而这一格本来就不痛；痛的是每页
+   ≈120MB 的渲染进程常驻，而降频**一点内存都不还**（RSS 与渲染进程数完全不动）。
+   更关键的是那三根 switch 现在**是承重墙**：可见窗口里正是它们让被盖住的标签页
+   继续自报 visible，从而有合成表面、截得到图、点得动（见上面第 2、第 4 条）。
+   交回内核默认，等于把"后台标签页可截图、可自检、可录制 canvas"换成"后台页是黑的"。
+3. **不吸收共享进程**：省下的内存是真实的（≈100MB/页），但代价正好砸在产品不变量上 ——
+   每标签页独立、可单独牺牲（见「并发」一节的归属路由与「淘汰保护」），而且共享之后
+   关标签页不再还内存，回收只剩下显式淘汰这一条路。
+
+所以内存问题的真答案还是**卸载**：`tab_state` 的淘汰路径把不要的页丢掉（渲染进程随之退出），
+实测关掉 4 页从 1447MB 回到 963MB、渲染进程 8→4 —— 该还的都还了。要省内存就少留几页，
+不是给活着的页降频。未提交草稿与进行中的下载由「淘汰保护」挡住，不被牺牲。
+
+这条测量是拿 `tools/_oneoff/idle_probe.cjs`（gitignore 内的一次性探针）跑的：
+`node tools/_oneoff/idle_probe.cjs thin`，标签页全部由产品的 WS 面开，度量走
+`--remote-debugging-port` 与 Windows 进程计数器两条外通道。对照臂（交回内核默认）当时是
+临时把 `src/main/index.js` 那三根 switch 与 `page_manager.js` 里 4 处
+`setBackgroundThrottling(false)` 去掉跑的，量完就还原了 —— **不留 env 开关**，
+结论既然是否定，就不该给产品留一条没人走的路（那次的 diff 存在
+`tools/_oneoff/lever_idle_throttle.patch`，要复现按它打回去即可）。
+`--process-per-site` 那一臂不用改代码：`AIB_PROBE_SWITCHES=--process-per-site node …` 直接给内核。
+
 ### 已知边界（写下来，免得被当 bug 修）
 
 - **同一个标签页上的并发动作不协调**：两个 agent 同时往同一个输入框里打字，值校验会
   如实报 `input not verified`（append 语义 + 并发写本来就互相踩）。不同标签页之间
   完全并行，这一条有 `npm run multiagent` 钉住。
 - **标签页都是有表面的**：开 50 个标签页的显存/合成开销和 Chrome 同量级，不是"免费"。
-- 窗口隐藏时 `capturePage()` 仍会返回空（遮挡），截图走的是 CDP
-  `captureScreenshot({fromSurface:true})` 那条路 —— 见「取帧两条铁律」。
+- **窗口隐藏时，两档谁先谁后是反的**（2026-11-03 逐档单点实测）。旧条目写的是"隐藏时
+  `capturePage()` 返回空、截图走 CDP"，实测**恰好相反**：隐藏窗口里 `capturePage()` 57–107ms
+  就给出那张视图的表面，而 CDP `Page.captureScreenshot` 要等一次真正的产帧 —— 只有**会自己重画**
+  的页面（busy 定时器）在 1.1–2.1s 内答得出来，静态页一律等到 20s deadline。
+  `_isCoveredByOtherTab` 把"窗口不在屏幕上"归成"没被盖住"，于是隐藏窗口里 auto 先试 CDP，
+  白等 20s 再落 surface。
+- **从没被顶到人眼前、也从没重画过的后台页，在隐藏窗口里"谁先问"决定成败**（2026-11-03
+  连发同一档两次量出来的）：把 `ui.screenshot {source:'surface'}` 当作那一页的**第一个**取帧请求时，
+  它 3ms 就报 `no-surface-frame`，再问第二次还是 2ms 报同一句（不是迟到，是那一帧根本不存在），
+  `source:'cdp'` 等满 20s；可同一页紧接着问一次 `ui.paint_check`，回执是
+  `verdict:"ok"、98% white、33 colours` —— 自检拿到位图了。反过来先跑自检、再截图，surface 就
+  57–107ms 成功。**窗口一可见这一格整个消失**：同一形态 surface 65–69ms、cdp 1.4s，两档都有帧。
+  机制没证明（推测是自检那发取帧把合成器叫醒了），但现象可复现，所以记下两件事：
+  ① 隐藏窗口里"后台页截不到图"不是页面坏了，是那一帧还没人叫过它；
+  ② auto 档在这种情况下**先白等 20s CDP**，然后只把 surface 那句错交回调用方，
+     第一档"captureScreenshot timeout after 20000ms"被 `lastError` 覆盖掉 —— 归因与档位顺序待修。
 
 回归：`npm run multiagent`（80 断言）、`npm run background`（37 断言），两个都在 `e2e:all` 里。
 
