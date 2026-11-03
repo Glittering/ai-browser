@@ -6,6 +6,8 @@ import {
   normalizeScreenshotOpts,
   describeShot,
   canUseSurface,
+  pickShotTiers,
+  joinShotFailures,
   surfaceMeta,
   FORMATS,
   SHOT_SOURCES,
@@ -233,5 +235,58 @@ describe('describeShot — 回执要交代帧是哪一档来的', () => {
     // 探到了就照旧：只有真的有密码框才警告
     expect(describeShot({ hasVisiblePasswordInput: true }).warning).toContain('password input');
     expect(describeShot({}).warning).toBeUndefined();
+  });
+});
+
+// auto 档的顺序（2026-11-03 换了尺子）。旧判据是"有没有兄弟视图压在它上面"，
+// 于是**窗口不显示**时算出"没被盖住"→ 先排 CDP 那条 20s 的队。实测那一格：
+//   窗口隐藏 + 正在重绘的页 ：capturePage 57–107ms ✓  CDP 1.1–2.1s ✓
+//   窗口隐藏 + 静态页       ：capturePage ✓           CDP 等到 20s deadline ✗
+//   窗口隐藏 + 从没激活过的视图：capturePage 2–3ms 空图  CDP 20s ✗（这一帧确实不存在）
+// agent 长期在隐藏窗口里干活，所以最该快的那一格长期走的是最慢的那条路。
+describe('pickShotTiers — 只有「确定屏幕上就是这一帧」才让 CDP 优先', () => {
+  const cases = [
+    ['屏幕上就是这一页（可见 + activeTab）', { windowOnScreen: true, isActive: true }, ['cdp', 'surface']],
+    ['被兄弟视图整个盖住（可见 + 后台）', { windowOnScreen: true, isActive: false }, ['surface', 'cdp']],
+    ['窗口隐藏 —— 后台那一页', { windowOnScreen: false, isActive: false }, ['surface', 'cdp']],
+    ['窗口隐藏 —— 连 activeTab 也不算"屏幕上这一帧"（这一格是旧判据漏的；最小化同理，' +
+      '调用方把两者都归成 windowOnScreen=false）',
+      { windowOnScreen: false, isActive: true }, ['surface', 'cdp']],
+    ['可见性问不到：surface 先答不亏（几毫秒就给结论，CDP 仍是后手）',
+      { windowOnScreen: null, isActive: true }, ['surface', 'cdp']],
+    ['点名单一档绝不换档：只要 surface', { source: 'surface', windowOnScreen: true, isActive: true }, ['surface']],
+    ['点名单一档绝不换档：只要 cdp', { source: 'cdp', windowOnScreen: false, isActive: false }, ['cdp']],
+    ['坏输入不炸', undefined, ['surface', 'cdp']],
+  ];
+  for (const [name, st, want] of cases) {
+    it(`S-TIER: ${name}`, () => {
+      expect(pickShotTiers(st)).toEqual(want);
+    });
+  }
+});
+
+// 失败归因（同一个提交里修的第二件事）。旧实现两档往同一个 lastError 里写，后一档
+// 覆盖前一档：隐藏窗口那一发明明白等了 CDP 的 20 秒，回执只剩"这一页从来没画过"。
+describe('joinShotFailures — 每一档的失败理由都要活到回执里', () => {
+  it('S-WHY-1: 两档都失败时两句都在，各自带 [tier] 前缀', () => {
+    const s = joinShotFailures([
+      { tier: 'surface', reason: 'no-surface-frame — this view has no readable surface' },
+      { tier: 'cdp', reason: 'captureScreenshot timeout after 20000ms' },
+    ]);
+    expect(s).toContain('no-surface-frame');
+    expect(s).toContain('[surface]');
+    expect(s).toContain('captureScreenshot timeout after 20000ms');
+    expect(s).toContain('[cdp]');
+    expect(s.indexOf('[surface]'), '顺序跟着档位走，读的人才知道谁先谁后').toBeLessThan(s.indexOf('[cdp]'));
+  });
+
+  it('S-WHY-2: 只有一档时不加分隔符，也不许丢掉 [tier] 标记', () => {
+    expect(joinShotFailures([{ tier: 'cdp', reason: 'cdp-unavailable' }])).toBe('[cdp] cdp-unavailable');
+  });
+
+  it('S-WHY-3: 空 reason / 坏形状不许混进回执（"两句理由"不能有一句是空的）', () => {
+    expect(joinShotFailures([{ tier: 'surface', reason: '' }, { tier: 'cdp', reason: 'boom' }])).toBe('[cdp] boom');
+    expect(joinShotFailures([null, undefined, '裸字符串'])).toBe('screenshot failed — no tier produced a frame');
+    expect(joinShotFailures(undefined)).toBe('screenshot failed — no tier produced a frame');
   });
 });

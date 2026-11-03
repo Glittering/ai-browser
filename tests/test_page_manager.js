@@ -678,7 +678,7 @@ describe('截图取帧：档位由「它是不是屏幕上那一张」决定', (
     expect(pm._isCoveredByOtherTab(shown), '屏幕上那一张不算').toBe(false);
 
     pm.window.isVisible = () => false;                       // 窗口隐藏：没有兄弟视图压在上面
-    expect(pm._isCoveredByOtherTab(back), '隐藏窗口时维持旧路径（CDP 优先，background_ws B1/B3 靠这个）').toBe(false);
+    expect(pm._isCoveredByOtherTab(back), '隐藏时确实"没有被兄弟盖住"——但这不再等于档位顺序（见下面那一组）').toBe(false);
     pm.window.isVisible = () => true;
     pm.window.isMinimized = () => true;
     expect(pm._isCoveredByOtherTab(back), '最小化同理').toBe(false);
@@ -724,6 +724,185 @@ describe('截图取帧：档位由「它是不是屏幕上那一张」决定', (
     expect(waited, '整发只花两个附属预算（这里 300ms + 探测 3s）；旧顺序还要再加 10s 指标空等').toBeLessThan(4000);
     expect(r.width, '布局指标问不到就用视图边界 —— 尺寸本来就有几何答案').toBe(b.width);
     expect(r.password_probe, '探测排不通就如实标 skipped').toBe('skipped');
+  });
+});
+
+// 2026-11-03 的探针实测把分水岭的尺子换了一次。上面 PM-28 那条判据（"有没有兄弟视图
+// 压在它上面"）在**窗口不显示**时算出"没被盖住"，于是隐藏窗口里的每一发截图都先排 CDP
+// 那条 20s 的队 —— 而那一格只有正在重绘的页面答得出截图，静态页一直等到 deadline，
+// surface 档几十毫秒就给帧（甚至 2ms 就如实说"这一帧不存在"）。现场是 agent 常在隐藏
+// 窗口里干活，所以最该快的那一格长期走的是最慢的那条路。
+//
+// 同时修归因：旧实现两档往同一个 lastError 里写，后一档把前一档覆盖掉，于是明明白等了
+// CDP 的 20 秒，回执只剩一句"这一页从来没画过"——把人去修错的地方。
+describe('截图取帧：窗口不在屏幕上时 surface 先答，两档的理由都进回执', () => {
+  const frame = (px) => ({
+    isEmpty: () => false,
+    toPNG: () => Buffer.from('PNGFRAME'),
+    toJPEG: () => Buffer.from('JPEGRAME'),
+    getSize: () => px,
+  });
+  const noFrame = { isEmpty: () => true, toPNG: () => Buffer.from('') };
+  // 接单永远不回的 CDP（被盖住 / 不重绘的页面实测就是这个形状）。
+  // 只记 Page.captureScreenshot：图到手之后探密码框那次命令允许试（它有短预算），
+  // 它不是"取帧"，混进来就把档位顺序量歪了。
+  const isShot = (m) => m === 'Page.captureScreenshot';
+  const cdpHang = (wc, order) => {
+    wc.debugger.sendCommand = (method) => {
+      if (isShot(method)) order.push('cdp');
+      return new Promise(() => {});
+    };
+  };
+
+  // 隐藏窗口里的两个形状：后台那一页、以及"就是 activeTab 但窗口没显示"那一页
+  //（旧判据把后者算成"屏幕上那一张"，于是让它去排 CDP —— 屏幕上根本没有这一帧）。
+  function hiddenTabs() {
+    const front = pm.newTab('https://front.example/');
+    const back = pm.newTab('https://back.example/', { show: false });
+    pm.setActive(front);
+    pm.window.isVisible = () => false;
+    return { front, back };
+  }
+
+  it('PM-60 窗口隐藏 + 后台标签页：surface 档先答，一次 CDP 截图命令都不发', async () => {
+    const { back } = hiddenTabs();
+    const view = pm.tabs.get(back);
+    const wc = view.webContents;
+    const b = view.getBounds();
+    const order = [];
+    wc.capturePage = () => { order.push('surface'); return Promise.resolve(frame({ width: b.width * 2, height: b.height * 2 })); };
+    cdpHang(wc, order);
+
+    const t0 = Date.now();
+    const r = await pm.screenshot(back, {});
+    const waited = Date.now() - t0;
+
+    expect(r.ok, r.error).toBe(true);
+    expect(order, '旧顺序这里先排 CDP，20s 之后才想起 surface').toEqual(['surface']);
+    expect(r.source).toBe('surface');
+    expect(waited, '这一档几十毫秒的事，等满 20s 就是白烧').toBeLessThan(5000);
+    expect(r.device_pixel_ratio, 'dpr 由位图宽/视图宽算，不必去问主线程').toBe(2);
+  });
+
+  it('PM-61 窗口隐藏 + activeTab：也不算「屏幕上这一帧」，仍然 surface 优先', async () => {
+    const { front } = hiddenTabs();
+    const view = pm.tabs.get(front);
+    const wc = view.webContents;
+    const b = view.getBounds();
+    const order = [];
+    wc.capturePage = () => { order.push('surface'); return Promise.resolve(frame({ width: b.width, height: b.height })); };
+    cdpHang(wc, order);
+
+    const r = await pm.screenshot(front, {});
+    expect(r.ok, r.error).toBe(true);
+    expect(order).toEqual(['surface']);
+    expect(r.source).toBe('surface');
+  });
+
+  it('PM-62 两档都给不到位图：两句理由都在回执里，前一档不再被覆盖', async () => {
+    const front = pm.newTab('https://front.example/');
+    const back = pm.newTab('https://back.example/', { show: false });
+    pm.setActive(front);                       // 窗口可见 → back 是被盖住的那一张，surface 先
+    const view = pm.tabs.get(back);
+    const wc = view.webContents;
+    const order = [];
+    wc.capturePage = () => { order.push('surface'); return Promise.resolve(noFrame); };
+    // CDP 这一档摆成"到 deadline"的形状（20s 不在单测里真等）：__deadline 是
+    // deadline.js 的标记，_shotFromCdp 靠它区分超时和别的错误。
+    const boom = Object.assign(new Error('captureScreenshot timeout after 20000ms'), { __deadline: true });
+    wc.debugger.sendCommand = (method) => {
+      if (isShot(method)) order.push('cdp');
+      return Promise.reject(boom);
+    };
+
+    const r = await pm.screenshot(back, {});
+    expect(r.ok).toBe(false);
+    expect(order).toEqual(['surface', 'cdp']);
+    expect(r.tiers_tried).toEqual(['surface', 'cdp']);
+    expect(r.error).toContain('no-surface-frame');
+    expect(r.error, '白等的那 20 秒要在回执里说清楚，不然调用方只会去查"页面为什么没画"')
+      .toContain('captureScreenshot timeout after 20000ms');
+    expect(r.error).toContain('[surface]');
+    expect(r.error).toContain('[cdp]');
+  });
+});
+
+// 对话框盯梢（2026-11-03）。这一条不是顺手补的：把截图档位改成 surface 优先之后，
+// background_ws 的 B2 当场整段卡死 —— 一个 alert 冻住渲染器，之后 get_tree、navigate、
+// 连最小化全都超时。查下去才发现旧实现"发一条 Page.enable 不等回执、当场记成已盯梢"，
+// 而 attach 那一刻往往正是渲染器不接单的时候；以前是**截图的 CDP 档又发了一次 enable**
+// 才让事件监听真的装上。也就是说 alert 能不能被解开，取决于这条 tab 恰好有没有被
+// CDP 截过图。修法是"回执成功才算装上"，并且在文档就绪、动作之前各补一次。
+describe('对话框盯梢：Page.enable 要拿到回执才算装上', () => {
+  const armEnv = 'AI_BROWSER_DIALOG_ARM_MS';
+  let prevArm;
+
+  beforeEach(() => {
+    prevArm = process.env[armEnv];
+    process.env[armEnv] = '200';        // 落空的那一次不该让单测真等 1.5s
+  });
+  afterEach(() => {
+    if (prevArm === undefined) delete process.env[armEnv];
+    else process.env[armEnv] = prevArm;
+  });
+
+  // 让 Page.enable 前 N 次"发出去没人应答"（渲染器还没就绪的形状），之后正常。
+  function enableFailsFirst(wc, times) {
+    let tries = 0;
+    const bys = [];
+    wc.debugger.sendCommand = (method) => {
+      bys.push(method);
+      if (method === 'Page.enable' && tries < times) {
+        tries++;
+        return new Promise(() => {});
+      }
+      return Promise.resolve({});
+    };
+    return bys;
+  }
+
+  it('PM-63 enable 落空时不记账；下一次机会补上回执才算盯住', async () => {
+    const tid = pm.newTab('https://a.example/');
+    const view = pm.tabs.get(tid);
+    pm._dialogWatched.delete(tid);
+    pm._dialogWatchArming.delete(tid);
+    enableFailsFirst(view.webContents, 1);
+
+    expect(await pm._armDialogWatch(tid, view), '那条 enable 没人应答 = 没有盯梢').toBe(false);
+    expect(pm._dialogWatched.has(tid), '落空还记账，就等于这条 tab 永远不再被试').toBe(false);
+
+    // 渲染器就绪了（后面的命令正常回执）—— 必须能补上
+    view.webContents.debugger.sendCommand = () => Promise.resolve({});
+    expect(await pm._armDialogWatch(tid, view)).toBe(true);
+    expect(pm._dialogWatched.has(tid)).toBe(true);
+    expect(await pm._armDialogWatch(tid, view), '已盯住就不该再发一遍 enable').toBe(true);
+  });
+
+  it('PM-64 动作之前把盯梢补上：没装上的 tab 一点 alert 就永久冻死', async () => {
+    const tid = pm.newTab('https://a.example/');
+    const view = pm.tabs.get(tid);
+    pm._dialogWatched.delete(tid);
+    pm._dialogWatchArming.delete(tid);
+    const bys = enableFailsFirst(view.webContents, 0);
+
+    await pm.executeAction('click', { role: 'button', name: '按钮' }, { tab: tid }, tid)
+      .catch(() => null);   // 动作本身成不成不重要，这里钉的是"投递之前有没有装好监听"
+
+    expect(bys.filter((m) => m === 'Page.enable').length, '动作前必须确认过盯梢').toBeGreaterThanOrEqual(1);
+    expect(pm._dialogWatched.has(tid)).toBe(true);
+  });
+
+  it('PM-65 没挂上调试器不等于已盯梢（attach 失败不能记成成功）', async () => {
+    const tid = pm.newTab('https://a.example/');
+    const view = pm.tabs.get(tid);
+    pm._cdpTabs.delete(tid);
+    pm._dialogWatched.delete(tid);
+    pm._dialogWatchArming.delete(tid);
+    view.webContents.debugger.attach = () => { throw new Error('Debugger is already attached'); };
+    view.webContents.debugger.sendCommand = () => Promise.resolve({});
+
+    expect(await pm._armDialogWatch(tid, view), 'attach 都没成，域肯定没启用').toBe(false);
+    expect(pm._dialogWatched.has(tid)).toBe(false);
   });
 });
 

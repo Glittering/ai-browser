@@ -17,7 +17,7 @@ const MAX_DATA_URL_CHARS = 512 * 1024;
 //              **不进渲染进程主线程**。
 //   cdp     —— CDP Page.captureScreenshot(fromSurface:true)：像素同样是 surface，
 //              但这条命令本身要渲染进程主线程接单排队。
-//   auto    —— 能走 surface 就走，拿不到位图再落 cdp（默认）。
+//   auto    —— 按「屏幕上现在是不是这一帧」排两档顺序，另一档兜底（默认，见 pickShotTiers）。
 // 事故现场：百度、dumate 的 tab 上 `ui.screenshot` 各报
 // `captureScreenshot timeout after 20000ms —— the page main thread is likely blocked`，
 // 而屏幕上明明是一张正常画面：合成器攥着帧，只有"命令排队"这一步被脚本占死了。
@@ -137,6 +137,56 @@ function canUseSurface(opts) {
 }
 
 /**
+ * auto 档的顺序由"屏幕上现在是不是这一帧"决定，不是由"有没有兄弟压在它上面"决定。
+ *
+ * 分水岭换过一次（2026-11-03 探针实测）：旧判据在**窗口不在屏幕上**时（hide /
+ * minimize）算出"没被盖住"，于是让后台页先去排 CDP 那条 20s 的队。而那一格实测
+ * surface 档 57–107ms 就能给出视图自己的合成帧，CDP 只有**正在重绘**的页面才答
+ * （1.1–2.1s），静态页一直等到 deadline。也就是说旧判据在最该快的那一格里选了慢的。
+ *
+ * 只有**确定**屏幕上显示的就是这一页时，CDP 才优先：那一帧正在被合成，它是"用户
+ * 此刻看到的画面"的最准来源，还给得出 clip/fullPage 的坐标语义。
+ * 可见性问不到（null）也按 surface 先 —— 这里和布尔判据不同，不是"猜哪边更快"：
+ * surface 档要么几十毫秒给帧、要么两三毫秒如实说没帧，两种都比先排 20s 的队便宜，
+ * 而 CDP 作为后一档一直都在，没丢掉任何一条路。
+ *
+ * @param {{source?:string, windowOnScreen?:boolean|null, isActive?:boolean}} st
+ * @returns {string[]} 'surface' / 'cdp' 的顺序
+ */
+function pickShotTiers(st) {
+  const s = st && typeof st === 'object' ? st : {};
+  // 显式 source 就是点名单一档，不兜底：调用方要"只有 surface"或"只有 CDP"时，
+  // 替他换档等于给一张他没要的图。
+  if (s.source === 'surface') return ['surface'];
+  if (s.source === 'cdp') return ['cdp'];
+  return s.windowOnScreen === true && s.isActive === true ? ['cdp', 'surface'] : ['surface', 'cdp'];
+}
+
+/**
+ * 把每一档的失败原因拼成一句回执。
+ *
+ * 修的是"只有最后一档的原因能活下来"：旧实现每档都往同一个 `lastError` 里写，
+ * 于是隐藏窗口里那一发（surface 2ms 没帧 + CDP 20s 超时）只回一句"这一页从来没画过"，
+ * 真凶那句 `captureScreenshot timeout after 20000ms` 被覆盖掉，调用方既看不到白等的
+ * 20 秒，也分不清"根本没帧"和"有帧但取不到"。
+ *
+ * 每一档都带 `[tier]` 前缀：单档时前缀只是把话说明白，多档时它区分得开谁说的。
+ *
+ * @param {Array<{tier:string, reason:string}>} failures
+ * @returns {string}
+ */
+function joinShotFailures(failures) {
+  const list = [];
+  for (const f of Array.isArray(failures) ? failures : []) {
+    if (!f || typeof f !== 'object') continue;
+    const msg = String(f.reason || '').trim();
+    if (msg) list.push(`[${f.tier || 'tier'}] ${msg}`);
+  }
+  if (!list.length) return 'screenshot failed — no tier produced a frame';
+  return list.join(' | ');
+}
+
+/**
  * surface 档的尺寸回执：capturePage 给的是**设备像素**，而调用方按 CSS 像素
  * 传坐标、也按 CSS 像素读回执（CDP 档的 meta 就是 CSS 像素）。视图的 bounds
  * 恰等于这一页的视口（BrowserView 的边界就是它的可视区），所以：
@@ -198,6 +248,8 @@ module.exports = {
   MAX_DATA_URL_CHARS,
   normalizeScreenshotOpts,
   canUseSurface,
+  pickShotTiers,
+  joinShotFailures,
   surfaceMeta,
   describeShot,
 };

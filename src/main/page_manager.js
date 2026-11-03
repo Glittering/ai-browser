@@ -292,8 +292,11 @@ class PageManager {
     // auto, at}。回执里带上它，agent 才知道"刚才那个动作中间弹了个确认框，
     // 我替你按了确定"—— 否则它会以为点击之后什么都没发生。
     this._lastDialog = new Map();
-    // 已挂上"对话框监听"的 tab（每个 tab 一次；Page.enable 是幂等的）
+    // 已经**确认装上**对话框盯梢（Page.enable 有回执）的 tab —— 见 _armDialogWatch：
+    // 发出去 ≠ 装上了，只有回执成功才记账，否则这条 tab 永远没有第二次机会。
     this._dialogWatched = new Set();
+    // 正在补装 Page.enable 的 tab（同一时刻一条 tab 只发一次，避免导航连发时排队一堆）
+    this._dialogWatchArming = new Set();
     // tabId -> 当前**仍然打开**的对话框（manual 策略下会长期存在）
     this._openDialogs = new Map();
     this._axDiffCache = new Map();  // tabId -> lite interactive snapshot (get_tree {mode:'diff'})
@@ -1635,6 +1638,24 @@ class PageManager {
   // surface 档秒级应答。第②格（屏幕上 + 主线程占死）没有秒级答案，改善的是"不再谎称
   // 截不到"（旧的 20s deadline 比页面松手还慢，等于永远拿不到图）和"等待有上界"。
   //
+  // # 分水岭的尺子换过一次（2026-11-03 探针实测，隐藏窗口那一格）
+  //
+  // 上面那四格都在**窗口可见**时测的，所以"它是不是屏幕上那一张"当时等价于"窗口可见
+  // 且不是 activeTab"。窗口不显示时（agent 常在的状态）这条尺子量不出来：那时根本没有
+  // 兄弟视图压在它上面，于是旧判据算成"没被盖住"→ CDP 优先。实测这一格错了：
+  //
+  //   窗口隐藏 + 正在重绘的页  ：capturePage 57–107ms ✓   CDP 1.1–2.1s ✓
+  //   窗口隐藏 + 静态页        ：capturePage ✓            CDP 一直等到 20s deadline ✗
+  //   窗口隐藏 + 从没激活过的视图：capturePage 2–3ms 空图   CDP 20s ✗（这一帧真的不存在）
+  //
+  // 也就是：窗口不在屏幕上时 CDP 只有在页面自己正在重绘时才答得出，而 surface 档几十毫秒
+  // 就给帧 —— 旧顺序在最该快的那一格里选了慢的那一档。所以现在的判据是
+  // "屏幕上现在是不是这一帧"（screenshotOpts.pickShotTiers）：**确定**是（窗口可见 +
+  // 就是 activeTab）才让 CDP 优先，其余一律 surface 先、CDP 兜。
+  //
+  // 失败归因同样改了：两档的理由都进回执（旧实现后一档覆盖前一档，隐藏窗口那一发明明
+  // 白等了 CDP 的 20s，回执却只说"这一页从来没画过"）。
+  //
   // clip / fullPage / webp 只能由 CDP 应答（要视口外的布局、文档坐标或额外编码器），
   // 见 screenshot_opts.canUseSurface —— 那一发就真的会等，这是语义要求不是缺陷。
   async screenshot(tabId, opts = {}) {
@@ -1646,31 +1667,37 @@ class PageManager {
     if (!norm.ok) return { ok: false, error: norm.error, tab: tid };
     const o = norm.opts;
 
-    // auto 的档位顺序由 _isCoveredByOtherTab 决定；显式 source 就是点名单一档
+    // auto 的档位顺序由「屏幕上现在是不是这一帧」决定；显式 source 就是点名单一档
     // （不兜底：调用方要"只有 surface"或"只有 CDP"时，替他换档等于给一张他没要的图）。
-    const covered = this._isCoveredByOtherTab(tid);
-    const tiers = o.source === 'surface' ? ['surface']
-      : o.source === 'cdp' ? ['cdp']
-        : (covered ? ['surface', 'cdp'] : ['cdp', 'surface']);
+    const tiers = screenshotOpts.pickShotTiers({
+      source: o.source,
+      windowOnScreen: this._windowOnScreen(),
+      isActive: tid === this.activeTab,
+    });
 
+    // 每一档的失败原因都留着（见 screenshotOpts.joinShotFailures）。旧实现只有一个
+    // lastError，后一档把前一档那句**覆盖**掉：隐藏窗口里那一发（surface 2ms 没帧 +
+    // CDP 20s 超时）只回一句"这一页从来没画过"，而真正花掉 20 秒的那句
+    // captureScreenshot timeout 不见了 —— 调用方既看不出钱花在哪，也分不清"根本没有帧"
+    // 和"有帧但这一档取不到"。归因错会引着人去修错的东西。
+    const failures = [];
     let frame = null;
-    let lastError = null;
     for (const tier of tiers) {
       if (tier === 'surface') {
         if (!screenshotOpts.canUseSurface(o)) {
-          lastError = 'no-surface-frame — fullPage/clip/webp cannot be answered from the composited surface';
+          failures.push({ tier: 'surface', reason: 'cannot answer this request — fullPage/clip/webp need the render process' });
           continue;
         }
         frame = await this._shotFromSurface(view, o);
         if (frame) break;
-        lastError = 'no-surface-frame — this view has no readable surface (it has never painted, or the window is gone)';
+        failures.push({ tier: 'surface', reason: 'no-surface-frame — this view has no readable surface (it has never painted, or the window is gone)' });
         continue;
       }
       const cdp = await this._shotFromCdp(tid, view, o);
       if (!cdp.error) { frame = cdp; break; }
-      lastError = cdp.error;
+      failures.push({ tier: 'cdp', reason: cdp.error });
     }
-    if (!frame) return { ok: false, tab: tid, error: lastError || 'screenshot failed' };
+    if (!frame) return { ok: false, tab: tid, error: screenshotOpts.joinShotFailures(failures), tiers_tried: tiers };
 
     const imgData = frame.data;
 
@@ -1866,10 +1893,11 @@ class PageManager {
       return { source: 'cdp', data: imgData, meta };
     } catch (e) {
       if (e && e.__deadline) {
-        // 走到这里说明这一页**是**屏幕上那一张（被盖住的页面由 surface 档先答，见
-        // _isCoveredByOtherTab）。那种情况下等不到帧才是"主线程被页面占着"。
-        // 旧文案对所有失败都断言这一句，而现场其实是被兄弟视图盖住 —— 误诊过一次。
-        return { error: e.message + ' — the page main thread is likely blocked (this tab is the one on screen; covered tabs go through the surface tier)' };
+        // 只陈述这一档自己的事实：**这条命令没被渲染进程接单**。至于"为什么"，要看
+        // 另一档说了什么 —— 所以这句不再自带归因（旧文案对所有失败都断言"主线程被占着"，
+        // 而现场其实是被兄弟视图盖住，误诊过一次）。两档的理由由 screenshot() 拼进同一句
+        // 回执（screenshotOpts.joinShotFailures），调用方看到的是一个整体。
+        return { error: e.message + ' — the render process never took this screenshot command' };
       }
       return { error: e.message };
     }
@@ -1902,25 +1930,38 @@ class PageManager {
   }
 
   /**
-   * 这个标签页现在**不是**屏幕上的那一张（被同窗口另一张视图整个盖住）。
+   * 窗口此刻在不在屏幕上：可见、且没最小化。
    *
-   * 这是取帧档位的分水岭，判据全部来自实测（见 screenshot() 上面那张表）：
-   * 被盖住的视图 CDP 永远等不到帧，capturePage 却能立刻给出它自己的活帧。
-   *
-   * 窗口不在屏幕上的时候（hide / minimize）**不算**被盖住：那时没有"兄弟视图压在
-   * 它上面"这回事，而实测这种状态下 CDP 照样答得出来（e2e/background_ws 的 B1/B3
-   * 就是这么过的），所以维持旧的 CDP 优先，不改无头路径的行为。
-   * 问不到窗口可见性也按"没被盖住"办 —— 判据不确定时保持既有路径，不搞意外。
+   * 三值 —— `null` 是"问不到"（没有窗口对象、或 isVisible 调用抛错）。取档位的
+   * 那一档把 null 和 false 一样对待（见 screenshotOpts.pickShotTiers 里的理由：
+   * surface 先答最坏也只是多花几毫秒，CDP 仍然是后手）。
    */
-  _isCoveredByOtherTab(tid) {
-    if (!this.window || tid === null || tid === undefined) return false;
-    if (tid === this.activeTab) return false;
+  _windowOnScreen() {
+    if (!this.window) return null;
     let visible = null;
     try {
       if (typeof this.window.isVisible === 'function') visible = !!this.window.isVisible();
       if (typeof this.window.isMinimized === 'function' && this.window.isMinimized()) visible = false;
     } catch (_) { visible = null; }
-    return visible === true;
+    return visible;
+  }
+
+  /**
+   * 这个标签页现在**不是**屏幕上的那一张（被同窗口另一张视图整个盖住）。
+   *
+   * 判据全部来自实测（见 screenshot() 上面那张表）：被盖住的视图 CDP 永远等不到帧，
+   * capturePage 却能立刻给出它自己的活帧。
+   *
+   * 注意它**不是**取帧档位的那把尺 —— 档位问的是"屏幕上现在是不是这一帧"
+   * （screenshotOpts.pickShotTiers）。窗口隐藏时这一条返回 false（那时没有"兄弟视图
+   * 压在它上面"这回事），但那一格的档位同样不该先排 CDP：实测那种状态下只有正在重绘
+   * 的页面答得出截图，静态页一直等到 20s deadline，而 surface 档 57–107ms 就给帧。
+   * 问不到窗口可见性也按"没被盖住"办 —— 判据不确定时保持既有路径，不搞意外。
+   */
+  _isCoveredByOtherTab(tid) {
+    if (tid === null || tid === undefined) return false;
+    if (tid === this.activeTab) return false;
+    return this._windowOnScreen() === true;
   }
 
   // AX probe read layer (P0). Additive — the default getTree path is untouched.
@@ -2427,6 +2468,12 @@ class PageManager {
     // 本次动作的起始时刻：用来判断"有没有对话框是在这一次动作里被应答的"，
     // 并把结果写进回执（否则 agent 不知道点击中间弹过确认框）。
     const startedAt = Date.now();
+    // 动作之前确认"对话框盯梢"是装着的。为什么在这儿：alert/confirm 十有八九由这一下
+    // 点击触发，而盯梢依赖 Page 域**真的启用了**（事件才广播得出来）。没装上的话这一页
+    // 会被原生 sheet 永久冻住，之后每条命令都以超时收场 —— 那才是 agent 眼里的"浏览器
+    // 卡死"。已装上的 tab 这里只是一次集合查询；没装上的最多等 1.5s，而渲染器连一条
+    // enable 都接不了单时，这个动作本来也做不成。
+    if (!this._dialogWatched.has(tid)) await this._armDialogWatch(tid, this._getView(tid));
     // 动作前先拍一张。为什么拍在 withDeadline 外面：deadline 只应该盖住动作
     // 本身，探针有它自己的 1.5s 上限，混进同一个预算会让"动作超时"和
     // "探针慢"两种完全不同的故障共用一个错误码。
@@ -4611,6 +4658,9 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     // （以前只打一行日志，用户看到的是永久白屏）。
     this._attachPaintHook(tabId, view);
     this._attachCrashRecovery(tabId, view);
+    // 对话框盯梢要"渲染器就绪"那一刻才补得上（attach 时往往还太早）—— 钩子挂在
+    // dom-ready / did-navigate 上，见 _attachDialogWatchHook。
+    this._attachDialogWatchHook(tabId, view);
     return tabId;
   }
 
@@ -6072,19 +6122,82 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
   //
   // 应答走 CDP `Page.handleJavaScriptDialog`：该命令由浏览器进程处理，不需要
   // 渲染器，所以对话框阻塞页面时它照样生效。
-  _ensureDialogWatch(tabId, view) {
-    if (this._dialogWatched.has(tabId)) return;
-    this._dialogWatched.add(tabId);
-    const wc = view && view.webContents;
-    if (!wc || wc.isDestroyed()) { this._dialogWatched.delete(tabId); return; }
+  /**
+   * 给这个 tab 装上"对话框盯梢"，并且**只有确认 Page 域真的启用了才算装上**。
+   *
+   * 为什么必须确认：`Page.javascriptDialogOpening` 只在 Page 域启用之后才广播，而
+   * alert/confirm 是浏览器进程画的原生 sheet —— 它一打开就把渲染器冻住，此后任何要
+   * 排队的命令都进不去，只能由浏览器进程应答（`Page.handleJavaScriptDialog`）。
+   * 收不到事件 = 解不开 = 这条 tab 从此每条命令都超时。
+   *
+   * 旧实现是 attach 那一刻发一条 `Page.enable` **不等回执**、并且当场把 tab 记成
+   * "已盯梢"。而 attach 恰恰最常发生在导航中/渲染器还没就绪的时候（本文件好几处都
+   * 踩过：那时 Page.enable 会挂住或被拒），于是这条 tab 永远不会再试第二次。
+   * 以前 background_ws 的 B2 是绿的，靠的是截图的 CDP 档顺手又发了一次 enable ——
+   * 2026-11-03 把取帧档位改成 surface 优先之后，那层巧合没了，缺陷当场暴露：
+   * 一个 alert 把整条 tab 冻到测试结束（act 超时 → get_tree 超时 → navigate 超时 →
+   * 窗口连最小化都做不动）。
+   *
+   * 现在：回执成功才记账，失败就留给下一个时机（文档就绪、动作之前）再补。
+   * 幂等，且同一 tab 同时只发一条 enable。
+   *
+   * @returns {Promise<boolean>} 这条 tab 现在有没有被盯住
+   */
+  async _armDialogWatch(tabId, view) {
+    if (this._dialogWatched.has(tabId)) return true;
+    const v = view || this._getView(tabId);
+    if (!v || !v.webContents || v.webContents.isDestroyed()) return false;
+    if (this._dialogWatchArming.has(tabId)) return false;
+    this._dialogWatchArming.add(tabId);
     try {
-      // 只有 Page 域启用后才会收到 javascriptDialogOpening。空文档上这条命令
-      // 可能挂住，所以不 await（挂住也无害：只是这个 tab 收不到事件，动作超时
-      // 时还有 recoverBlockedTab 的兜底探测）。
-      wc.debugger.sendCommand('Page.enable').catch(() => {});
-    } catch (_e) {
-      this._dialogWatched.delete(tabId);
+      // 复用 _ensureCdp 的 attach 与域记账：它自己就规定"enable 失败要撤销记账"
+      // （2026-10-31），盯梢要的是同一份事实，不该另立一套状态。
+      const p = this._ensureCdp(tabId, v, 'Page');
+      if (!p) {
+        // 没 promise = 要么 Page 早就启用过，要么压根没挂上调试器。用域账本分清这两者，
+        // 绝不能把"没 attach"记成"已经盯住"。
+        const entry = this._cdpTabs.get(tabId);
+        const armed = !!(entry && entry.domains.has('Page'));
+        if (armed) this._dialogWatched.add(tabId);
+        return armed;
+      }
+      try {
+        await withDeadline(p, this._dialogArmBudgetMs(), 'page_enable_dialog_watch');
+      } catch (_) {
+        return false;             // 渲染器没接单：不算装上，下一个时机再补
+      }
+      this._dialogWatched.add(tabId);
+      return true;
+    } finally {
+      this._dialogWatchArming.delete(tabId);
     }
+  }
+
+  /**
+   * 导航后补装盯梢（幂等钩子）。
+   *
+   * attach 的那一刻往往是这条 tab 最不具备"命令能被接单"条件的时刻；文档就绪之后才
+   * 是该发 Page.enable 的时候。所以除了 attach 时顺手试一次，每次主文档导航完成都再
+   * 试一次 —— 已经盯住了就只有集合查一次，不发消息。
+   */
+  _attachDialogWatchHook(tabId, view) {
+    const wc = view && view.webContents;
+    if (!wc || wc.isDestroyed()) return;
+    if (!this._dialogWatchHooked) this._dialogWatchHooked = new WeakSet();
+    if (this._dialogWatchHooked.has(wc)) return;
+    this._dialogWatchHooked.add(wc);
+    const retry = () => { this._armDialogWatch(tabId, view); };
+    wc.on('dom-ready', retry);
+    wc.on('did-navigate', retry);
+    // 文档没了 = 这条 tab 的 Page 域状态没了（调试器也随之失效）—— 账本跟着清，
+    // 否则"已盯梢"变成一句没人能验证的谎。
+    wc.on('destroyed', () => { this._dialogWatched.delete(tabId); });
+  }
+
+  /** 补装盯梢时给 Page.enable 的预算（毫秒）。env 可调是为了在单测里不真的等 1.5s。 */
+  _dialogArmBudgetMs() {
+    const v = Number(process.env.AI_BROWSER_DIALOG_ARM_MS);
+    return Number.isFinite(v) && v >= 50 ? v : 1500;
   }
 
   /** 当前策略（实例字段优先，便于测试/诊断；否则读环境变量）。 */
@@ -6196,7 +6309,9 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
         wc.debugger.on('message', (_event, method, params) => this._onCdpMessage(tabId, method, params));
         // 任何 tab 一旦挂上 CDP，就顺手盯住对话框：漏掉一个 alert 会让整条 tab
         // 永久卡死（渲染器被阻塞，后续每条命令都超时）。
-        this._ensureDialogWatch(tabId, view);
+        // 不等回执：attach 常常正赶上渲染器没就绪，那次 enable 多半落空 ——
+        // 落空不算装上，由 dom-ready / did-navigate / 动作之前各补一次（见 _armDialogWatch）。
+        this._armDialogWatch(tabId, view);
       }
       const entry = this._cdpTabs.get(tabId);
       if (!entry.domains.has(domain)) {
@@ -6331,7 +6446,9 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
         const entry = { wc, domains: new Set() };
         this._cdpTabs.set(tabId, entry);
         wc.debugger.on('message', (_event, method, params) => this._onCdpMessage(tabId, method, params));
-        this._ensureDialogWatch(tabId, view);
+        // 不等回执：attach 常常正赶上渲染器没就绪，那次 enable 多半落空 ——
+        // 落空不算装上，由 dom-ready / did-navigate / 动作之前各补一次（见 _armDialogWatch）。
+        this._armDialogWatch(tabId, view);
       }
       let locale = '';
       try { locale = app.getLocale(); } catch (_) { /* app 未就绪：Accept-Language 走内核默认 */ }
@@ -6454,7 +6571,7 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
 
   _onCdpMessage(tabId, method, params) {
     // 浏览器级对话框：**必须在最前面处理**，且不能受任何订阅条件限制 ——
-    // 它决定这条 tab 会不会被永久冻结（见 _ensureDialogWatch 注释）。
+    // 它决定这条 tab 会不会被永久冻结（见 _armDialogWatch 注释）。
     if (method === 'Page.javascriptDialogOpening') {
       this._handleDialogOpening(tabId, params).catch(() => {});
       return;

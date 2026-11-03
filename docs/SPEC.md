@@ -318,14 +318,24 @@ blank-with-dom / view-dead / no-frame`；`blank-*` 与 `view-dead` 算缺陷（�
 
 于是规则是：
 
-1. **档位由「它是不是屏幕上那一张」决定**（`_isCoveredByOtherTab`：窗口可见 且 不是
-   activeTab）：被盖住 → `surface` 优先、CDP 兜底；否则 CDP 优先、surface 兜底。
-   问不到窗口可见性就维持 CDP 优先（无头/隐藏窗口路径行为不变，`e2e/background_ws` 钉着）。
+1. **档位由「屏幕上现在是不是这一帧」决定**，判据是纯函数 `screenshot_opts.pickShotTiers`：
+   `windowOnScreen === true` **且** 它是 `activeTab` → CDP 优先、surface 兜底；**其余全部
+   surface 优先**（被盖住、窗口隐藏、最小化、可见性问不到）。
+   分水岭的尺子换过一次（2026-11-03 隐藏窗口那一格实测）：旧判据 `_isCoveredByOtherTab`
+   把"窗口不在屏幕上"算成"没被盖住"，于是隐藏时先去排 CDP 那条 20s 的队，而那一格
+   surface 57–107ms 就给出视图自己的合成帧，CDP 只有**正在重绘**的页面答得出来
+   （1.1–2.1s），静态页一直等到 deadline —— 旧判据在最该快的那一格里选了慢的。
+   可见性问不到（返回 `null`）按"不确定"办、走 surface：surface 两种情况都只花几毫秒，
+   CDP 还留在第二档兜底，代价不对称。
 2. **`clip` / `fullPage` / `webp` 只能由 CDP 应答**（要视口外的布局、文档坐标或额外编码器），
    见 `screenshot_opts.canUseSurface` —— 那一发就真的会继续等，这是语义要求不是缺陷。
 3. **点名单一档不许偷偷换档**：`source=surface` 拿不到位图就如实报 `no-surface-frame`，
    `source=cdp` 等不到帧就报超时。换档等于给调用方一张他没要的图。回执带 `source` 字段。
-4. **附属请求不许把已经到手的帧拖成挂住**：探密码框 / 读 dpr 的那次 `evaluate` 和
+4. **两档都失败时，每一档的理由都要进回执**（`joinShotFailures` + `tiers_tried`）：
+   旧实现两档往同一个 `lastError` 里写，后一档把前一档覆盖掉，那一发（surface 2ms 没帧 +
+   CDP 20s 超时）只剩一句"这一页从来没画过"，调用方既看不到白等的 20 秒，也分不清
+   "根本没帧"和"有帧但取不到"。现在回 `[surface] … | [cdp] …`，两个 token 都保留。
+5. **附属请求不许把已经到手的帧拖成挂住**：探密码框 / 读 dpr 的那次 `evaluate` 和
    `Page.getLayoutMetrics` 都要排主线程的队，所以两者都有短预算（1.5s / 3s，
    `AI_BROWSER_SURFACE_SHOT_MS`、`AI_BROWSER_SHOT_METRICS_MS` 可调），并且**放在截图之后**。
    探不到就如实标 `password_probe=skipped` + "这一帧可能含已输入的密码"，尺寸/dpr 改用
@@ -831,24 +841,18 @@ fixture：6 个标签页 —— 1 个前台静态 + 1 个后台静态 + 4 个后
   如实报 `input not verified`（append 语义 + 并发写本来就互相踩）。不同标签页之间
   完全并行，这一条有 `npm run multiagent` 钉住。
 - **标签页都是有表面的**：开 50 个标签页的显存/合成开销和 Chrome 同量级，不是"免费"。
-- **窗口隐藏时，两档谁先谁后是反的**（2026-11-03 逐档单点实测）。旧条目写的是"隐藏时
-  `capturePage()` 返回空、截图走 CDP"，实测**恰好相反**：隐藏窗口里 `capturePage()` 57–107ms
-  就给出那张视图的表面，而 CDP `Page.captureScreenshot` 要等一次真正的产帧 —— 只有**会自己重画**
-  的页面（busy 定时器）在 1.1–2.1s 内答得出来，静态页一律等到 20s deadline。
-  `_isCoveredByOtherTab` 把"窗口不在屏幕上"归成"没被盖住"，于是隐藏窗口里 auto 先试 CDP，
-  白等 20s 再落 surface。
 - **从没被顶到人眼前、也从没重画过的后台页，在隐藏窗口里"谁先问"决定成败**（2026-11-03
   连发同一档两次量出来的）：把 `ui.screenshot {source:'surface'}` 当作那一页的**第一个**取帧请求时，
   它 3ms 就报 `no-surface-frame`，再问第二次还是 2ms 报同一句（不是迟到，是那一帧根本不存在），
   `source:'cdp'` 等满 20s；可同一页紧接着问一次 `ui.paint_check`，回执是
   `verdict:"ok"、98% white、33 colours` —— 自检拿到位图了。反过来先跑自检、再截图，surface 就
   57–107ms 成功。**窗口一可见这一格整个消失**：同一形态 surface 65–69ms、cdp 1.4s，两档都有帧。
-  机制没证明（推测是自检那发取帧把合成器叫醒了），但现象可复现，所以记下两件事：
-  ① 隐藏窗口里"后台页截不到图"不是页面坏了，是那一帧还没人叫过它；
-  ② auto 档在这种情况下**先白等 20s CDP**，然后只把 surface 那句错交回调用方，
-     第一档"captureScreenshot timeout after 20000ms"被 `lastError` 覆盖掉 —— 归因与档位顺序待修。
+  机制没证明（推测是自检那发取帧把合成器叫醒了），但现象可复现，所以记下：
+  隐藏窗口里"后台页截不到图"不是页面坏了，是那一帧还没人叫过它。
+  这一格**auto 档仍然会落 CDP**（surface 先 3ms 认输，CDP 兜底拿帧），只是不再先白等 20s；
+  `e2e/background_ws` B3 因此钉的是"整发不许超过 8s"而不是"必须回 surface"。
 
-回归：`npm run multiagent`（80 断言）、`npm run background`（37 断言），两个都在 `e2e:all` 里。
+回归：`npm run multiagent`（80 断言）、`npm run background`（40 断言），两个都在 `e2e:all` 里。
 
 ## 下载：显示还是存下来（"点证书下载卡在正在打开…"）
 
@@ -979,6 +983,14 @@ sheet**，因此它既不在语义树里，也不受页面点击控制；**而�
   对话框保持打开，`ui.list_tabs` 的该 tab 上出现 `dialog:{type,message}`，由人点。
 - 回执：动作期间被应答的对话框会写进 `browse_act` 结果的 `dialog:{type,message,accept,auto}`，
   否则 agent 不知道"点击中间弹过确认框、被替它按了确定"。
+- **盯梢要拿到回执才算装上**（2026-11-03）：`Page.javascriptDialogOpening` 只在 CDP
+  真的应答过 `Page.enable` **之后**才广播。旧实现 attach 时把 `Page.enable` 发出去就
+  不 await，并且无论内核有没有回话都把这条 tab 记成"已盯梢" —— 而那条 enable 常常正好
+  落在渲染器接不了单的时刻，于是它其实没生效。alert 路径之所以看起来还是通的，是因为
+  截图的 CDP 档**顺带**又发了一次 enable，纯属运气。现在 `_armDialogWatch` 等 enable 的
+  回执（预算 `AI_BROWSER_DIALOG_ARM_MS`，默认 1500ms）才算装上，没装上就在 `dom-ready` /
+  `did-navigate` 上重试，并且每次 `browse_act` 派发之前先问一次"这条 tab 装上了吗"；
+  没 attach 成功和"装上了"是两种状态，不共用一个集合成员。
 - 兜底：动作超时时还会主动探测一次（`PageManager.recoverBlockedTab`）—— 事件监听
   依赖 `Page.enable` 成功，漏掉时不能让那条 tab 永久卡死。
 - Electron 侧的等价物是 `will-prevent-unload`（默认不处理会**静默**拦住导航），

@@ -184,9 +184,17 @@ async function main() {
     const tree = await rpc(b, 'ui.get_tree', { tab });
     check('B1 隐藏状态下能读语义树', tree.ok && !!tree.result.tree, JSON.stringify(tree).slice(0, 120));
 
+    const shotT0 = Date.now();
     const shot = await rpc(b, 'ui.screenshot', { tab });
+    const shotMs = Date.now() - shotT0;
     const bytes = (shot.result && shot.result.data || '').length;
     check('B1 隐藏状态下截图非空（有真实合成表面）', shot.ok && bytes > 5000, bytes + ' bytes');
+    // 档位与耗时钉在一起：窗口不在屏幕上时"屏幕上这一帧"这个前提就不成立，而实测那种
+    // 状态下 CDP 只有正在重绘的页面答得出（静态页一直等到 20s deadline）。旧顺序让隐藏
+    // 窗口里的每一发截图都先排那条队 —— 结果对的情况下也要 1–2s，不对就白等 20s。
+    check('B1 隐藏状态取帧走 surface 档（不是先烧完 CDP 的 20s 再说）',
+      shot.result && shot.result.source === 'surface', `source=${shot.result && shot.result.source} ${shotMs}ms`);
+    check('B1 截图整发是秒级以内', shotMs < 5000, shotMs + 'ms');
 
     const pc = await rpc(b, 'ui.paint_check', { tab });
     check('B1 隐藏状态下自检不返回 no-frame', pc.ok && pc.result.verdict !== 'no-frame', pc.result && pc.result.verdict);
@@ -259,9 +267,16 @@ async function main() {
     check('B3 可见页没变', JSON.stringify(visible) === JSON.stringify((await rpc(b, 'ui.list_tabs', {})).result.tabs.filter((t) => t.active).map((t) => t.id)), '');
     check('B3 后台页已就绪', await waitPath(b, bgTab, '/bg3'));
 
+    const shotT3 = Date.now();
     const shot = await rpc(b, 'ui.screenshot', { tab: bgTab });
+    const shotMs3 = Date.now() - shotT3;
     check('B3 后台标签页截图非空', ((shot.result && shot.result.data) || '').length > 5000,
       ((shot.result && shot.result.data) || '').length + ' bytes');
+    // 这一格钉的是"不白烧"，不是档位：新建但还没激活过的后台视图**根本没有合成帧**
+    // （surface 档 2–3ms 就如实说没帧），于是由 CDP 兜下 —— 实测 172ms。档位允许是
+    // 两档里的任何一个，但绝不允许是先排 20s 再兜。
+    check('B3 后台标签页整发是秒级（档位可为 surface 或 cdp，但不许先烧完 CDP 的 20s）',
+      shotMs3 < 8000, `source=${shot.result && shot.result.source} ${shotMs3}ms`);
     const pc = await rpc(b, 'ui.paint_check', { tab: bgTab });
     check('B3 后台标签页自检给出结论（不是 no-frame）', pc.ok && pc.result.verdict !== 'no-frame', pc.result && pc.result.verdict);
     const click = await rpc(b, 'ui.act', { action: 'click', target: await findRef(b, bgTab, (n) => n.id === 'b' || String(n.label || '') === '按钮'), tab: bgTab });

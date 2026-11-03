@@ -47,6 +47,7 @@ const PER_TAB = [
   { field: '_lastDialog' },
   { field: '_openDialogs' },
   { field: '_dialogWatched' },
+  { field: '_dialogWatchArming' },  // 正在补装 Page.enable 的 tab；漏清 = 新 tab 直接被当成"有人在装"
   // ---- 增量 diff / ref 纪元 ----
   { field: '_axDiffCache' },
   { field: '_refTrackers' },
