@@ -139,6 +139,12 @@ const NETWORK_CAPTURE_DEFAULT = !(process.env.AI_BROWSER_NETWORK_CAPTURE === '0'
 // 实测正常路径约 120–300ms（about:blank 的 did-finish-load + 两次 CDP 命令）。
 const WINDOW_OPEN_NAV_WAIT_MS = 2000;
 
+// 风控墙的 URL 形状（验证码 / 反爬拦截 / "网络环境异常"）。命中就把**现场**记下来。
+// 为什么要有这个：2026-11-06 用四种姿势在百度上都没能复现用户报的"经常弹验证码"
+// （深链 4 发、表单键入 3 发、空 profile、真实 profile 各 1 发，全 0）。没有那一发
+// 就没法谈判据 —— 那就让它自己把现场留下，别再猜。
+const CAPTCHA_WALL_RE = /wappass\.baidu\.com|antispider|\/captcha|captcha\.|verify\.baidu\.com|\/sorry\/|challenge-platform/i;
+
 // 具名按键 → CDP Input.dispatchKeyEvent 参数。agent 用自然名字（'Delete'、
 // 'Escape'、'ArrowRight'、'a'）而不是让人去查 Windows 虚拟键码。
 // vk 用 Windows 虚拟键码（Chromium 在 macOS 上也按它解释）。
@@ -328,6 +334,9 @@ class PageManager {
     this._crashReloadAt = new Map();
     this._snapshots = new Map();    // snapshotId -> { tabId, js, value, at }（ui.snapshot 存基线）
     this._snapshotSeq = 0;
+    // tabId -> 上一次主框架导航的 URL。只为"撞上验证码墙时把上一页记下来"存在：
+    // 判据必须拿这一发对差（从哪来的、前面发了什么），只记一个验证页 URL 等于没记。
+    this._lastMainUrl = new Map();
     this.networkMonitor = new NetworkMonitor({}, { captureEnabled: NETWORK_CAPTURE_DEFAULT });
     this.canvasMonitor = new CanvasMonitor();
     this._canvasBindings = new Map(); // bindingName -> tabId（hook 回传时据此归 tab）
@@ -566,6 +575,14 @@ class PageManager {
       // 否则一个不该发事件的上下文也能把 agent 引到别的页面上。
       const tab = eventFromTab({ senderTab: self._tabIdForContents(_event.sender) });
       if (tab === null) return;
+      // 页内验证码盖层：URL 一点没变，只有 DOM 里多了一层滑块 —— 只挂导航等于永远
+      // 看不见这一类（`recent_requests` 里能看出它是哪一发触发的）。
+      if (payload && payload.event === 'captcha_appeared') {
+        const els = (payload.data && payload.data.elements) || [];
+        self._recordCaptchaWall('dom', tab, {
+          elements: (Array.isArray(els) ? els : []).slice(0, 6).map((el) => String((el && (el.text || el.tag || el.selector)) || '').slice(0, 80)),
+        });
+      }
       self._broadcast(payload.event, { ...(payload.data || {}), tab });
     });
 
@@ -835,11 +852,49 @@ class PageManager {
     return out;
   }
 
+  /**
+   * 把"撞上风控墙"的那一发原样写进错误日志（`ui.errors` / `browse_errors` 能读到）。
+   *
+   * 记什么、为什么：URL、状态码、上一页、以及**同 tab 最近 10 条请求**。风控判据从来
+   * 不是单个字段，而是"这一发之前发生过什么"（是不是从自己首页提交的、有没有正常
+   * 加载子资源、有没有连着搜好几发）。只记一个验证页 URL 等于没记。
+   *
+   * 两个入口，别只挂一个：
+   *   kind='dom' 页内盖层（preload 的 scanCaptcha 扫到，URL 不变，只看 URL 会漏）
+   *   kind='nav' 跳到验证页 / 验证 iframe（did-frame-navigate 命中 CAPTCHA_WALL_RE）
+   */
+  _recordCaptchaWall(kind, tabId, extra = {}) {
+    let url = extra.url || '';
+    let recent = [];
+    const prev = this._lastMainUrl.get(tabId) || '';
+    try {
+      if (!url) {
+        const view = this.tabs.get(tabId);
+        const wc = view && view.webContents;
+        url = (wc && !wc.isDestroyed() && wc.getURL && wc.getURL()) || '';
+      }
+      recent = this.networkMonitor.list({ tab: tabId, limit: 10 }).requests
+        .map((r) => (r.method || 'GET') + ' ' + String(r.url).slice(0, 110) + (r.status ? ' -> ' + r.status : ''));
+    } catch (_) { /* 记现场失败绝不许影响页面 */ }
+    try {
+      recordError('captcha_wall', {
+        kind,
+        tab: tabId,
+        url: String(url).slice(0, 300),
+        prev_url: String(prev).slice(0, 300),
+        ...extra,
+        recent_requests: recent,
+        hint: '风控墙现场：kind=dom 是页内盖层，kind=nav 是跳到了验证页/验证帧。看 prev_url 与 recent_requests，别只看 url',
+      });
+    } catch (_) { /* 同上 */ }
+  }
+
   _forgetTab(tabId) {
     const gid = this._tabGroup.get(tabId);
     this._tabGroup.delete(tabId);
     this._tabUsedAt.delete(tabId);
     this._pendingNavUrl.delete(tabId);
+    this._lastMainUrl.delete(tabId);
     if (!gid || gid === tabGroup.HUMAN_GROUP) return;
     // 组空了就删：留在 Map 里会让标签栏出现一个 0 页的分组，下次同名 agent
     // 重连还会复用那个组的编号/颜色，看起来像"上一轮的残留"。
@@ -4527,6 +4582,21 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     // 只认这一条，不认页内导航：SPA 发私信、发评论走的是 pushState，那时候草稿
     // 还在（或者刚变成"提交出去的内容"），跟着清等于保护从来没生效过。
     view.webContents.on('did-navigate', () => this._setDraft(tabId, false));
+    // 风控墙的导航侧记录 + "上一页"追踪（判据要拿这一发对差，见 _recordCaptchaWall）。
+    // 用 did-frame-navigate 而不是只挂 did-navigate：百度的验证经常藏在**子帧**里，
+    // 主框架 URL 一个字都不变。
+    view.webContents.on('did-frame-navigate', (_e, navUrl, httpCode, _statusText, isMainFrame) => {
+      try {
+        const u = String(navUrl || '');
+        // 只看真实的网络导航：我们自己的 loading.html 占位页把目标 URL 塞在 query 里，
+        // 拿它匹配会记一条"自己撞了自己"的假现场。
+        if (!/^https?:/i.test(u)) return;
+        if (CAPTCHA_WALL_RE.test(u)) {
+          this._recordCaptchaWall('nav', tabId, { url: u, status: httpCode, main_frame: !!isMainFrame });
+        }
+        if (isMainFrame) this._lastMainUrl.set(tabId, u);
+      } catch (_) { /* 记录不许影响导航 */ }
+    });
 
     // Intercept window.open / new-window → create new tab instead
     view.webContents.setWindowOpenHandler(({ url: urlToOpen, features }) => {

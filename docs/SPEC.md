@@ -1131,9 +1131,18 @@ check 侧套同一判断。Electron 不实现 Chrome 的 permission store，查�
 | 真实 profile 直线搜 1 条 | 0/1 | — | 不复现 |
 | 读一次树之后 `data-ai-id` 属性数 | 70（不读树是 0） | 0 | 站点可见，但只在 agent 读树之后 |
 
-结论：**"从结果页直线进"这条路本身不复现**，判据不在这条路上。下一步要抓的是
-"哪一发请求被送到了 `wappass.baidu.com`，以及它前面发生了什么"（点结果？贴吧？
-图片搜索？并行多标签？agent 连续动作？）。拿到那一发再谈判据 —— 不猜。
+结论：**"从结果页直线进"这条路本身不复现**，判据不在这条路上。所以改成让现场自己
+留下来（`_recordCaptchaWall`）：两个入口都记 —— `kind=dom` 是页内盖层（preload 的
+`scanCaptcha` 扫到，URL 一个字不变），`kind=nav` 是跳到了验证页/验证帧
+（`did-frame-navigate` 命中 `CAPTCHA_WALL_RE`，子帧也算）。每条带 `url` / `status` /
+`prev_url` / `recent_requests`（同 tab 最近 10 条）—— 判据永远在"这一发之前发生过
+什么"里，只记一个验证页 URL 等于没记。读法：
+
+```bash
+node bin/ai-browser.cjs call ui.errors '{"limit":20}'   # 找 kind=captcha_wall 的条目
+```
+
+下一步就是拿真实的一发去比 `prev_url` 与 `recent_requests`，而不是继续猜。
 
 | 变量 | 默认 | 作用 |
 |---|---|---|
