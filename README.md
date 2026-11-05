@@ -851,8 +851,20 @@ Ask the app instead of guessing:
 
 ```bash
 node bin/ai-browser.cjs call ui.server_info   # → identity: {user_agent, chrome_version, platform,
-#   platform_version, brands[], navigation_hints_bridge, override_applied_tabs[]}
+#   platform_version, brands[], brands_mode, identity_override, navigation_hints_bridge,
+#   override_applied_tabs[]}
 ```
+
+**Google sign-in has a second, separate trap** (six-arm measurement, 2026-11-05). Our UA used to be
+a *pure* `Chrome/130.0.0.0` string with `Google Chrome` in the brand list — i.e. we claimed to be
+official Chrome. Google then holds you to Chrome's browser-layer attestation (`window.chrome`'s Gaia
+bindings plus the install state), which an Electron shell cannot produce, and the sign-in page
+answers `/v3/signin/rejected?rrk=46`. The closer you impersonate, the harder the verdict. The UA now
+carries our own product token (`ai-browser/2.5.2` — Edge sends `Edg/`, Vivaldi sends `Vivaldi/`, for
+exactly this reason) and the brand list reports `Chromium` only. We *are* Chromium; that is true. Same
+machine, same account, same email-only submission: the server now continues to the password step.
+`AI_BROWSER_BRANDS=chrome` and `AI_BROWSER_IDENTITY=0` exist only to re-run either arm of that
+comparison — do not ship them. Details and the full table: `docs/SPEC.md`, "Google 登录".
 
 What is still genuinely different, and what to do about it:
 

@@ -1004,28 +1004,100 @@ sheet**，因此它既不在语义树里，也不受页面点击控制；**而�
 
 身份的**唯一来源**是 `src/shared/browser_identity.cjs`：UA 字符串、UA-CH 元数据
 （brands / platform / platformVersion / architecture）、Accept-Language 全部由
-`buildIdentity()` 按**真实运行时**算出来。规矩只有一条 —— 任何两个字段不许互相打脸。
+`buildIdentity()` 按**真实运行时**算出来。两条规矩：任何两个字段不许互相打脸；
+**不许声称自己是 Google Chrome**（UA 带自家产品 token，品牌只报 Chromium ——
+理由与六臂实测见本节末"Google 登录"）。
 
 事故（2026-11-01）：UA 曾经写死成 macOS 的 `Chrome/130`，而 `navigator.platform`
 是 Win32、`sec-ch-ua-platform` 是 Windows、WebGL 报 Windows 的 D3D11。风控看到的
 不是"这是个 Mac 浏览器"，而是"这个浏览器的 UA 被改过"—— 藏指纹的操作自己成了
 最响的指纹，表现为百度频繁弹滑块验证、Google 登录页报"此浏览器可能不安全"。
 
-三层，各补各的，缺一不可：
+四层，各补各的，缺一不可：
 
 | 层 | 走哪条 API | 覆盖什么 | 实测 |
 |---|---|---|---|
-| UA 字符串 + UA-CH 元数据 | CDP `Network.setUserAgentOverride`（带 `userAgentMetadata`） | `navigator.userAgent`、`navigator.userAgentData.*`、XHR/fetch 的 `sec-ch-ua*` | 生效（`override_applied_tabs`） |
+| UA 字符串 + UA-CH 元数据 | CDP `Network.setUserAgentOverride`（带 `userAgentMetadata`） | `navigator.userAgent`、`navigator.userAgentData.*`、XHR/fetch 的 `sec-ch-ua*` | 生效（`override_applied_tabs`）。元数据必须**给全**：`brandVersion/fullVersion/fullVersionList/architecture/bitness/platform/platformVersion/mobile/model/wow64/formFactors` 一项不缺，缺项的内核会把相应高熵头**整个不发**（`ERR:undefined` 不是"空值"，是"少一个头"） |
 | Accept-Language | 同一条 CDP 命令的 `acceptLanguage` | 请求头**和** `navigator.languages`（同一个字符串喂两处） | ⚠️ 不许带 `;q=0.9`：带了会产出 `zh;q=0.9` 这种假 BCP47 标签，且 header 叠成 `…;q=0.9;q=0.9`。首选列表只写 `zh-CN,zh`，q 值由内核补 |
 | 文档导航的 critical hints | `session.webRequest.onBeforeSendHeaders`（只在缺失时补，只挂 https/wss） | 导航请求的 `sec-ch-ua` / `-mobile` / `-platform` | **必须**在这一层补：Electron 33 的导航请求根本不发这三个头，而同页 fetch 会发。CDP 覆盖、`Emulation.setUserAgentOverride`、先 `Network.enable` 三条路都试过都无效；同机 Chrome 156 无头访问同一 echo 服务三个头齐全 |
+| 高熵 hints（按服务端授权补） | 同一出口钩子 + `onResponseStarted` 记授权（`src/shared/accept_ch.cjs`） | 被 `Accept-CH` / `Link: rel="accept-ch"` 授权过的 origin，其后续请求补 `-arch -bitness -full-version -full-version-list -model -platform-version -wow64`（**不含 `-form-factors`**：元数据给了它会发头，而页面 `getHighEntropyValues(['formFactors'])` 读回 `[]` —— 内核不把它供给 JS，头与 JS 打架比少一个头响，所以这一项宁缺） | 同机同内核（Chromium 156）对照：真 Chrome 拿到授权后带 **11** 个 `sec-ch-ua*`，Electron 45 无论 CDP 下发多完整的元数据都只带 **3** 个 —— 发高熵头的那段代码在 Chrome 的浏览器层（`components/embedder_support` 的 UA-CH 管理器 + Accept-CH 缓存），Electron 不带它，所以只能在请求出口自己实现授权语义 |
 
-`ui.server_info` 的 `identity` 字段把这几层的结果原样报出来（含
-`navigation_hints_bridge` / `navigation_hints_added`），"补没补上"是查询出来的，
-不是猜的。
+补高熵头的三条硬规矩（写在这个模块里，改它之前先读）：
+1. **只对授权过的 origin 发**。没被授权的站点一个高熵头都不许多带 —— 多带和少带
+   一样是指纹，还把身份泄露给了没要求的站点。授权按 **origin**（scheme+host+port）
+   记，只在内存里，跟着 session 走；与真 Chrome 的差别只剩"持久化到磁盘"，即
+   重启后的第一发不带，方向一致。
+2. 值一律从 `config.identity.metadata` 算，与 UA、`navigator.userAgentData` 同源。
+3. **只在缺失时补**：内核自己会发的请求（XHR/fetch/子资源）保持内核的输出，不动。
+
+`uaClientHintsOf` 对算不出来的项**少发而不是发空值**：发一个空 `sec-ch-ua`
+比不发更响。`highEntropyClientHintsOf` 同理（`model` 未设置时是缺项，不是 `""`）。
+
+GREASE 品牌（`sec-ch-ua` 里第一项）不是算出来的，是 Chromium **每个大版本冻结的
+一对字面量**，抄错就等于自己造了一个"任何真 Chrome 都不存在"的 brands 集合。
+它同时出现在 UA major、`brands`、`fullVersionList` 三处，必须同源。写死过一次的
+事故（2026-11-05）：`Not?A_Brand;v=99` 是 Chromium 130 那一份，UA 声称 156 时
+真 Chrome 用的是 `Not:A-Brand;v=8` —— 现在按实测大版本查 `GREASE_BRANDS` 表；
+**表里没有的大版本不下发 brands**（`brands_overridden:false`），让内核自己算，
+它那份永远和 UA 同源。诊断字段：`ui.server_info` 的 `identity` 报
+`navigation_hints_bridge` / `navigation_hints_added` / `accept_ch_origins`，
+"补没补上"是查询出来的，不是猜的。
+
+⚠️ Electron `session.webRequest` 的**只观察**类监听（`onResponseStarted` /
+`onCompleted` / `onSendHeaders`）签名和 `onBeforeSendHeaders` 不一样 —— **只传
+`details`，不传 callback**。照拦截型的样子写 `callback({})`，每个响应抛一次
+`TypeError: callback is not a function`，2026-11-05 在 Google 登录那一发上实测
+把主进程日志刷满 uncaughtException，并把那一臂的请求整个卡住。另外每一处
+`onBeforeSendHeaders` 的回调必须**必达**：抛了又不调 `cb`，之后每一个请求永远挂住。
 
 还没修的已知差距（不影响一致性，影响的是"像不像新 Chrome"）：内核版本仍落后
 （130 vs 156，要靠升 Electron）、`window.chrome.loadTimes/csi` 仍为空、
 读树时写进真实 DOM 的 `data-ai-id` 属性站点可见。
+
+#### Google 登录"此浏览器或应用可能不安全"：判据与修法（2026-11-05 六臂实测）
+
+同一台机器、同一个账号、**只输邮箱不输密码**，看服务端把这一发送到哪一步
+（`/v3/signin/rejected?rrk=N` 还是 `/v3/signin/challenge/pwd`）：
+
+| 臂 | UA（关键部分） | `sec-ch-ua` 品牌 | 落地页 | 结果 |
+|---|---|---|---|---|
+| 真 Chrome 156 | `…Chrome/156.0.0.0 Safari/537.36` | Chromium + Google Chrome | 全量 Glif | 密码步 |
+| 本产品（旧） | `…Chrome/130.0.0.0 Safari/537.36` | Chromium + **Google Chrome** | 全量 Glif | **rrk=46** |
+| 只去品牌 | 同上（仍是纯 Chrome） | 只 Chromium | 全量 Glif | **rrk=46** |
+| 只加 Electron token | `…Chrome/130.0.0.0 … Electron/33.4.11` | Chromium + Google Chrome | WebLite | **rrk=47** |
+| 完全不覆盖身份（内核原生） | `… @glittering0717/ai-browser/2.5.2 Chrome/130.0.6723.191 Electron/33.4.11 …` | 内核自报（只 Chromium） | WebLite | **密码步** |
+| **现在的形状**（发布态） | `… ai-browser/2.5.2 Chrome/130.0.0.0 Safari/537.36` | 只 Chromium | 全量 Glif | **密码步** |
+
+判据读出来就一句话：**Google 对"自称是 Chrome 的浏览器"要 Chrome 浏览器层的自证**
+（`window.chrome` 那几个 Gaia 绑定 + 安装态），Electron 壳给不出，于是 rrk=46；
+而一个**明说自己不是 Chrome** 的浏览器走的是普通流程，能正常登录。
+冒名越像，判得越死 —— 这跟"字段互相打脸"是同一类错误的两个面：都是**说了一句
+自己兑现不了的话**。
+
+被这张表推翻的旧结论：2026-11-05 早先那四臂（含"引擎换成 Chrome 那一份、身份逐字段
+一致"的极限臂）全部 rrk=46，据此写过"这是宿主自证墙，任何 Electron 壳都给不出"。
+那句话在**"必须冒充 Chrome"这个前提下**是对的，而前提本身是错的 —— 那一圈实验改的
+全是"怎么更像 Chrome"，没有一臂改"要不要是 Chrome"。所以它们全部拒绝不构成
+"翻不过去"的证据，只构成"冒充这条路翻不过去"的证据。旧记录保留在第 3 臂起的四行里。
+
+落到代码上的两条不变量（`tests/test_browser_identity.js` ID-3 / `test_config.js` C-2 钉住）：
+
+1. **UA 必须带自家产品 token**（`ai-browser/<版本>`）。Edge 带 `Edg/`、Vivaldi 带
+   `Vivaldi/`，都是同一个道理：浏览器要自报家门。少了这一段，UA 就是"一个纯 Chrome"，
+   Google 会按 Chrome 的标准来验。
+2. **品牌列表默认只报 Chromium**，不许出现 `Google Chrome`。我们是 Chromium 内核，
+   这是真话；`Google Chrome` 是别人的品牌，也是 Google 判 rrk=46 的直接抓手。
+
+两个只用于对照实验的口子，**线上不许开**：`AI_BROWSER_BRANDS=chrome`（把品牌改回
+冒名形状）、`AI_BROWSER_IDENTITY=0`（整层不覆盖，回到内核原生身份）。诊断口
+`ui.server_info.identity` 会报 `identity_override` 与 `brands_mode`，别靠猜。
+
+没验证的部分要说清楚：**密码之后的步骤没有测**（不输入用户凭据）。到密码步为止
+是 Google 自己的正常流程，之后的验证码/设备确认属于常规风控，不是"浏览器不可信"。
+另一个已知差距仍在：内核落后（130 vs 156）、`window.chrome.loadTimes/csi` 为空 ——
+它们现在**不再**是登录的判据（否则发布态那一臂过不去），但仍是"像不像新 Chrome"的
+差距。
+
 
 | 变量 | 默认 | 作用 |
 |---|---|---|
@@ -1034,14 +1106,16 @@ sheet**，因此它既不在语义树里，也不受页面点击控制；**而�
 | `AI_BROWSER_ERROR_BANNER` | 开 | `0` 关闭主进程异常的窗口内横幅（日志照记；e2e 截图对比用，它会改变窗口布局） |
 | `AI_BROWSER_ERROR_DIALOG` | 关 | `1` 强制改用原生模态框（阻塞主进程 8 秒，只用于人工盯着看启动崩溃） |
 | `AI_BROWSER_SELFTEST` | 关 | `crash` 在就绪后注入一次未捕获异常，用于自检错误链路 |
-| `AI_BROWSER_UA` | 按真实平台生成 | 覆盖 UA 字符串。UA-CH 的 `platform` 会**跟着 UA 里写的平台**走，不留矛盾；UA 里认不出的平台仍用真实平台 |
+| `AI_BROWSER_UA` | 按真实平台生成 | 覆盖 UA 字符串。UA-CH 的 `platform` 会**跟着 UA 里写的平台**走，不留矛盾；UA 里认不出的平台仍用真实平台。⚠️ 自定义 UA **必须带一个产品 token**（如 `ai-browser/2.5.2`）：一条纯 `Chrome/xx` 的 UA 等于自称 Chrome 官方版，Google 登录会按 Chrome 的自证标准判 rrk=46（见"Google 登录"一节） |
+| `AI_BROWSER_IDENTITY` | 开 | `0` = **整层不覆盖**，内核用自己那份身份（UA 里带 `Electron/<ver>`、品牌只有 Chromium）。只用于二分定位；`ui.server_info.identity.identity_override` 报的就是它 |
+| `AI_BROWSER_BRANDS` | 未设（只报 Chromium） | `chrome` = 把 `Google Chrome` 品牌加回 `sec-ch-ua` / `brands` / `fullVersionList`（冒名旧形状）。**只用于复现对照实验**：这个形状下 Google 登录必被拒 |
 | `AI_BROWSER_FOCUS` | `auto` | `auto`=只伪造页面内焦点态，不抢真实窗口焦点；`always`=旧行为；`never`=窗口与页面焦点都不碰。**不决定窗口是否显示**。⚠️ `never` 的代价实测过（2026-11-03）：隐藏窗口里每一页都自报 hidden，`ui.act` 的受信输入会被 Chromium 整条丢弃 —— 那种组合下动作只能如实失败（见 `AI_BROWSER_INPUT_FOCUS` 那行的判据） |
 | `AI_BROWSER_WATCHDOG` | 开 | `0`/`off`/`false`/`no` 关闭网络看门狗 |
 | `AI_BROWSER_WATCHDOG_URLS` | `example.com, baidu.com` | 看门狗探测目标（任一可达即算存活） |
 | `AI_BROWSER_NETWORK_CAPTURE` | 开 | `0` 关闭默认抓包 |
 | `AI_BROWSER_CANVAS_HOOK` | **关** | 站点能一眼看见我们改过 `getContext`，所以默认不开。`on`/`1`/`all`=全站开；`a.com,b.chaoxing.com`=只在这些域（含子域）开；`0`/`off`=关。agent 临时需要就在 tab 上 `ui.canvas_configure{reload:true}` |
 | `AI_BROWSER_POPUP_SHIM` | **关** | `window.open("")` 兼容垫片的开关，形状同上（`on` / 域名列表 / `0`）。它替换页面可见的原生 `window.open`，代价由全站付；老站模式在原生路径下回到"返回 null"。同时决定 preload 桥要不要暴露给这个域 |
-| `AI_BROWSER_CLIENT_HINTS` | 开 | `0` 关闭"给文档导航补 `sec-ch-ua*`"的出口钩子。只用于二分定位（关掉后导航请求回到内核那套：没有这三个头） |
+| `AI_BROWSER_CLIENT_HINTS` | 开 | `0` 关闭"给文档导航补 `sec-ch-ua*`"的出口钩子（critical 三个 + 被 `Accept-CH` 授权过 origin 的高熵那批一起关）。只用于二分定位（关掉后导航请求回到内核那套：一个 `sec-ch-ua*` 头都没有） |
 | `AI_BROWSER_DIALOG_POLICY` | `auto` | `alert/confirm/beforeunload` 的应答策略：`auto` / `accept` / `dismiss` / `manual`（不自动应答，交给人） |
 | `AI_BROWSER_PAINT_AUDIT` | 开 | `0` 关闭"加载成功但屏幕纯白"的自检与自救（唯一用途：精确测量导航时延） |
 | `AI_BROWSER_HOT_REPAINT` | **关** | `hard` 把"导航完成 / 切标签页 / 窗口回到前台"三条热路径的重绘升级为 1px 微调（唯一能强制合成表面重新栅格化的手段）。用它的情形：**切回一页或导航后屏幕上是上一页的像素**（透明背景的登录浮层透出旧页面）。代价：1px 微调必然触发两次重排，就是用户报过的"一闪一闪、大一下小一下"——所以默认关，`e2e/layout_ws` 的 G4/G5 把默认档钉成不变量 |

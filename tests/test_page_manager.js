@@ -314,7 +314,9 @@ describe('文档导航的 UA-CH 出口补头（_installClientHintBridge）', () 
     const got = run(ses.rec.listener, { 'user-agent': config.identity.userAgent });
     const md = config.identity.metadata;
     expect(got['sec-ch-ua']).toBe(md.brands.map((b) => `"${b.brand}";v="${b.version}"`).join(', '));
-    expect(got['sec-ch-ua']).toContain('"Google Chrome"');
+    // 冒名 Google Chrome 会让 Google 登录页判 rrk=46（2026-11-05 实测），补头这一层
+    // 不许把品牌又改回那个形状 —— 它只能原样转发 metadata。
+    expect(got['sec-ch-ua']).not.toContain('"Google Chrome"');
     expect(got['sec-ch-ua-platform']).toBe(`"${md.platform}"`);
     expect(got['sec-ch-ua-mobile']).toBe('?0');
     // 版本必须与 UA 里那个大版本一致，否则又是"UA 说一套、hint 说另一套"。

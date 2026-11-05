@@ -230,12 +230,25 @@ UA + UA-CH 元数据走 CDP；Accept-Language 只给干净的首选列表（不�
 在导航请求上**根本不发**这三个头（页面里的 `fetch` 却发），试过 CDP 覆盖、
 `Emulation.setUserAgentOverride`、先 `Network.enable` 三条路都不行。
 
+**Google 登录另有一条独立的坑，跟"字段互相打脸"不是同一件事**（2026-11-05 六臂实测）：
+以前我们把 UA 写成一条**纯** `Chrome/130.0.0.0`，品牌里带上 `Google Chrome`，等于对外
+宣称"我是 Chrome 官方版"。Google 会照这个宣称去验 Chrome 浏览器层的自证
+（`window.chrome` 那几个 Gaia 绑定 + 安装态），Electron 壳给不出，于是登录页直接
+`/v3/signin/rejected?rrk=46`。**冒名越像，判得越死。** 现在 UA 里带自家 token
+（`ai-browser/2.5.2`，Edge 带 `Edg/`、Vivaldi 带 `Vivaldi/` 是同一个道理），品牌只报
+`Chromium`——我们是 Chromium 内核，这是真话——同一台机器、同一个账号、同样只输邮箱，
+服务端就从"拒绝"变成了正常进密码步。
+
+两个只用于对照实验的口子别在线上开：`AI_BROWSER_BRANDS=chrome`（改回冒名形状，复现
+rrk=46）、`AI_BROWSER_IDENTITY=0`（整层不覆盖，回到内核原生身份）。
+
 别猜，直接问：
 
 ```bash
 node bin/ai-browser.cjs call ui.server_info
 # → identity: {user_agent, chrome_version, platform, platform_version, brands[],
-#              navigation_hints_bridge, override_applied_tabs[]}
+#              brands_mode, identity_override, navigation_hints_bridge,
+#              override_applied_tabs[]}
 ```
 
 还没消掉的真实差距：

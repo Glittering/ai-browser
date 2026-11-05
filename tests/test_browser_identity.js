@@ -48,15 +48,32 @@ describe('browser_identity — UA 与 client hints 同源', () => {
     expect(shortChromium.version).toBe(chromium.version.split('.')[0]);
   });
 
-  it('ID-3: 品牌列表带 Google Chrome，GREASE 那项停在内核自己的值上', () => {
+  it('ID-3: 默认只报 Chromium，不冒名 Google Chrome；UA 里必须有自家产品 token', () => {
+    // 2026-11-05 实测：UA 写成纯 Chrome + brands 带 "Google Chrome" 时，Google 登录页
+    // 直接回 /v3/signin/rejected?rrk=46；带上自家 token、brands 只报 Chromium 就进密码步。
+    // 所以这两条是**产品级不变量**，不是风格偏好。
     const built = id.buildIdentity({ platform: 'win32', chromeVersion: '130.0.6723.191', release: '10.0.19045' });
     const names = built.metadata.brands.map((b) => b.brand);
-    expect(names).toContain('Google Chrome');
     expect(names).toContain('Chromium');
+    expect(names, '默认不许声称自己是 Google Chrome').not.toContain('Google Chrome');
+    expect(built.brands_mode).toBe('chromium');
+    // UA 里"只写 Chrome/"等于对外宣称自己是 Chrome 官方版；Edge 带 Edg/、Vivaldi 带
+    // Vivaldi/，我们也得带自己的。少了这一段，Google 会按 Chrome 的自证标准来判。
+    expect(built.userAgent).toMatch(/ai-browser\/\d+\.\d+\.\d+ Chrome\/130\.0\.0\.0 Safari\/537\.36$/);
+    expect(built.product).toMatch(/^ai-browser\/\d+\.\d+\.\d+$/);
+    // GREASE 那项仍然只有一个，且停在内核自己报的值上（Chromium 130 = "99"）。
     expect(names.filter((n) => /^Not\?A_Brand$/.test(n))).toHaveLength(1);
-    // GREASE 品牌是随内核版本冻结的（Chromium 130 = "99"），不许顺手编一个。
     expect(built.metadata.brands.find((b) => b.brand === 'Not?A_Brand').version).toBe('99');
     expect(built.metadata.mobile).toBe(false);
+  });
+
+  it('ID-3b: AI_BROWSER_BRANDS=chrome 才复现"冒名"旧形状（只用于对照实验）', () => {
+    const claimed = id.buildIdentity({ platform: 'win32', chromeVersion: '130.0.6723.191', brands: 'chrome' });
+    expect(claimed.brands_mode).toBe('chrome');
+    expect(claimed.metadata.brands.map((b) => b.brand)).toContain('Google Chrome');
+    expect(claimed.metadata.fullVersionList.map((b) => b.brand)).toContain('Google Chrome');
+    // 产品 token 与品牌声明是两条独立的轴：冒名的时候 token 也照样在。
+    expect(claimed.userAgent).toContain('ai-browser/');
   });
 
   it('ID-4: architecture 用 CPU 家族名，不是 process.arch', () => {
@@ -107,8 +124,9 @@ describe('browser_identity — UA 与 client hints 同源', () => {
   it('ID-8: 导航用的 critical hints 与真 Chrome 同形，值来自同一份 metadata', () => {
     const built = id.buildIdentity({ platform: 'win32', chromeVersion: '130.0.6723.191', release: '10.0.19045', arch: 'x64' });
     const h = id.uaClientHintsOf(built.metadata);
-    // Chrome 的写法：引号包品牌、;v="版本"、逗号 + 空格分隔。
-    expect(h['sec-ch-ua']).toBe('"Not?A_Brand";v="99", "Chromium";v="130", "Google Chrome";v="130"');
+    // Chrome 的写法：引号包品牌、;v="版本"、逗号 + 空格分隔。品牌集合是 Chromium 持有
+    // Chromium 品牌的那一份（开源 Chromium 构建就是这个形状）。
+    expect(h['sec-ch-ua']).toBe('"Not?A_Brand";v="99", "Chromium";v="130"');
     expect(h['sec-ch-ua-platform']).toBe('"Windows"');
     expect(h['sec-ch-ua-mobile']).toBe('?0');
     // 与 UA 同源：大版本、平台两处必须一致（这条是整个修复的立身之本）。
@@ -122,6 +140,65 @@ describe('browser_identity — UA 与 client hints 同源', () => {
     for (const v of ['1', 'on', 'true', 'yes', '', '   ']) expect(id.isEnabledByDefault(v), String(v)).toBe(true);
     expect(id.isEnabledByDefault(undefined)).toBe(true);
     expect(id.isEnabledByDefault(null)).toBe(true);
+  });
+
+  it('ID-10: 高熵 UA-CH 头与真 Chrome 同形（对照 2026-11-05 本机实测读数）', () => {
+    // 基准来自真 Chrome 156 在同一台机器上被 Accept-CH 授权后的请求头，逐字节抄下来当表：
+    // sec-ch-ua-arch:"x86" bitness:"64" full-version:"156.0.8078.80"
+    // full-version-list:"Not:A-Brand";v="8.0.0.0", "Chromium";v="156.0.8078.80", ...
+    // model:"" wow64:?0 platform-version:"10.0.0"
+    const built = id.buildIdentity({ platform: 'win32', chromeVersion: '156.0.8078.80', release: '10.0.19045', arch: 'x64' });
+    const h = id.highEntropyClientHintsOf(built.metadata);
+    expect(h['sec-ch-ua-arch']).toBe('"x86"');
+    expect(h['sec-ch-ua-bitness']).toBe('"64"');
+    expect(h['sec-ch-ua-full-version']).toBe('"156.0.8078.80"');
+    expect(h['sec-ch-ua-full-version-list']).toBe('"Not:A-Brand";v="8.0.0.0", "Chromium";v="156.0.8078.80"');
+    expect(h['sec-ch-ua-model']).toBe('""');
+    expect(h['sec-ch-ua-wow64']).toBe('?0');
+    expect(h['sec-ch-ua-platform-version']).toBe('"10.0.0"');
+    // form-factors **故意不发**：元数据里给了 ['Desktop'] 之后，出口会照发头，而页面里
+    // getHighEntropyValues(['formFactors']) 读回来是 []（Electron 33 内核不供给 JS）。
+    // 头与 JS 打架比少一个头响得多，所以这一项宁缺。
+    expect(h['sec-ch-ua-form-factors']).toBeUndefined();
+    expect(built.metadata.formFactors).toBeUndefined();
+    // 函数本身仍然支持这一项：元数据里给了就发（等内核两边都报时直接打开）。
+    expect(id.highEntropyClientHintsOf({ formFactors: ['Desktop'] })['sec-ch-ua-form-factors']).toBe('"Desktop"');
+    // 与 critical 三个同源：full-version-list 的大版本必须跟着 brands 的大版本走。
+    expect(h['sec-ch-ua-full-version-list']).toContain(`"Chromium";v="${built.chromeMajor}.0.8078.80"`);
+    expect(Object.keys(id.uaClientHintsOf(built.metadata)).length).toBe(3);
+  });
+
+  it('ID-11: 元数据缺项时高熵头**少发**而不是发空值（宁缺毋假）', () => {
+    expect(id.highEntropyClientHintsOf({})).toEqual({ 'sec-ch-ua-wow64': '?0' });
+    expect(id.highEntropyClientHintsOf(null)['sec-ch-ua-arch']).toBeUndefined();
+    expect(id.highEntropyClientHintsOf({ model: '' })['sec-ch-ua-model']).toBe('""');
+  });
+
+  it('ID-12: GREASE 品牌按内核大版本查表，值必须是实测的那一对', () => {
+    // 130 = 本机 Electron 33 内核不覆盖时自报；156 = 本机真 Chrome 156.0.8078.80
+    // 的 sec-ch-ua 头（2026-11-05 抓的 chr_hdr8.txt）。两个形状不同，写死一个就
+    // 会在另一个内核上自相矛盾。
+    expect(id.greaseFor(130)).toEqual({ brand: 'Not?A_Brand', version: '99' });
+    expect(id.greaseFor('156')).toEqual({ brand: 'Not:A-Brand', version: '8' });
+    const b130 = id.buildIdentity({ platform: 'win32', chromeVersion: '130.0.6723.191', arch: 'x64' });
+    expect(b130.metadata.brands[0]).toEqual({ brand: 'Not?A_Brand', version: '99' });
+    expect(b130.metadata.fullVersionList[0]).toEqual({ brand: 'Not?A_Brand', version: '99.0.0.0' });
+    const b156 = id.buildIdentity({ platform: 'win32', chromeVersion: '156.0.8078.80', arch: 'x64' });
+    expect(id.uaClientHintsOf(b156.metadata)['sec-ch-ua'])
+      .toBe('"Not:A-Brand";v="8", "Chromium";v="156"');
+  });
+
+  it('ID-13: 表里没有的内核大版本不下发 brands，交给内核自己算', () => {
+    expect(id.greaseFor(999)).toBe(null);
+    const future = id.buildIdentity({ platform: 'win32', chromeVersion: '999.0.1.2', arch: 'x64' });
+    expect(future.brands_overridden, '未知大版本不许猜一个 GREASE 品牌').toBe(false);
+    expect(future.metadata.brands).toBeUndefined();
+    expect(future.metadata.fullVersionList).toBeUndefined();
+    // 出口那一层跟着**不发** sec-ch-ua —— 发空值比不发更响。
+    expect(Object.keys(id.uaClientHintsOf(future.metadata))).toEqual(['sec-ch-ua-mobile', 'sec-ch-ua-platform']);
+    // 其余字段仍按真实运行时算，UA 字符串照旧。
+    expect(future.userAgent).toContain('Chrome/999.0.0.0');
+    expect(future.metadata.platform).toBe('Windows');
   });
 });
 
