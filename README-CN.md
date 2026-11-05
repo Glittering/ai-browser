@@ -27,6 +27,8 @@ npx -y @glittering0717/ai-browser mcp
 
 macOS 用户也可以直接用打包好的 `.dmg`（Release 里），不用装 Node.js——但 MCP 的 npx 桥接依然需要，它负责把服务器注册进客户端。
 
+Windows 用户直接下 Release 里的 `AI-Browser-<版本>-win32-x64-Setup.exe`（约 79 MB）：双击装完就有开始菜单和桌面快捷方式，装到 `%LOCALAPPDATA%\Programs\AI Browser`，不需要管理员权限；卸载在「设置 → 应用」里，只删程序，不碰 `~/.ai-browser`（登录态和配置留着）。包没有代码签名，SmartScreen 会拦一次：**更多信息 → 仍要运行**。
+
 ## 5 分钟跑第一个任务
 
 把这段话发给你的 Agent：

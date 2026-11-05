@@ -77,8 +77,24 @@ Two things to know before you download it:
 - **It is not notarized.** macOS Gatekeeper will refuse to open it on the first try. Right-click
   the app → **Open**, confirm once, and it runs normally afterwards. (A paid Apple Developer
   account is what removes this step; until then, this is the honest cost.)
-- **Only macOS `arm64` is built.** Windows and Linux have no package yet, because neither has
-  been verified on this project — see [Compatibility](#compatibility).
+- **Only macOS `arm64` and Windows `x64` are built.** Linux has no package yet — see
+  [Compatibility](#compatibility).
+
+### Option A2 — Windows installer
+
+Grab `AI-Browser-<version>-win32-x64-Setup.exe` from the same Releases page (~79 MB). Run it and
+click through: it installs **per user** to `%LOCALAPPDATA%\Programs\AI Browser` (no admin prompt,
+no UAC), creates the **Start Menu** entry and a **Desktop** shortcut by itself, and offers to launch
+the browser when it finishes. Uninstall is a normal entry in **Settings → Apps**; it removes the
+program and both shortcuts but leaves `~/.ai-browser` alone, so your profiles and logins survive a
+reinstall.
+
+Two things to know:
+
+- **It is not code-signed.** SmartScreen may show "Windows protected your PC" → **More info** →
+  **Run anyway**. (A code-signing certificate is what removes this step.)
+- The installer is a plain NSIS wizard, so you can pick the install location; the default is the
+  per-user path above.
 
 Agents still connect through the MCP server (Option B below), and the two channels cooperate:
 when the packaged app is already running, the MCP server finds it on port 9223 and **reuses it
