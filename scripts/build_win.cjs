@@ -9,9 +9,10 @@
 // 产出：dist/AI Browser-win32-x64/AI Browser.exe
 // 用法：node scripts/build_win.cjs
 //
-// 注意：Windows 版可执行文件的图标需要 .ico（项目只有 icon.icns / icon.svg），
-// 未提供时会使用 Electron 默认图标；要换图标请先把 build/icon.svg 转出
-// build/icon.ico，再在下面的 icon 选项里指向它。
+// 注意：Windows 版可执行文件的图标需要 .ico。build/icon.ico 由
+// `node_modules/electron/dist/electron.exe scripts/make_win_icon.cjs` 从
+// build/icon-dock.png 生成（七个尺寸，PNG 载荷）；缺它时会**静默**用 Electron
+// 默认图标 —— 产物看起来像"没做完的 Electron 壳"，而构建日志一个字都不会提。
 
 const fs = require('node:fs');
 const os = require('node:os');
