@@ -1099,6 +1099,42 @@ GREASE 品牌（`sec-ch-ua` 里第一项）不是算出来的，是 Chromium **�
 差距。
 
 
+#### 权限状态的形状也是身份的一部分（2026-11-06 实测）
+
+只装 `setPermissionRequestHandler` 时，页面里 `navigator.permissions.query({name})`
+对**每一项**都回 `granted`：notifications / geolocation / camera / microphone /
+clipboard-read 全是 granted。同机真 Chrome 156 全新 profile 全是 `prompt`。
+没有哪个真人浏览器会预授权摄像头和麦克风 —— 这个组合本身就是一句"我不是正常人"，
+和 UA 自相矛盾是同一类证据（`tools/_oneoff/caps_js.cjs` 复现，两侧同一份 JS）。
+
+现在两个 handler 共用**同一份白名单**：request 侧逻辑不变（`pointerLock` /
+`clipboard-sanitized-write` / `fullscreen` 放行；拒绝要广播 `permission_denied`），
+check 侧套同一判断。Electron 不实现 Chrome 的 permission store，查询状态只能由这个
+布尔回调决定（true → granted，false → denied），**给不出 `prompt`**；所以只能在
+"全 granted"和"没授权过的一律 denied"之间选后者 —— 后者是隐私设置严格时的常见形状，
+前者在现实中不存在。`AI_BROWSER_PERMISSIONS="*"` 时两侧一起放开，不许只放开一侧
+（只放开 request 会让"能用的能力"和"页面读到的状态"各说一套）。
+
+⚠️ 这条**不是**百度验证码的完整答案：修完之后直线搜索仍未复现验证码（见下节），
+它只是被单独测出来的一处异常。
+
+#### 百度验证码：实测进展（2026-11-06，未结案）
+
+用户报"这个浏览器在百度经常弹验证码，普通浏览器很罕见"。已经量过的：
+
+| 观测 | 我们 | 真 Chrome 156 | 结论 |
+|---|---|---|---|
+| 发往 `/s?wd=` 的整份请求头 | Accept / Accept-Language / Accept-Encoding / Sec-Fetch-* / sec-ch-ua* 齐全，值也一致 | 同 | 网络层没有差异（`tools/_oneoff/baidu_headers.cjs`） |
+| `navigator.permissions.query` 五项 | 全 `granted` | 全 `prompt` | **已修**（上一节） |
+| `window.chrome` | `{}`（0 个键） | `loadTimes` / `csi` / `app` | 已知差距，未补 |
+| 空 profile 直线搜 4 条 | 0/4 撞验证码 | — | 不复现 |
+| 真实 profile 直线搜 1 条 | 0/1 | — | 不复现 |
+| 读一次树之后 `data-ai-id` 属性数 | 70（不读树是 0） | 0 | 站点可见，但只在 agent 读树之后 |
+
+结论：**"从结果页直线进"这条路本身不复现**，判据不在这条路上。下一步要抓的是
+"哪一发请求被送到了 `wappass.baidu.com`，以及它前面发生了什么"（点结果？贴吧？
+图片搜索？并行多标签？agent 连续动作？）。拿到那一发再谈判据 —— 不猜。
+
 | 变量 | 默认 | 作用 |
 |---|---|---|
 | `AI_BROWSER_PORT` | 9223 | WS / MCP 探测端口 |

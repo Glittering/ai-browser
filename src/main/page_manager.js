@@ -384,6 +384,10 @@ class PageManager {
       });
       callback(false);
     };
+    // 同一份白名单，另一侧：站点用 `navigator.permissions.query()` 问"我现在有没有
+    // 这个权限"。返回 true 就会被读成 granted。隐私面一律 false（详见
+    // _installPermissionHandler 里那段"全 granted 自己就是指纹"）。
+    this._onPermissionCheck = (webContents, permission) => allowed(permission);
     this._installPermissionHandler();
   }
 
@@ -391,7 +395,22 @@ class PageManager {
     try {
       // 延迟到 app ready 之后由 index.js 调 installSessionHooks(session)；
       // 这里只存回调，避免在模块加载期碰 Electron session（vitest 起不来）。
-      if (this._session) this._session.setPermissionRequestHandler(this._onPermission);
+      if (this._session) {
+        this._session.setPermissionRequestHandler(this._onPermission);
+        // **必须同时装 check 这一个**（2026-11-06 实测）：只装 request 一侧时，
+        // `navigator.permissions.query()` 对**每一项**都回 "granted" —— 定位、
+        // 摄像头、麦克风、剪贴板读取全是 granted，而真 Chrome 全新 profile 全是
+        // "prompt"。没有哪个真人浏览器会预授权摄像头和麦克风，这个组合本身就是
+        // 一句"我不是正常人"（百度这类风控读它就是这一条）。
+        //
+        // Electron 不实现 Chrome 的 permission store，查询状态只能由这个布尔回调
+        // 决定：true → granted，false → denied。它给不出 "prompt" 这个中间态，
+        // 所以在"全 granted"和"没授权过的都不给"之间只能选后者 —— 后者是隐私设置
+        // 严格时的常见形状，前者在现实中不存在。
+        if (typeof this._session.setPermissionCheckHandler === 'function') {
+          this._session.setPermissionCheckHandler(this._onPermissionCheck);
+        }
+      }
     } catch (_) { /* 无 session（单测/非 Electron 环境） */ }
   }
 
