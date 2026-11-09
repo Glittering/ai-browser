@@ -43,6 +43,7 @@ const PER_TAB = [
   // ---- 导航状态机 ----
   { field: '_tabNavState' },
   { field: '_pendingNavUrl' },       // 键 = tab，值 = 正在打开（还没 commit）的地址
+  { field: '_lastMainUrl' },         // 键 = tab，值 = 上一次主框架导航的 URL（记验证码墙现场用）；漏清 = 新 tab 的"上一页"是上一任的
   // ---- 浏览器级对话框 ----
   { field: '_lastDialog' },
   { field: '_openDialogs' },
