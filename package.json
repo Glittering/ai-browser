@@ -1,6 +1,6 @@
 {
   "name": "@glittering0717/ai-browser",
-  "version": "2.5.2",
+  "version": "2.5.4",
   "description": "AI-native browser — renders pixels for humans, structured semantic-tree API for agents. No screenshots, no OCR, no coordinate guessing.",
   "main": "src/main/index.js",
   "bin": {
@@ -109,7 +109,7 @@
   },
   "devDependencies": {
     "@electron/packager": "^20.3.0",
-    "electron-winstaller": "^5.4.4",
+    "electron-builder": "^26.18.0",
     "jsdom": "^29.1.1",
     "vitest": "^2.0.0"
   }

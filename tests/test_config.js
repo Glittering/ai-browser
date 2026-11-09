@@ -40,12 +40,17 @@ describe('shared/config defaults', () => {
     const major = String(process.versions.chrome || '0').split('.')[0];
     if (major !== '0') expect(ua, 'UA 自称的 Chrome 大版本必须就是内核版本').toContain(`Chrome/${major}.0.0.0`);
     expect(ua, 'UA 里不许出现 Electron token').not.toMatch(/electron/i);
+    // 产品 token 是"我不是 Chrome 官方版"的唯一自述。2026-11-05 实测：去掉它之后
+    // Google 会把我们当 Chrome 来验浏览器层自证，登录页直接 rrk=46 拒绝。
+    expect(ua, 'UA 必须带自家产品 token').toMatch(/ai-browser\/\d+\.\d+\.\d+/);
     // 身份不只是一条 UA 串：UA-CH 元数据必须与它同源，否则 header 与页面 JS 又各说一套。
     expect(config.identity.userAgent, 'config.userAgent 与 identity 必须是同一份').toBe(ua);
     expect(config.identity.metadata.platform).toBe(config.identity.platform);
-    const brands = config.identity.metadata.brands.map((b) => b.brand);
-    expect(brands, '品牌列表必须含 Google Chrome —— 只有 Chromium 品牌是 Google 报"浏览器不可信"的直接原因')
-      .toContain('Google Chrome');
+    expect(config.identityEnabled, '身份层默认必须是开的').toBe(true);
+    const brands = (config.identity.metadata.brands || []).map((b) => b.brand);
+    expect(brands, '默认只报 Chromium（我们是 Chromium 内核，这是真话）').toContain('Chromium');
+    expect(brands, '不许冒名 Google Chrome —— 冒名之后 Google 登录必被拒（rrk=46）')
+      .not.toContain('Google Chrome');
   });
 
   it('C-3: default userDataDir points under the user home', async () => {

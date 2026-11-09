@@ -314,11 +314,49 @@ describe('文档导航的 UA-CH 出口补头（_installClientHintBridge）', () 
     const got = run(ses.rec.listener, { 'user-agent': config.identity.userAgent });
     const md = config.identity.metadata;
     expect(got['sec-ch-ua']).toBe(md.brands.map((b) => `"${b.brand}";v="${b.version}"`).join(', '));
-    expect(got['sec-ch-ua']).toContain('"Google Chrome"');
+    // 冒名 Google Chrome 会让 Google 登录页判 rrk=46（2026-11-05 实测），补头这一层
+    // 不许把品牌又改回那个形状 —— 它只能原样转发 metadata。
+    expect(got['sec-ch-ua']).not.toContain('"Google Chrome"');
     expect(got['sec-ch-ua-platform']).toBe(`"${md.platform}"`);
     expect(got['sec-ch-ua-mobile']).toBe('?0');
     // 版本必须与 UA 里那个大版本一致，否则又是"UA 说一套、hint 说另一套"。
     expect(got['sec-ch-ua']).toContain(`;v="${config.identity.chromeMajor}"`);
+  });
+
+  it('PM-10b 权限查询不许对隐私项报 granted（只装 request 一侧时每一项都是 granted）', () => {
+    // 2026-11-06 实测：只装 setPermissionRequestHandler 时，页面里
+    // navigator.permissions.query({name:'camera'}) 一类**全部**返回 "granted"
+    // （真 Chrome 全新 profile 全是 "prompt"）。没有哪个真人浏览器预授权摄像头和
+    // 麦克风 —— 这个组合本身就是"我不是正常人"，风控读它。
+    const seen = {};
+    pm._session = {
+      setPermissionRequestHandler: (h) => { seen.request = h; },
+      setPermissionCheckHandler: (h) => { seen.check = h; },
+    };
+    pm._setupPermissions();
+    expect(typeof seen.check, 'check 这一侧必须也装上，否则查询恒为 granted').toBe('function');
+    for (const p of ['geolocation', 'camera', 'microphone', 'notifications', 'clipboard-read']) {
+      expect(seen.check(null, p), p + ' 不许报 granted').toBe(false);
+    }
+    // 白名单里的照旧放行：它们不是查询项，是真动作（agent 的复制/全屏/指针锁要用）。
+    for (const p of ['pointerLock', 'clipboard-sanitized-write', 'fullscreen']) {
+      expect(seen.check(null, p), p).toBe(true);
+    }
+    // 显式放开（AI_BROWSER_PERMISSIONS="*"）时两边一起放开 —— 不能只放开 request。
+    const old = process.env.AI_BROWSER_PERMISSIONS;
+    process.env.AI_BROWSER_PERMISSIONS = '*';
+    try {
+      const seen2 = {};
+      pm._session = {
+        setPermissionRequestHandler: (h) => { seen2.request = h; },
+        setPermissionCheckHandler: (h) => { seen2.check = h; },
+      };
+      pm._setupPermissions();
+      expect(seen2.check(null, 'geolocation')).toBe(true);
+    } finally {
+      if (old === undefined) delete process.env.AI_BROWSER_PERMISSIONS;
+      else process.env.AI_BROWSER_PERMISSIONS = old;
+    }
   });
 
   it('PM-11 AI_BROWSER_CLIENT_HINTS=0 时不装钩子', () => {

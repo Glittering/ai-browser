@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { config } from '../shared/config.js';
 import identityUtil from '../shared/browser_identity.cjs';
+import acceptCh from '../shared/accept_ch.cjs';
 import axExtractor from './axExtractor.js';
 import { NetworkMonitor, MAX_POST_DATA_SIZE } from './network_monitor.js';
 import { CanvasMonitor, isCanvasHookEnabled } from './canvas_monitor.js';
@@ -137,6 +138,12 @@ const NETWORK_CAPTURE_DEFAULT = !(process.env.AI_BROWSER_NETWORK_CAPTURE === '0'
 // 该 tab 没有垫片），页面绝不能因为垫片安装慢而永久空白。
 // 实测正常路径约 120–300ms（about:blank 的 did-finish-load + 两次 CDP 命令）。
 const WINDOW_OPEN_NAV_WAIT_MS = 2000;
+
+// 风控墙的 URL 形状（验证码 / 反爬拦截 / "网络环境异常"）。命中就把**现场**记下来。
+// 为什么要有这个：2026-11-06 用四种姿势在百度上都没能复现用户报的"经常弹验证码"
+// （深链 4 发、表单键入 3 发、空 profile、真实 profile 各 1 发，全 0）。没有那一发
+// 就没法谈判据 —— 那就让它自己把现场留下，别再猜。
+const CAPTCHA_WALL_RE = /wappass\.baidu\.com|antispider|\/captcha|captcha\.|verify\.baidu\.com|\/sorry\/|challenge-platform/i;
 
 // 具名按键 → CDP Input.dispatchKeyEvent 参数。agent 用自然名字（'Delete'、
 // 'Escape'、'ArrowRight'、'a'）而不是让人去查 Windows 虚拟键码。
@@ -327,6 +334,9 @@ class PageManager {
     this._crashReloadAt = new Map();
     this._snapshots = new Map();    // snapshotId -> { tabId, js, value, at }（ui.snapshot 存基线）
     this._snapshotSeq = 0;
+    // tabId -> 上一次主框架导航的 URL。只为"撞上验证码墙时把上一页记下来"存在：
+    // 判据必须拿这一发对差（从哪来的、前面发了什么），只记一个验证页 URL 等于没记。
+    this._lastMainUrl = new Map();
     this.networkMonitor = new NetworkMonitor({}, { captureEnabled: NETWORK_CAPTURE_DEFAULT });
     this.canvasMonitor = new CanvasMonitor();
     this._canvasBindings = new Map(); // bindingName -> tabId（hook 回传时据此归 tab）
@@ -383,6 +393,10 @@ class PageManager {
       });
       callback(false);
     };
+    // 同一份白名单，另一侧：站点用 `navigator.permissions.query()` 问"我现在有没有
+    // 这个权限"。返回 true 就会被读成 granted。隐私面一律 false（详见
+    // _installPermissionHandler 里那段"全 granted 自己就是指纹"）。
+    this._onPermissionCheck = (webContents, permission) => allowed(permission);
     this._installPermissionHandler();
   }
 
@@ -390,7 +404,22 @@ class PageManager {
     try {
       // 延迟到 app ready 之后由 index.js 调 installSessionHooks(session)；
       // 这里只存回调，避免在模块加载期碰 Electron session（vitest 起不来）。
-      if (this._session) this._session.setPermissionRequestHandler(this._onPermission);
+      if (this._session) {
+        this._session.setPermissionRequestHandler(this._onPermission);
+        // **必须同时装 check 这一个**（2026-11-06 实测）：只装 request 一侧时，
+        // `navigator.permissions.query()` 对**每一项**都回 "granted" —— 定位、
+        // 摄像头、麦克风、剪贴板读取全是 granted，而真 Chrome 全新 profile 全是
+        // "prompt"。没有哪个真人浏览器会预授权摄像头和麦克风，这个组合本身就是
+        // 一句"我不是正常人"（百度这类风控读它就是这一条）。
+        //
+        // Electron 不实现 Chrome 的 permission store，查询状态只能由这个布尔回调
+        // 决定：true → granted，false → denied。它给不出 "prompt" 这个中间态，
+        // 所以在"全 granted"和"没授权过的都不给"之间只能选后者 —— 后者是隐私设置
+        // 严格时的常见形状，前者在现实中不存在。
+        if (typeof this._session.setPermissionCheckHandler === 'function') {
+          this._session.setPermissionCheckHandler(this._onPermissionCheck);
+        }
+      }
     } catch (_) { /* 无 session（单测/非 Electron 环境） */ }
   }
 
@@ -408,13 +437,23 @@ class PageManager {
   }
 
   /**
-   * 给文档导航补上 UA-CH 的三个 critical client hints。
+   * 给请求补 UA-CH 头：critical 三个恒补，高熵那几个**只在服务端授权过的 origin 补**。
    *
    * 为什么必须在这一层补：Electron 33 的导航请求不带 sec-ch-ua*，而页面内的
    * fetch 带 —— 同一个浏览器对同一台服务器"两种请求两套说法"，站点把它当成
    * 指纹异常。CDP / Emulation 两条内核路径都试过（结论与实测数据见
    * shared/browser_identity.cjs 的 uaClientHintsOf 注释），内核不发的东西
    * 只能在请求出口补。
+   *
+   * 2026-11-05 又补了另一半：授权那一侧。本地 https 回声服务实测（tools/_oneoff/
+   * wire_product.cjs，读的是**服务器收到的头**，不是 CDP 的事件视图 —— 后者看不到
+   * webRequest 改过的头，用它量补头等于量不到）——
+   *   真 Chrome 156：文档回 Accept-CH 之后，同 origin 的 fetch 带 11 个 sec-ch-ua*；
+   *   Electron（同为 156）：只带 3 个，CDP 把 userAgentMetadata 填得再全也还是 3 个。
+   * 也就是说发高熵头的那段逻辑在 Chrome 浏览器层，Electron 里根本没有。授权语义
+   * 就照规范自己实现：响应里看见 Accept-CH / Link rel=accept-ch 就记进 origin 桶，
+   * 之后同 origin 的请求才补对应的那几个头。**没授权一个都不许多带** —— 多带和
+   * 少带一样是指纹，还把身份泄露给了没要求的站点。
    *
    * 三条约束：
    *   - 只在**缺失**时补。Blink 自己会发的请求保持内核的输出，不覆盖。
@@ -427,18 +466,45 @@ class PageManager {
   _installClientHintBridge(session) {
     this._clientHintBridge = false;
     this._clientHintAdded = 0;
+    this._acceptChGrants = acceptCh.createGrantStore(512);
     if (!identityUtil.isEnabledByDefault(process.env.AI_BROWSER_CLIENT_HINTS)) return false;
     if (!session || typeof session.webRequest?.onBeforeSendHeaders !== 'function') return false;
-    const headers = identityUtil.uaClientHintsOf(config.identity.metadata);
+    const critical = identityUtil.uaClientHintsOf(config.identity.metadata);
+    const highEntropy = identityUtil.highEntropyClientHintsOf(config.identity.metadata);
+    const filter = { urls: ['https://*/*', 'wss://*/*'] };
     try {
-      session.webRequest.onBeforeSendHeaders({ urls: ['https://*/*', 'wss://*/*'] }, (details, callback) => {
+      // onResponseStarted 而不是 onHeadersReceived：后者已经被 media_inline 占着
+      // （Electron 的 webRequest 每种回调一个 session 只能挂一个监听，挂第二个会顶掉
+      // 前一个 —— 在这儿再挂一次就把"去 cookie 化媒体内联"那套悄悄废了）。
+      if (typeof session.webRequest.onResponseStarted === 'function') {
+        // ⚠️ 这一类"只观察不改"的监听（onResponseStarted / onCompleted / onSendHeaders）
+        // Electron **只传 details，不传 callback** —— 照 onBeforeSendHeaders 的样子写
+        // `callback({})` 就是每个响应抛一次 `TypeError: callback is not a function`
+        // （2026-11-05 在 Google 登录那一发上实测：日志被 [fatal] uncaughtException 刷满）。
+        session.webRequest.onResponseStarted(filter, (details) => {
+          try {
+            const names = acceptCh.parseGrant(details && details.responseHeaders);
+            if (names.length) this._acceptChGrants.add(details.url, names);
+          } catch (e) {
+            recordError('accept_ch_parse_failed', { message: String((e && e.message) || e).slice(0, 200) });
+          }
+        });
+      }
+      session.webRequest.onBeforeSendHeaders(filter, (details, callback) => {
         try {
           const req = (details && details.requestHeaders) || {};
           const has = (name) => Object.keys(req).some((k) => k.toLowerCase() === name);
+          const granted = this._acceptChGrants.grantedFor(details.url);
+          const wanted = { ...critical };
+          if (granted) {
+            for (const name of Object.keys(highEntropy)) {
+              if (granted.has(name)) wanted[name] = highEntropy[name];
+            }
+          }
           let added = false;
-          for (const name of Object.keys(headers)) {
-            if (!headers[name] || has(name)) continue;
-            req[name] = headers[name];
+          for (const name of Object.keys(wanted)) {
+            if (!wanted[name] || has(name)) continue;
+            req[name] = wanted[name];
             added = true;
           }
           if (added) this._clientHintAdded++;
@@ -509,6 +575,14 @@ class PageManager {
       // 否则一个不该发事件的上下文也能把 agent 引到别的页面上。
       const tab = eventFromTab({ senderTab: self._tabIdForContents(_event.sender) });
       if (tab === null) return;
+      // 页内验证码盖层：URL 一点没变，只有 DOM 里多了一层滑块 —— 只挂导航等于永远
+      // 看不见这一类（`recent_requests` 里能看出它是哪一发触发的）。
+      if (payload && payload.event === 'captcha_appeared') {
+        const els = (payload.data && payload.data.elements) || [];
+        self._recordCaptchaWall('dom', tab, {
+          elements: (Array.isArray(els) ? els : []).slice(0, 6).map((el) => String((el && (el.text || el.tag || el.selector)) || '').slice(0, 80)),
+        });
+      }
       self._broadcast(payload.event, { ...(payload.data || {}), tab });
     });
 
@@ -778,11 +852,49 @@ class PageManager {
     return out;
   }
 
+  /**
+   * 把"撞上风控墙"的那一发原样写进错误日志（`ui.errors` / `browse_errors` 能读到）。
+   *
+   * 记什么、为什么：URL、状态码、上一页、以及**同 tab 最近 10 条请求**。风控判据从来
+   * 不是单个字段，而是"这一发之前发生过什么"（是不是从自己首页提交的、有没有正常
+   * 加载子资源、有没有连着搜好几发）。只记一个验证页 URL 等于没记。
+   *
+   * 两个入口，别只挂一个：
+   *   kind='dom' 页内盖层（preload 的 scanCaptcha 扫到，URL 不变，只看 URL 会漏）
+   *   kind='nav' 跳到验证页 / 验证 iframe（did-frame-navigate 命中 CAPTCHA_WALL_RE）
+   */
+  _recordCaptchaWall(kind, tabId, extra = {}) {
+    let url = extra.url || '';
+    let recent = [];
+    const prev = this._lastMainUrl.get(tabId) || '';
+    try {
+      if (!url) {
+        const view = this.tabs.get(tabId);
+        const wc = view && view.webContents;
+        url = (wc && !wc.isDestroyed() && wc.getURL && wc.getURL()) || '';
+      }
+      recent = this.networkMonitor.list({ tab: tabId, limit: 10 }).requests
+        .map((r) => (r.method || 'GET') + ' ' + String(r.url).slice(0, 110) + (r.status ? ' -> ' + r.status : ''));
+    } catch (_) { /* 记现场失败绝不许影响页面 */ }
+    try {
+      recordError('captcha_wall', {
+        kind,
+        tab: tabId,
+        url: String(url).slice(0, 300),
+        prev_url: String(prev).slice(0, 300),
+        ...extra,
+        recent_requests: recent,
+        hint: '风控墙现场：kind=dom 是页内盖层，kind=nav 是跳到了验证页/验证帧。看 prev_url 与 recent_requests，别只看 url',
+      });
+    } catch (_) { /* 同上 */ }
+  }
+
   _forgetTab(tabId) {
     const gid = this._tabGroup.get(tabId);
     this._tabGroup.delete(tabId);
     this._tabUsedAt.delete(tabId);
     this._pendingNavUrl.delete(tabId);
+    this._lastMainUrl.delete(tabId);
     if (!gid || gid === tabGroup.HUMAN_GROUP) return;
     // 组空了就删：留在 Map 里会让标签栏出现一个 0 页的分组，下次同名 agent
     // 重连还会复用那个组的编号/颜色，看起来像"上一轮的残留"。
@@ -4452,8 +4564,11 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     // 身份：先按 Electron 的方式设 UA（覆盖 CDP 就绪之前的请求），再把
     // UA-CH 元数据交给内核。两步用的是**同一个** config.identity，
     // 所以 UA、sec-ch-ua、navigator.userAgentData 不会各说一套。
-    view.webContents.setUserAgent(config.userAgent);
-    this._applyIdentity(tabId, view);
+    // AI_BROWSER_IDENTITY=0 时整层跳过，内核用自己那份身份（二分定位用）。
+    if (config.identityEnabled) {
+      view.webContents.setUserAgent(config.userAgent);
+      this._applyIdentity(tabId, view);
+    }
 
     // beforeunload：Electron 侧的等价物。**不处理它会静默拦住导航** —— 既没有
     // 对话框、也没有报错，表现成"点了链接/调了 navigate，页面就是不动"。
@@ -4467,6 +4582,21 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     // 只认这一条，不认页内导航：SPA 发私信、发评论走的是 pushState，那时候草稿
     // 还在（或者刚变成"提交出去的内容"），跟着清等于保护从来没生效过。
     view.webContents.on('did-navigate', () => this._setDraft(tabId, false));
+    // 风控墙的导航侧记录 + "上一页"追踪（判据要拿这一发对差，见 _recordCaptchaWall）。
+    // 用 did-frame-navigate 而不是只挂 did-navigate：百度的验证经常藏在**子帧**里，
+    // 主框架 URL 一个字都不变。
+    view.webContents.on('did-frame-navigate', (_e, navUrl, httpCode, _statusText, isMainFrame) => {
+      try {
+        const u = String(navUrl || '');
+        // 只看真实的网络导航：我们自己的 loading.html 占位页把目标 URL 塞在 query 里，
+        // 拿它匹配会记一条"自己撞了自己"的假现场。
+        if (!/^https?:/i.test(u)) return;
+        if (CAPTCHA_WALL_RE.test(u)) {
+          this._recordCaptchaWall('nav', tabId, { url: u, status: httpCode, main_frame: !!isMainFrame });
+        }
+        if (isMainFrame) this._lastMainUrl.set(tabId, u);
+      } catch (_) { /* 记录不许影响导航 */ }
+    });
 
     // Intercept window.open / new-window → create new tab instead
     view.webContents.setWindowOpenHandler(({ url: urlToOpen, features }) => {
@@ -4577,7 +4707,8 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
       const proceed = () => {
         if (proceeded) return;
         proceeded = true;
-        Promise.resolve(this._ensureWindowOpenShim(tabId, view, targetUrl)).finally(() => {
+        Promise.resolve(this._ensureWindowOpenShim(tabId, view, targetUrl))
+          .finally(() => {
           // 失败也放行：宁可这个 tab 没有垫片，也不能把它卡在占位页。
           signalReady();
           if (targetUrl && wc0 && !wc0.isDestroyed()) {
@@ -6484,15 +6615,31 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     const md = config.identity.metadata;
     return {
       user_agent: config.identity.userAgent,
+      // 身份层是否真的挂上了（AI_BROWSER_IDENTITY=0 时是 false，内核用自己的那份）。
+      // 二分定位时必须先看这一行，否则"关掉身份再试"会被读成"身份没生效"。
+      identity_override: config.identityEnabled === true,
       chrome_version: config.identity.chromeVersion,
+      // 声称版本与真实内核版本**分开报**：二分实验（AI_BROWSER_CHROME_VERSION）
+      // 改了前者，诊断口必须让人一眼看出这一发是"声称 156、内核还是 130"。
+      claimed_version: config.identity.claimedVersion,
+      // 'chromium' = 只报 Chromium（线上默认）；'chrome' = 冒名 Google Chrome（只用于对照实验，
+      // 这个形状下 Google 登录必被拒，见 identityInfo 上面那段与 shared/browser_identity.cjs）。
+      brands_mode: config.identity.brands_mode,
+      // UA 里的产品 token。空串意味着这条 UA 是一条"纯 Chrome"——Google 登录会按
+      // Chrome 的自证标准判（rrk=46）。这一行让"UA 被自定义掉了 token"一眼可查。
+      product_token: config.identity.product || '',
       platform: md.platform,
       platform_version: md.platformVersion,
-      brands: md.brands.map((b) => `${b.brand};v="${b.version}"`),
+      // brands 可能是 undefined（内核大版本不在 GREASE 表里就不下发），诊断口不许因此抛错。
+      brands: (md.brands || []).map((b) => `${b.brand};v="${b.version}"`),
       override_applied_tabs: Array.from(this._identityApplied),
       // 导航请求的 sec-ch-ua* 由 webRequest 出口补（内核不发，见 uaClientHintsOf
       // 注释）。这两条让"补没补上、补了多少次"可查，不靠猜。
       navigation_hints_bridge: this._clientHintBridge === true,
       navigation_hints_added: this._clientHintAdded || 0,
+      // 高熵头按授权发：这一条报"哪些 origin 被服务端授权过"，配合
+      // tools/_oneoff/wire_product.cjs（读服务器收到的头）能直接看出补没补上。
+      accept_ch_origins: (this._acceptChGrants && this._acceptChGrants.keys()) || [],
     };
   }
 

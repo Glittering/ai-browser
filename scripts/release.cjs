@@ -112,8 +112,17 @@ rewrite('src/shared/version.js', (s) => s.replace(`VERSION = '${from}'`, `VERSIO
 // 但任何人 `npm install` 一次就会把它刷成新值 —— 于是工作区变脏、下一次发版的
 // 「前置检查」直接卡住（2026-10-25 就在这上面卡过一轮）。锁文件的两个 version
 // 都替换；少了任何一处，下次 install 又会漂回去。
+//
+// ⚠️ 必须**按结构改**，不能全局替换 `"version": "<from>"`（2026-11-06 踩过）：
+// 依赖里恰好有同版本号的包（当时是 @bramus/specificity 2.5.2、@noble/hashes 2.5.2），
+// 全局替换会把它们的 version 改成新版本，而 resolved/integrity 还停在旧包上 ——
+// lockfile 从此自相矛盾，且 `npm ci` 会失败。
 try {
-  rewrite('package-lock.json', (s) => s.split(`"version": "${from}"`).join(`"version": "${to}"`));
+  const lockPath = path.join(ROOT, 'package-lock.json');
+  const lock = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+  lock.version = to;
+  if (lock.packages && lock.packages['']) lock.packages[''].version = to;
+  fs.writeFileSync(lockPath, JSON.stringify(lock, null, 2) + '\n');
 } catch (e) {
   warn('package-lock.json 版本号未同步（可能本来就漂着）：' + String(e.message).split('\n')[0]);
 }

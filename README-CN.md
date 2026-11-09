@@ -27,6 +27,8 @@ npx -y @glittering0717/ai-browser mcp
 
 macOS 用户也可以直接用打包好的 `.dmg`（Release 里），不用装 Node.js——但 MCP 的 npx 桥接依然需要，它负责把服务器注册进客户端。
 
+Windows 用户直接下 Release 里的 `AI-Browser-<版本>-win32-x64-Setup.exe`（约 79 MB）：双击装完就有开始菜单和桌面快捷方式，装到 `%LOCALAPPDATA%\Programs\AI Browser`，不需要管理员权限；卸载在「设置 → 应用」里，只删程序，不碰 `~/.ai-browser`（登录态和配置留着）。包没有代码签名，SmartScreen 会拦一次：**更多信息 → 仍要运行**。
+
 ## 5 分钟跑第一个任务
 
 把这段话发给你的 Agent：
@@ -230,12 +232,25 @@ UA + UA-CH 元数据走 CDP；Accept-Language 只给干净的首选列表（不�
 在导航请求上**根本不发**这三个头（页面里的 `fetch` 却发），试过 CDP 覆盖、
 `Emulation.setUserAgentOverride`、先 `Network.enable` 三条路都不行。
 
+**Google 登录另有一条独立的坑，跟"字段互相打脸"不是同一件事**（2026-11-05 六臂实测）：
+以前我们把 UA 写成一条**纯** `Chrome/130.0.0.0`，品牌里带上 `Google Chrome`，等于对外
+宣称"我是 Chrome 官方版"。Google 会照这个宣称去验 Chrome 浏览器层的自证
+（`window.chrome` 那几个 Gaia 绑定 + 安装态），Electron 壳给不出，于是登录页直接
+`/v3/signin/rejected?rrk=46`。**冒名越像，判得越死。** 现在 UA 里带自家 token
+（`ai-browser/2.5.2`，Edge 带 `Edg/`、Vivaldi 带 `Vivaldi/` 是同一个道理），品牌只报
+`Chromium`——我们是 Chromium 内核，这是真话——同一台机器、同一个账号、同样只输邮箱，
+服务端就从"拒绝"变成了正常进密码步。
+
+两个只用于对照实验的口子别在线上开：`AI_BROWSER_BRANDS=chrome`（改回冒名形状，复现
+rrk=46）、`AI_BROWSER_IDENTITY=0`（整层不覆盖，回到内核原生身份）。
+
 别猜，直接问：
 
 ```bash
 node bin/ai-browser.cjs call ui.server_info
 # → identity: {user_agent, chrome_version, platform, platform_version, brands[],
-#              navigation_hints_bridge, override_applied_tabs[]}
+#              brands_mode, identity_override, navigation_hints_bridge,
+#              override_applied_tabs[]}
 ```
 
 还没消掉的真实差距：

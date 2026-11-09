@@ -31,6 +31,10 @@ export const config = {
   // 主进程用 CDP 把它们一起交给内核（Network.setUserAgentOverride），
   // 这样 header、navigator.userAgent、navigator.userAgentData 三处永远一致。
   identity,
+  // 身份层总开关。**只用于二分定位**：关掉之后内核用自己那份身份（UA 里带
+  // Electron/<ver>、brands 只有 Chromium），用来回答"这个站点的问题是不是
+  // 身份层造成的"。默认开：关掉它会同时丢掉"字段互相打脸"那几处修复。
+  identityEnabled: identityUtil.isEnabledByDefault(process.env.AI_BROWSER_IDENTITY),
   userAgent: identity.userAgent,
   // Height of the in-app tab strip below the window title bar.
   // 36px = tab row, 38px = toolbar row (address bar + back/forward/reload/stop).
