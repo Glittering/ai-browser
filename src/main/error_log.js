@@ -36,6 +36,10 @@ let logFile = null;
 let logDir = null;
 let wroteBytes = 0;
 let dropped = 0;
+// 写不进去的**原因**。以前只 dropped += 1，事后只知道"少了 30 条"，不知道
+// 是 EMFILE / ENOSPC / 还是别的（2026-11-09 事故：旧进程从崩溃那刻起一条都写
+// 不进去，而没有任何线索说明为什么）。
+let writeError = null;
 
 const ring = [];
 const callRing = [];
@@ -97,8 +101,25 @@ function appendLine(obj) {
     fs.appendFileSync(logFile, line);
     wroteBytes += Buffer.byteLength(line);
   } catch (e) {
-    // 写不下去就记账，靠 ui.errors 的 dropped 字段让调用方知道"这里缺了东西"
+    // 写不下去就记账，靠 ui.errors 的 dropped 字段让调用方知道"这里缺了东西"。
+    // 但**原因必须留下来**：只 +1 的话，事后只能看到"少了 N 条"，无法判断是
+    // fd 耗尽、磁盘满，还是进程自己坏了。fd 2（启动器已经重定向到 stderr.log）
+    // 是另一条独立的落点，往那儿也打一行 —— 当日志文件本身写不进去时，
+    // 那一行往往就是唯一还活着的证据。
     dropped += 1;
+    const code = (e && e.code) || '';
+    const message = String((e && e.message) || e).slice(0, 200);
+    writeError = {
+      count: (writeError ? writeError.count : 0) + 1,
+      code,
+      message,
+      at: nowIso(),
+    };
+    if (writeError.count === 1 || writeError.count % 100 === 0) {
+      try {
+        console.error('[error_log] append failed (' + writeError.count + 'x):', code || '-', message);
+      } catch (_) { /* stderr 也没了就只能算了 */ }
+    }
   }
 }
 
@@ -286,6 +307,8 @@ export function recentErrors(limit = 50, kind = null) {
     dir: logDir,
     count_in_memory: items.length,
     dropped_writes: dropped,
+    // 落盘失败的原因（首次失败的时间/errno/message/累计次数）。null = 一直写得进去。
+    write_error: writeError,
     items: items.slice(-n),
   };
 }
@@ -301,6 +324,7 @@ export function __resetForTests() {
   logDir = null;
   wroteBytes = 0;
   dropped = 0;
+  writeError = null;
   maxBytes = DEFAULT_MAX_BYTES;
   keepFiles = DEFAULT_KEEP;
   ring.length = 0;

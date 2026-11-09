@@ -27,6 +27,7 @@ import { EventEmitter } from 'node:events';
 // 我们这个模块的绑定就绪之后跑。
 import * as electronMock from 'electron';
 import { PageManager } from '../src/main/page_manager.js';
+import { recentErrors } from '../src/main/error_log.js';
 import { config } from '../src/shared/config.js';
 import tabState from '../src/shared/tab_state.cjs';
 
@@ -67,6 +68,9 @@ vi.mock('electron', async () => {
     getUserAgent() { return this.userAgent; }
     setUserAgent(ua) { this.userAgent = ua; }
     loadURL(url) { this.url = url; return Promise.resolve(); }
+    // 崩溃自救的落点。`reason` 的判断对不对，只能看这一个计数 ——
+    // 回执和广播都可能是"看起来救了"（2026-11-09 白屏：一条都没重载）。
+    reload() { this.reloads = (this.reloads || 0) + 1; }
     // 存下 handler，测试才能真的调用它 —— window.open 的两条入口之一
     // （setWindowOpenHandler）的几何判据只能这么测（PM-33）。
     setWindowOpenHandler(fn) { this.windowOpenHandler = fn; }
@@ -267,6 +271,51 @@ describe('IPC 回执的归属（页面伪造树那条路）', () => {
     await expect(p).rejects.toThrow(/timeout/i);
     expect(Date.now() - t0).toBeLessThan(9000);
   }, 15000);
+});
+
+describe('渲染进程退出后的自救（2026-11-09 白屏）', () => {
+  // 事故形态：GPU 的 command buffer 失效后，Chromium 把**全部**渲染进程按
+  // `clean-exit`（exit_code=1）结束。旧判据 `reason === 'clean-exit' → return`
+  // 认为这是正常退出，于是一个都没重载 —— 9 个标签永久白屏。
+  // 判据必须是"这一页还在不在我们手里"，而不是 reason。
+
+  it('PM-62 clean-exit 但 tab 还在 → 必须重载（否则永久白屏）', () => {
+    const tid = pm.newTab('https://cascade.example/');
+    const view = pm.tabs.get(tid);
+    view.webContents.emit('render-process-gone', {}, { reason: 'clean-exit', exitCode: 1 });
+    expect(view.webContents.reloads).toBe(1);
+  });
+
+  it('PM-63 我们主动关掉的 tab（已从 tabs 摘除）→ 不许复活', () => {
+    const tid = pm.newTab('https://closed.example/');
+    const view = pm.tabs.get(tid);
+    pm.closeTab(tid);
+    expect(pm.tabs.has(tid)).toBe(false);
+    view.webContents.emit('render-process-gone', {}, { reason: 'clean-exit', exitCode: 0 });
+    expect(view.webContents.reloads || 0).toBe(0);
+  });
+
+  it('PM-64 15 秒内只救一次：崩了又崩说明是死循环，不能反复闪', () => {
+    const tid = pm.newTab('https://loop.example/');
+    const view = pm.tabs.get(tid);
+    view.webContents.emit('render-process-gone', {}, { reason: 'crashed', exitCode: 5 });
+    view.webContents.emit('render-process-gone', {}, { reason: 'crashed', exitCode: 5 });
+    expect(view.webContents.reloads).toBe(1);
+  });
+
+  it('PM-65 几秒内多个渲染进程退出 → 落一条 render_cascade 汇总（下次一眼认出不是单页崩溃）', async () => {
+    const a = pm.newTab('https://a1.example/');
+    const b = pm.newTab('https://b1.example/');
+    pm.tabs.get(a).webContents.emit('render-process-gone', {}, { reason: 'clean-exit', exitCode: 1 });
+    pm.tabs.get(b).webContents.emit('render-process-gone', {}, { reason: 'clean-exit', exitCode: 1 });
+    await new Promise((r) => setTimeout(r, 1200)); // 汇总等 1 秒（让后到的也进同一条）
+    const cascades = recentErrors(20, 'render_cascade').items;
+    expect(cascades.length).toBeGreaterThan(0);
+    const last = cascades[cascades.length - 1];
+    expect(last.count).toBeGreaterThanOrEqual(2);
+    expect(last.tabs).toContain(a);
+    expect(last.tabs).toContain(b);
+  }, 8000);
 });
 
 describe('文档导航的 UA-CH 出口补头（_installClientHintBridge）', () => {

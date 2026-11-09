@@ -214,3 +214,35 @@ describe('error_log — 滚动', () => {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch {}
   });
 });
+
+describe('error_log — 写不进去时把原因留下来', () => {
+  // 2026-11-09 事故：崩溃那一刻起 error.jsonl 一条都写不进去（dropped 涨到 30+），
+  // 而旧实现只 `dropped += 1`，事后完全不知道是 fd 耗尽、磁盘满还是进程坏了。
+  // 判据：失败必须带 errno/message，且 ui.errors 能读到；没失败时必须是 null。
+
+  it('EL-17 append 失败时记录 errno 与 message（用同名目录逼出 EISDIR）', () => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'aib-wr-'));
+    __resetForTests();
+    // 先建一个叫 error.jsonl 的**目录**：appendFileSync 必然失败，且真实、不靠 mock
+    fs.mkdirSync(path.join(d, 'error.jsonl'));
+    initErrorLog({ dir: d });
+    const r = recentErrors(10);
+    expect(r.dropped_writes).toBeGreaterThan(0);
+    expect(r.write_error).toBeTruthy();
+    expect(r.write_error.code).toBeTruthy();
+    expect(String(r.write_error.message).length).toBeGreaterThan(0);
+    expect(r.write_error.count).toBeGreaterThan(0);
+    try { fs.rmSync(d, { recursive: true, force: true }); } catch {}
+  });
+
+  it('EL-18 阳性对照：写得进去时 write_error 必须是 null（别把"正常"报成"坏了"）', () => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'aib-wr-ok-'));
+    __resetForTests();
+    initErrorLog({ dir: d });
+    recordError('ws_error', { message: 'fine' });
+    const r = recentErrors(10);
+    expect(r.dropped_writes).toBe(0);
+    expect(r.write_error).toBe(null);
+    try { fs.rmSync(d, { recursive: true, force: true }); } catch {}
+  });
+});

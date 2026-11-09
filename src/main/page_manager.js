@@ -332,6 +332,10 @@ class PageManager {
     this._paintSelfReload = new Set();
     // tabId -> 上次因渲染进程崩溃而重载的时刻（见 _attachCrashRecovery 的 15s 上限）
     this._crashReloadAt = new Map();
+    // 最近几秒的渲染进程退出记录（判"是不是级联"用，见 _noteRenderDeath）。
+    // 不是 per-tab 状态：只保留一个时间窗，不按键清理，所以不进 PER_TAB。
+    this._renderDeaths = [];
+    this._cascadeTimer = null;
     this._snapshots = new Map();    // snapshotId -> { tabId, js, value, at }（ui.snapshot 存基线）
     this._snapshotSeq = 0;
     // tabId -> 上一次主框架导航的 URL。只为"撞上验证码墙时把上一页记下来"存在：
@@ -5440,10 +5444,26 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
     this._crashHooked.add(view);
     view.webContents.on('render-process-gone', (_e, details) => {
       const reason = (details && details.reason) || 'unknown';
+      const exitCode = details && details.exitCode;
       let url = null;
       try { url = view.webContents.getURL(); } catch (_) {}
-      recordError('render_process_gone', { tab: tabId, reason, exit_code: details && details.exitCode, url });
-      if (reason === 'clean-exit') return;
+      recordError('render_process_gone', { tab: tabId, reason, exit_code: exitCode, url });
+      this._noteRenderDeath(tabId, reason, exitCode);
+
+      // ⚠️ 判据是"**这一页还在不在我们手里**"，不是 reason。
+      //
+      // 2026-11-09 事故：GPU 的 command buffer 失效（stderr:
+      // `command_buffer_proxy_impl ... GPU state invalid`）之后，Chromium 把
+      // 全部渲染进程按 `clean-exit`（exit_code=1）结束掉 —— 9 个标签在同一
+      // 毫秒走这条路。旧代码 `if (reason === 'clean-exit') return;` 于是
+      // **一个都没重载**，用户看到的是永久白屏；而 list_tabs 还报 ready、
+      // paint_check 还报 blank:false（视图对象没销毁，只是渲染进程没了）。
+      //
+      // "真正正常的退出"只有一个特征：tab 已经被 closeTab 从 this.tabs 摘掉，
+      // 或者 webContents 已销毁。剩下的都是非自愿终止，都得救。
+      if (this.tabs.get(tabId) !== view) return;
+      if (view.webContents.isDestroyed()) return;
+
       const last = this._crashReloadAt.get(tabId) || 0;
       if (Date.now() - last < 15000) return;
       this._crashReloadAt.set(tabId, Date.now());
@@ -5452,6 +5472,40 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
         this._broadcast('tab_recovered', { tab: tabId, reason, action: 'reload', url });
       } catch (_) { /* 视图已销毁 */ }
     });
+  }
+
+  /**
+   * 记一次渲染进程退出，并在"几秒内多个一起退出"时落一条 `render_cascade` 汇总。
+   *
+   * 单页崩溃是常态（死法五花八门）；而**多个渲染进程在同一瞬间退出**只有一类
+   * 原因 —— GPU / 网络服务这类共享子进程出问题。2026-11-09 那次只留下 19 条
+   * 各自独立的 render_process_gone（还因为两处监听各记一遍而×2），最后是靠
+   * stderr.log 里的 `command_buffer_proxy_impl` 才认出来是级联，而 stderr 会滚动。
+   * 这里主动汇总一次，"同时死了几个、什么 reason、哪些 tab"一眼可见。
+   *
+   * 不参与 tab 生命周期（只有一个 3 秒窗口），所以不进 shared/tab_state.cjs。
+   */
+  _noteRenderDeath(tabId, reason, exitCode) {
+    const now = Date.now();
+    this._renderDeaths = this._renderDeaths.filter((d) => now - d.at < 3000);
+    this._renderDeaths.push({ tab: tabId, at: now, reason, exit: exitCode });
+    if (this._renderDeaths.length < 2 || this._cascadeTimer) return;
+    // 等 1 秒再汇总：级联里后面的进程往往晚几十到几百毫秒才报，立刻落会把
+    // "9 个"写成"2 个"。
+    this._cascadeTimer = setTimeout(() => {
+      this._cascadeTimer = null;
+      const burst = this._renderDeaths.filter((d) => Date.now() - d.at < 5000);
+      if (burst.length < 2) return;
+      recordError('render_cascade', {
+        count: burst.length,
+        window_ms: 5000,
+        tabs: burst.map((d) => d.tab),
+        reasons: [...new Set(burst.map((d) => d.reason))],
+        exit_codes: [...new Set(burst.map((d) => d.exit))],
+        hint: '多个渲染进程同时退出 = 不是单页崩溃；先看 GPU / 网络服务（stderr.log 的 command_buffer_proxy_impl / network_service_instance_impl）',
+      });
+    }, 1000);
+    if (this._cascadeTimer.unref) this._cascadeTimer.unref();
   }
 
   /**
