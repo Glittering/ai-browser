@@ -3,6 +3,8 @@
 import { app, BrowserWindow, BrowserView, ipcMain, net, session, dialog, screen, powerMonitor, shell, nativeImage } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
+import os from 'node:os';
+import v8 from 'node:v8';
 import { fileURLToPath } from 'node:url';
 import { startWSServer } from './ws_server.js';
 import { PageManager } from './page_manager.js';
@@ -10,7 +12,7 @@ import { config } from '../shared/config.js';
 import mediaDoc from '../shared/media_doc.cjs';
 import { parseWatchdogTargets, isWatchdogEnabled } from '../shared/watchdog.js';
 import { wrapSetActive } from '../shared/tab_hooks.js';
-import { initErrorLog, recordError, markShutdown, getLogPath } from './error_log.js';
+import { initErrorLog, recordError, markShutdown, getLogPath, recordDiag } from './error_log.js';
 import errorBanner from '../shared/error_banner.cjs';
 // .cjs 一律默认导入：ESM 从 .cjs 做具名导入依赖 cjs-module-lexer 静态识别，
 // 而 tests/test_imports.js 只认 ESM `export` 语法，会误报"没有导出它"。全项目约定
@@ -42,6 +44,57 @@ app.setPath('userData', config.userDataDir);
 // 漏掉最关键的那一段。目录放在 userData 下（可写、可预期）：~/.ai-browser/logs/
 const LOG_DIR = path.join(config.userDataDir, 'logs');
 initErrorLog({ dir: LOG_DIR, meta: { port: config.wsPort, userData: config.userDataDir } });
+
+// === 运行轨迹记录（只记录，不干预）===
+// 2026-11-08 实测：一个从源码起的实例连跑约 3 天后在主进程 V8 层 SIGABRT
+// （node::OnFatalError → abort），error.jsonl 里只有一条 boot、没有 shutdown。
+// 这种 native fatal 绕过所有 JS 处理器，唯一的证据是 C 层写入 fd 2 的
+// "FATAL ERROR: ..."（由启动器重定向到 logs/stderr.log 捕获，见 scripts/start.cjs）。
+// 这里补另一半：崩之前的运行轨迹 —— 内存 / 堆上限 / 标签数，每 5 分钟一条。
+// 明确**不做阈值判断、不自动重启**：只记录，是否处置交给看日志的人。
+let heartbeatTimer = null;
+function memSnapshot() {
+  try {
+    const m = process.memoryUsage();
+    const mb = (n) => Math.round(n / 1048576);
+    const out = {
+      rss_mb: mb(m.rss),
+      heap_used_mb: mb(m.heapUsed),
+      heap_total_mb: mb(m.heapTotal),
+      external_mb: mb(m.external),
+      arraybuf_mb: mb(m.arrayBuffers),
+    };
+    try { out.heap_limit_mb = Math.round(v8.getHeapStatistics().heap_size_limit / 1048576); } catch {}
+    return out;
+  } catch { return {}; }
+}
+function startRuntimeHeartbeat(everyMs = 5 * 60 * 1000) {
+  if (heartbeatTimer) return;
+  const tick = () => {
+    const info = { uptime_s: Math.round(process.uptime()), ...memSnapshot() };
+    try {
+      if (pageManager) {
+        info.tabs = pageManager.tabs && typeof pageManager.tabs.size === 'number' ? pageManager.tabs.size : null;
+        info.active_tab = pageManager.activeTab == null ? null : pageManager.activeTab;
+      }
+    } catch { /* PageManager 正在拆 */ }
+    try { recordDiag('heartbeat', info); } catch {}
+  };
+  tick();
+  heartbeatTimer = setInterval(tick, everyMs);
+  if (heartbeatTimer.unref) heartbeatTimer.unref();
+}
+// 启动即记一条环境快照：物理内存、堆上限、CPU 数。崩溃报告里只有虚拟内存，
+// 这里回答的是"当时机器还有多少可用内存"这个前提。
+try {
+  recordDiag('runtime', {
+    phase: 'boot',
+    ...memSnapshot(),
+    total_mem_mb: Math.round(os.totalmem() / 1048576),
+    free_mem_mb: Math.round(os.freemem() / 1048576),
+    cpus: os.cpus().length,
+  });
+} catch {}
 
 // === 主进程兜底 ===
 // 注册 uncaughtException 就等于接管 Electron 的默认行为 —— 而那个默认行为正是
@@ -684,6 +737,9 @@ function createWindow() {
   // 否则"页面上这一帧的问题"和"这条路的问题"永远分不开。
   pageManager.renderPath = { gpu: !gpuDisabled, reason: gpuPref === 'off' ? 'env' : (gpuDisabled ? 'fallback' : 'default') };
   pageManager._preloadPath = path.join(__dirname, '../preload/bridge.cjs');
+
+  // 从这里起才有 pageManager，心跳开始带标签数（第一条在 pageManager 就绪后立刻写）。
+  startRuntimeHeartbeat();
 
   // Create first tab.
   //
@@ -1492,6 +1548,10 @@ function _finishCleanup() {
   // 收尾行：日志里**没有** shutdown 行，就说明上一次是硬退（崩溃 / 被 kill）——
   // 这是事后判断"到底有没有崩过"最直接的依据。
   try { markShutdown('cleanup'); } catch {}
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
   if (tabRefreshInterval) {
     clearInterval(tabRefreshInterval);
     tabRefreshInterval = null;

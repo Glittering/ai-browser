@@ -76,6 +76,22 @@ describe('browser_identity — UA 与 client hints 同源', () => {
     expect(id.platformVersionOf('win32', '')).toBe('10.0.0');
   });
 
+  it('ID-5b: macOS 26+ 报真实系统版本，不再用「Darwin − 9」（否则算出不存在的 18.0.0）', () => {
+    // 2026-11-09 实测：本机 Darwin 27.0.0 / macOS 27.0.1，旧公式给出 18.0.0 —— macOS 从未有 18。
+    expect(id.platformVersionOf('darwin', '27.0.0', '27.0.1')).toBe('27.0.1');
+    expect(id.platformVersionOf('darwin', '27.0.0', '26.0')).toBe('26.0.0');
+    // 有真实系统版本时优先于 release 推导
+    expect(id.platformVersionOf('darwin', '24.1.0', '15.2.0')).toBe('15.2.0');
+    // 没有 systemVersion（纯 Node）仍保持旧的达尔文映射，只覆盖 macOS ≤ 15
+    expect(id.platformVersionOf('darwin', '24.1.0')).toBe('15.0.0');
+  });
+
+  it('ID-5c: buildIdentity 把注入的 systemVersion 写进 metadata.platformVersion', () => {
+    const built = id.buildIdentity({ platform: 'darwin', release: '27.0.0', systemVersion: '27.0.1', chromeVersion: '130.0.6723.191' });
+    expect(built.metadata.platformVersion).toBe('27.0.1');
+    expect(built.metadata.platform).toBe('macOS');
+  });
+
   it('ID-6: 自定义 UA 时 hints 跟着 UA 里的平台走', () => {
     const macUa = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
     // 注意这里**不**传 platform：让函数自己在真实运行时的机器上按 UA 判平台。

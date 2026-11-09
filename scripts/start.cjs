@@ -21,8 +21,33 @@
 
 const { spawn } = require('node:child_process');
 const path = require('node:path');
+const fs = require('node:fs');
+const os = require('node:os');
 
 const root = path.resolve(__dirname, '..');
+
+/**
+ * Electron 子进程的 stderr 落点：<userData>/logs/stderr.log。
+ * 为什么要重定向 fd 2（而不是 pipe 到控制台）：V8/Node 的 native fatal 在 C 层
+ * 用 `fprintf(stderr, "FATAL ERROR: ...")` 输出，只有真正的 fd 2 能接到；而把
+ * stderr 接到一个短命的管道（例如 `npm start | tee`，会话一结束读端就没了）时，
+ * 崩溃那一刻的原文会直接丢失 —— 2026-11-08 的 SIGABRT 就是这么丢掉证据的。
+ * 超过 5MB 时轮转一份 .1，避免长期运行把盘写满。
+ */
+function openStderrFd() {
+  try {
+    const base = process.env.AI_BROWSER_USER_DATA || path.join(os.homedir(), '.ai-browser');
+    const dir = path.join(base, 'logs');
+    fs.mkdirSync(dir, { recursive: true });
+    const p = path.join(dir, 'stderr.log');
+    try {
+      if (fs.statSync(p).size > 5 * 1024 * 1024) fs.renameSync(p, p + '.1');
+    } catch { /* 文件还不存在 */ }
+    return { fd: fs.openSync(p, 'a'), path: p };
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Launch the Electron app in the foreground (stdio inherited).
@@ -41,7 +66,16 @@ function launchElectron() {
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE;
 
-  return spawn(electron, [root], { cwd: root, stdio: 'inherit', env });
+  const err = openStderrFd();
+  let stdio = 'inherit';
+  if (err) {
+    // 子进程直接持有这个 fd 的副本；父进程随后关掉自己的那份。
+    stdio = ['inherit', 'inherit', err.fd];
+    console.log('[start] Electron stderr → ' + err.path + '（崩溃时的 FATAL 原文会落到这里）');
+  }
+  const child = spawn(electron, [root], { cwd: root, stdio, env });
+  if (err) { try { fs.closeSync(err.fd); } catch {} }
+  return child;
 }
 
 module.exports = { launchElectron, appRoot: root };

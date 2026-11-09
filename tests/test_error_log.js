@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  initErrorLog, recordError, noteCall, recentErrors, getLogPath,
+  initErrorLog, recordError, recordDiag, noteCall, recentErrors, getLogPath,
   markShutdown, __resetForTests,
 } from '../src/main/error_log.js';
 
@@ -82,6 +82,45 @@ describe('error_log — 写入与回读', () => {
     expect(r.path).toBe(path.join(dir, 'error.jsonl'));
     expect(r.dir).toBe(dir);
     expect(fs.existsSync(r.path)).toBe(true);
+  });
+
+  it('EL-14 recordDiag 只落盘：不附 recent_calls，也不进错误环（心跳不是错误）', () => {
+    // 先塞点调用上下文，验证 recordDiag **不会**把它带进条目
+    noteCall('ui.act', { action: 'click', tab: 1 }, 3, true);
+    recordDiag('heartbeat', { rss_mb: 123, heap_used_mb: 45, tabs: 2 });
+    const h = lines(getLogPath()).find((e) => e.kind === 'heartbeat');
+    expect(h).toBeTruthy();
+    expect(h.rss_mb).toBe(123);
+    expect(h.tabs).toBe(2);
+    expect(h.recent_calls).toBeUndefined();
+    // 默认的 recentErrors 不该被心跳占位
+    expect(recentErrors(50).items.some((e) => e.kind === 'heartbeat')).toBe(false);
+    // 心跳**只落盘、不进内存环**：它每 5 分钟一条，进环会把真实错误挤出 200 条上限。
+    // 所以内存里的 recentErrors 查不到它 —— 要查心跳请直接读 error.jsonl。
+    expect(recentErrors(50, 'heartbeat').items.length).toBe(0);
+  });
+
+  it('EL-15 启动时检测到"上次没走 shutdown" → 记一条 previous_run_no_shutdown', () => {
+    // 上一次运行：有错误、但**没有** shutdown（模拟崩溃/被 kill）
+    recordError('ws_error', { message: 'before-crash' });
+    __resetForTests();
+    initErrorLog({ dir, meta: { run: 2 } });
+    const l = lines(getLogPath());
+    const hit = l.find((e) => e.kind === 'previous_run_no_shutdown');
+    expect(hit).toBeTruthy();
+    expect(hit.prev_kind).toBe('ws_error');
+    expect(typeof hit.gap_ms).toBe('number');
+    // boot 仍然是首行（硬退记录追加在它后面，不破坏 EL-1 的约定）
+    expect(l[0].kind).toBe('boot');
+  });
+
+  it('EL-16 上次正常 shutdown → 不误报硬退', () => {
+    recordError('ws_error', { message: 'ok' });
+    markShutdown('cleanup');
+    __resetForTests();
+    initErrorLog({ dir, meta: { run: 2 } });
+    const l = lines(getLogPath());
+    expect(l.find((e) => e.kind === 'previous_run_no_shutdown')).toBeFalsy();
   });
 });
 

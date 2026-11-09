@@ -31,10 +31,34 @@
 const { spawn } = require('node:child_process');
 const net = require('node:net');
 const path = require('node:path');
+const fs = require('node:fs');
+const os = require('node:os');
 
 const ROOT = path.resolve(__dirname, '..');
 const DEFAULT_PORT = 9223;
 const DEFAULT_TIMEOUT = 30000;
+
+/**
+ * 直接 spawn 时把 Electron 的 stderr 重定向到 <userData>/logs/stderr.log。
+ * 理由同 scripts/start.cjs：V8 native fatal 走 C 层的 fd 2，`stdio:'ignore'`
+ * 会让崩溃原文彻底消失。走 LaunchServices（open）那条路拿不到 stdio，只能
+ * 依赖 macOS 的 .ips 崩溃报告 —— 但直接 spawn 是 macOS/开发机的主路径。
+ * 返回 fd（子进程持有副本后父进程负责关闭），失败返回 null（退回 ignore）。
+ */
+function openStderrFd() {
+  try {
+    const base = process.env.AI_BROWSER_USER_DATA || path.join(os.homedir(), '.ai-browser');
+    const dir = path.join(base, 'logs');
+    fs.mkdirSync(dir, { recursive: true });
+    const p = path.join(dir, 'stderr.log');
+    try {
+      if (fs.statSync(p).size > 5 * 1024 * 1024) fs.renameSync(p, p + '.1');
+    } catch { /* 文件还不存在 */ }
+    return fs.openSync(p, 'a');
+  } catch {
+    return null;
+  }
+}
 
 /** 端口上有没有人在听。超时 500ms —— 只探本地回环，不该慢。 */
 function checkPort(port, host = '127.0.0.1') {
@@ -133,8 +157,14 @@ async function ensureRunning(opts = {}) {
   delete env.ELECTRON_RUN_AS_NODE;   // 坑 ①
   let earlyExit = null;
   let child = null;
+  const errFd = openStderrFd();
   try {
-    child = spawn(bin, [ROOT], { cwd: ROOT, detached: true, stdio: 'ignore', env });  // 坑 ②
+    child = spawn(bin, [ROOT], {
+      cwd: ROOT, detached: true,
+      stdio: errFd ? ['ignore', 'ignore', errFd] : 'ignore',   // 坑 ②：stderr 落盘
+      env,
+    });
+    if (errFd) { try { fs.closeSync(errFd); } catch {} }   // 子进程已持有副本
     child.unref();
     child.on('exit', (code, signal) => { earlyExit = { code, signal }; });
     child.on('error', (e) => { earlyExit = { error: e.message }; });

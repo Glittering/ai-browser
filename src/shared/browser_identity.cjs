@@ -45,13 +45,35 @@ function majorOf(fullVersion) {
   return /^\d+$/.test(head) ? head : '0';
 }
 
+/** Electron 的 process.getSystemVersion() 返回真实系统市场版本（macOS 如 "27.0.1"）；
+ *  纯 Node（单测）没有这个 API，返回空串。 */
+function readSystemVersion() {
+  try {
+    const fn = process.getSystemVersion;
+    if (typeof fn === 'function') return String(fn() || '');
+  } catch (_) { /* 拿不到就当没有 */ }
+  return '';
+}
+
+/** 把 "27.0.1" / "27.0" / "27.0.1 (Build 25A1)" 规整成 "27.0.1" 这种三段数字；不合法返回 ''。 */
+function normalizeVersion3(v) {
+  const m = String(v || '').match(/(\d+)\.(\d+)(?:\.(\d+))?/);
+  return m ? `${m[1]}.${m[2]}.${m[3] || '0'}` : '';
+}
+
 /** Windows 的 UA-CH platformVersion 是 NT 版本（10.0.x 与 11 都是 "10.0.0"）。 */
-function platformVersionOf(platform, release) {
+function platformVersionOf(platform, release, systemVersion) {
   const parts = String(release || '').split('.');
   if (platform === 'win32') return `${parts[0] || '10'}.0.0`;
   if (platform === 'darwin') {
-    // Darwin 内核版本 → macOS 市场版本（Darwin 24 = macOS 15）；只拿得到大版本，
-    // 就报大版本，不要编一个小版本号出来。
+    // 优先用真实系统版本。macOS 15 之后 Apple 把版本号直接跳到 26/27，
+    // 「Darwin 大版本 − 9」会算出 macOS 从未有过的 "18.0.0"（2026-11-09 实测，
+    // 本机 Darwin 27.0.0 / macOS 27.0.1）—— 风控脚本读到它就是"伪造客户端"。
+    // getSystemVersion() 给的是真实市场版本，直接报它。
+    const sys = normalizeVersion3(systemVersion);
+    if (sys) return sys;
+    // 没有真实版本可问（纯 Node / 老运行时）：退回达尔文映射，只报大版本。
+    // 这条只覆盖 macOS ≤ 15 的历史区间，不能当作 26+ 的答案。
     const major = Number(parts[0]) - 9;
     return `${major > 0 ? major : 10}.0.0`;
   }
@@ -95,7 +117,8 @@ function buildIdentity(opts = {}) {
       platform: chPlatform,
       // 内核版本（os.release()）而不是"市场版本"：Chrome 在 Windows 上发的
       // platformVersion 就是 NT 版本，Win10/Win11 都是 10.0.0。
-      platformVersion: platformVersionOf(chPlatformKey, opts.release || osRelease()),
+      // macOS 26+ 例外：必须用真实系统版本（见 platformVersionOf 的注释）。
+      platformVersion: platformVersionOf(chPlatformKey, opts.release || osRelease(), opts.systemVersion || readSystemVersion()),
       architecture: ARCHITECTURE[opts.arch || process.arch] || 'x86',
       model: '',
     },

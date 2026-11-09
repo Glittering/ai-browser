@@ -103,6 +103,30 @@ function appendLine(obj) {
 }
 
 /**
+ * 读文件最后一条可解析的 JSONL 条目。用于「上次是不是硬退」的判断：启动时看
+ * 上一行是不是 `shutdown`，不是就说明上一个进程没走正常收尾（崩溃 / 被 kill）。
+ * 只读尾部 16KB，不整文件读（日志可能已有 2MB）；尾部半行解析失败就往前找。
+ * 永不抛 —— 记录功能自己不能成为崩溃源。
+ */
+function readLastEntry(file) {
+  try {
+    if (!file) return null;
+    const st = fs.statSync(file);
+    if (!st.size) return null;
+    const len = Math.min(16384, st.size);
+    const fd = fs.openSync(file, 'r');
+    const buf = Buffer.alloc(len);
+    try { fs.readSync(fd, buf, 0, len, st.size - len); }
+    finally { try { fs.closeSync(fd); } catch {} }
+    const lines = buf.toString('utf8').split('\n').filter(Boolean);
+    for (let i = lines.length - 1; i >= 0; i--) {
+      try { return JSON.parse(lines[i]); } catch { /* 半行/坏行：继续往前 */ }
+    }
+    return null;
+  } catch { return null; }
+}
+
+/**
  * 初始化日志目录。**必须在 app ready 之前调用**，否则早期崩溃（最常见的那类）
  * 落不了盘。
  * @param {{dir: string, meta?: object}} opts dir 为日志目录；meta 附在启动行里
@@ -118,6 +142,9 @@ export function initErrorLog(opts) {
   try {
     fs.mkdirSync(dir, { recursive: true });
     try { wroteBytes = fs.statSync(logFile).size; } catch { wroteBytes = 0; }
+    // 先看上一行：不是 shutdown 就说明上一个进程是硬退（崩溃/被 kill）。这条
+    // 判断必须在写 boot 之前做，否则读到的是自己刚写的 boot。
+    const prev = readLastEntry(logFile);
     // 进程边界的标记行：读日志时能一眼看出"这是哪一次启动"，以及上一次
     // 是不是异常结束（没有 shutdown 行就说明是硬退）
     appendLine({
@@ -129,6 +156,20 @@ export function initErrorLog(opts) {
       platform: process.platform + ' ' + process.arch,
       ...summarize((opts && opts.meta) || {}),
     });
+    // 把"上次没正常退出"显式记一笔：比让读日志的人自己去比 boot/shutdown 更省事，
+    // 而且带上了上一个 pid / 最后一条的时间与类别，能直接对上崩溃报告。
+    if (prev && prev.kind !== 'shutdown') {
+      const prevT = Date.parse(prev.ts);
+      appendLine({
+        ts: nowIso(),
+        kind: 'previous_run_no_shutdown',
+        pid: process.pid,
+        prev_pid: prev.pid === undefined ? null : prev.pid,
+        prev_ts: prev.ts || null,
+        prev_kind: prev.kind || null,
+        gap_ms: Number.isFinite(prevT) ? (Date.now() - prevT) : null,
+      });
+    }
   } catch {
     logFile = null;
   }
@@ -162,6 +203,27 @@ export function recordError(kind, info) {
   if (callRing.length) entry.recent_calls = callRing.slice(-20);
   ring.push(entry);
   while (ring.length > RING_MAX) ring.shift();
+  appendLine(entry);
+  return entry;
+}
+
+/**
+ * 记一条「运行轨迹」条目。与 recordError 的区别只有两点：
+ *   1. **不附 recent_calls** —— 心跳几分钟一条，每条都带 20 个调用摘要会迅速
+ *      写满日志；而且心跳本来就不是"由某次调用触发"的。
+ *   2. **不进错误环**（`recentErrors` 默认不返回它，见 MARKERS）。
+ * 用途：周期记录内存 / 标签数，事后回答"崩之前内存是不是在爬"。永不抛。
+ * @param {string} kind 事件类别：heartbeat / runtime / …
+ * @param {object} info 任意附加字段
+ */
+export function recordDiag(kind, info) {
+  const entry = {
+    ts: nowIso(),
+    kind: String(kind || 'diag'),
+    pid: process.pid,
+    uptime_ms: Math.round(process.uptime() * 1000),
+    ...summarize(info || {}),
+  };
   appendLine(entry);
   return entry;
 }
@@ -215,8 +277,9 @@ export function noteCall(method, params, ms, outcome) {
  */
 export function recentErrors(limit = 50, kind = null) {
   const n = Math.max(1, Math.min(RING_MAX, Number(limit) || 50));
-  // boot / shutdown 是进程边界标记，不是"错误"。只有明确按 kind 查时才返回它们。
-  const MARKERS = new Set(['boot', 'shutdown']);
+  // boot / shutdown 是进程边界标记，heartbeat 是运行轨迹 —— 都不是"错误"。
+  // 只有明确按 kind 查时才返回它们。
+  const MARKERS = new Set(['boot', 'shutdown', 'heartbeat']);
   let items = kind ? ring.filter((e) => e.kind === kind) : ring.filter((e) => !MARKERS.has(e.kind));
   return {
     path: logFile,
