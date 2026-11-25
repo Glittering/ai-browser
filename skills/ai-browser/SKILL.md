@@ -1,16 +1,17 @@
 ---
 name: ai-browser
 description: >-
-  ai-browser（AI Browser）—— 用一个真实可见的浏览器替用户上手操作网站：打开页面、点击、填表、登录、读正文、下载上传、看接口。
-  用户明确说"用 ai-browser / AI Browser"时就用本技能。
-  触发词：ai-browser、AI Browser、浏览器、打开网页、看看这个网页、这链接里写了啥、帮我点一下、帮我操作、点击、填表、自动填、输入、登录、登录态过期、扫码、验证码、二维码、发布、提交、下载、上传、抓取、爬取、截图、看接口、定时、每天、刷课、网页操作、browse、read a page that needs JS。
+  ai-browser（AI Browser）—— 一个真实、可见、可被人接管的浏览器：带登录态、跑 JS、人随时能抢鼠标。替用户在网页上拿东西、做事。
+  适用：任何要在网页上完成的任务 —— 包括搜索（含小红书/头条这类登录才看得到结果的）、读正文、点击填表登录提交、上传下载、抓数据、看登录后才有的接口。文章正文的提取配方见 read-webpage。用户点名 ai-browser / AI Browser 时直接用。
+  不适用：完全不碰网页的任务（本地文件、命令、代码、纯写作、跑测试）。
+  触发词（用户嘴里的说法）：看看这个网页、这链接里写了啥、帮我搜一下、帮我点一下、登录态过期。
 ---
 
 # ai-browser
 
 ## 两条路
 
-工具在就 `browse_navigate {"url":"https://example.com"}`；不在也不用配，走 CLI（同一引擎；没这个命令就加 `npx -y @glittering0717/ai-browser`，浏览器没开会自动拉起）：
+工具在就 `browse_navigate {"url":"https://example.com"}`；不在走 CLI（同一引擎；没这个命令就加 `npx -y @glittering0717/ai-browser`）：
 
 ```
 ai-browser call ui.get_tree '{"subset":"interactive"}'        # 读页面，拿 e:xxx
@@ -21,8 +22,7 @@ ai-browser call ui.act '{"action":"click","target":"e:a-3"}'  # 点它
 
 ## 你的标签组
 
-第一次动手会给你一页**空白工作页**，归在你自己的标签组；多 agent 各一组，互不相干。
-省略 `tab` 就打它；用户的页不会被碰也不会被顶掉。组有上限，满了先关再开。
+第一次动手给你一页**空白工作页**，归在你自己的标签组（多 agent 各一组互不相干）；省略 `tab` 就打它，用户的页不会被碰。组有上限，满了先关再开。
 
 ## 点东西只认 id
 
@@ -49,7 +49,7 @@ ai-browser call ui.act '{"action":"click","target":"e:a-3"}'  # 点它
 
 ## 按需深挖
 
-- `references/tabs.md` — 标签组、把人接进来
+- `references/tabs.md` — 标签组、人接管
 - `references/cli.md` — CLI 全量对照
 - `references/troubleshooting.md` — 排查顺序
 - `references/hard-pages.md` — canvas / 富文本 / iframe / 上传
