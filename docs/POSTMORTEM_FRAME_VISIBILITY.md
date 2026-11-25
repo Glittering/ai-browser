@@ -1,10 +1,10 @@
-# 复盘：泛雅 / 超星学习页 —— "内容看不见"的四个 bug，以及为什么这个项目还不够稳
+# 复盘：某高校教学平台学习页 —— "内容看不见"的四个 bug，以及为什么这个项目还不够稳
 
 > 时间：2026-10-19
-> 触发：`fanya_analysis.md`（外部只看接口、不看代码做的独立分析）
+> 触发：`platform_analysis.md`（外部只看接口、不看代码做的独立分析）
 > 提交：`4c109b9`（帧内容读取器）、`b3c717a`（capabilities 归因）、`f7af8b8`（去重 + act 帧内兜底）、
 > 以及 `tools/coverage_probe.cjs` 的分母修复
-> 全部结论都在**真实页面**上验证过（ai-browser 常年登录着西电专技平台），没有一条只靠单测。
+> 全部结论都在**真实页面**上验证过（ai-browser 常年登录着某网课平台），没有一条只靠单测。
 
 ---
 
@@ -21,8 +21,8 @@
 | 观测点 | 修复前（实测） | 修复后（实测） |
 |---|---|---|
 | 默认语义树 | 27 节点，1 个 `axf-` ref，**零个章节标题** | 35 节点，9 个 `axf-` ref，6 个章节条目全在 |
-| `context.frame_hints` | `{auto_ax:"merged", frames_read:1}` | `{auto_ax:"merged", frames_read:1, nodes_added:9, text_coverage:0.86, frames:[{ref:"frame-1", src:"https://…/studentcourse?…"}]}` |
-| `ui.evaluate {frame_ref:"frame-1"}` | `frame_not_found: no cross-process frame owns frame-1` | 在帧内执行，返回 `/mooc2-ans/mycourse/studentcourse` |
+| `context.frame_hints` | `{auto_ax:"merged", frames_read:1}` | `{auto_ax:"merged", frames_read:1, nodes_added:9, text_coverage:0.86, frames:[{ref:"frame-1", src:"https://…/course/list?…"}]}` |
+| `ui.evaluate {frame_ref:"frame-1"}` | `frame_not_found: no cross-process frame owns frame-1` | 在帧内执行，返回 `/app/course/list` |
 | `ui.act {target:"axf-1-1", action:"focus"}` | `Target not found for ref: axf-1-1`（而 ref 就在树里） | `{success:true, method:"frame-js", focused:true, effect_state:"committed"}` |
 | `ui.act {target:"axf-1-4", action:"click"}` | 同上（那时 axf-1-4 是行容器） | `{success:true, clicked_via:"oopif-click", effect_state:"committed"}` |
 | `ui.capabilities` 的 L2 结论 | `only 27 elements … the UI is largely canvas-rendered`，且 `canvas_top=0`、跨进程 iframe=1 | `only 35 elements … and 1 cross-process iframe(s) … the content is inside those frames, NOT on a canvas` |
@@ -78,7 +78,7 @@
 1. **采集面**（`_readOopifFrames` 内联的选择器）：
    `[contenteditable],[role=textbox],[role=combobox],textarea,input[type=*],button,[role=button],a[href]`
    —— 这是一份**表单控件读取器**，为"B站图文编辑器住在 OOPIF 里"那一回写的。
-   而泛雅的章节条目是 `<a onclick>` 且 `href` 为 null：实测该帧 `a` 有 8 个、`a[href]` 只有 2 个，
+   而某教学平台的章节条目是 `<a onclick>` 且 `href` 为 null：实测该帧 `a` 有 8 个、`a[href]` 只有 2 个，
    6 个章节一个都匹配不上；正文里也没有别的可点元素，于是整帧只剩一个搜索框。
 2. **合并层**（`axExtractor.mergeFrameTrees` 的 `lift()`）：只保留
    `actions.length > 0` 的节点。就算采集端读出了标题/列表/表格单元，也会在这里被丢**第二次**。
@@ -145,7 +145,7 @@ expect(describeAutoAx({ merged: true, framesRead: 2 })).toEqual({ auto_ax: 'merg
 
 但这个工具只有一份 `document.querySelectorAll('*')` —— **默认文档**。于是：
 
-- 在泛雅上它报 `可点目标 4，可用率 100%，真缺口 0`；
+- 在某教学平台上它报 `可点目标 4，可用率 100%，真缺口 0`；
 - 同一次会话里，默认语义树里 0 个章节、capabilities 说"canvas 渲染"、agent 什么都做不了。
 
 **满分和完全失效可以同时为真，因为分母里没有"我没测的地方"。**
@@ -208,8 +208,8 @@ expect(describeAutoAx({ merged: true, framesRead: 2 })).toEqual({ auto_ax: 'merg
 
 | 页面 | 默认树 | AX 树 | 结论 |
 |---|---|---|---|
-| 泛雅课程页（修后） | 159/185 = 86% | — | 与 `frame_hints.text_coverage` 0.86 同源，互相印证 |
-| 泛雅课程页（把帧内容摘掉，模拟修前） | 25/185 = 14% | — | **报警**，且归因指向跨进程帧 |
+| 某教学平台课程页（修后） | 159/185 = 86% | — | 与 `frame_hints.text_coverage` 0.86 同源，互相印证 |
+| 某教学平台课程页（把帧内容摘掉，模拟修前） | 25/185 = 14% | — | **报警**，且归因指向跨进程帧 |
 | 百度首页 | 348/357 = 97% | — | 无提示 |
 | CSDN 长文 | 1450/5270 = **28%** | 5182/5270 = **98%** | 真信号：默认 DOM 树读不全长正文 |
 | `about:blank` / 空页 | 0/0 | — | `ratio: null`（"没有可读的文字" ≠ "没读到"） |
@@ -284,7 +284,7 @@ InlineTextBox 就删" —— 后者在父节点 name 为空的页面上会丢字
 `display:none` 子树、`<script>` 源码，60 字截断），分母用 `innerText`。实测后果是
 agent 会读到用户根本看不见的文字 —— 一个 `<div style="display:none">` 的说明文字
 整段进了父节点的 label，canvas 页的容器 label 里装的是 JS 源码。
-改成 innerText 优先、textContent 兜底后：泛雅页 label 551 → 289 字（-48%），
+改成 innerText 优先、textContent 兜底后：某教学平台页 label 551 → 289 字（-48%），
 节点数/章节数/覆盖率/耗时全部不变。
 
 ⚠️ 这条改动**测试环境覆盖不到**：jsdom 没有实现 `innerText`，所以它自动走兜底，

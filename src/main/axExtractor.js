@@ -399,7 +399,7 @@ export function mergeFrameTrees(mainTree, frames = []) {
   // 为什么内容块也要留：这个函数原来只留 `actions.length > 0` 的节点，也就是
   // 只有"能点的东西"算数。于是跨进程 frame 里的标题/列表/表格单元——也就是
   // agent 真正要**读懂**的东西——即使被读出来也会在这里被丢第二次（第一次是
-  // 采集端的选择器）。超星泛雅的章节列表就是这么整片消失的。
+  // 采集端的选择器）。某教学平台的章节列表就是这么整片消失的。
   const CONTENT_ROLES = new Set(['text', 'heading', 'listitem', 'cell', 'paragraph', 'term', 'note']);
   const lift = (tv) => {
     const out = [];

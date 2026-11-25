@@ -43,7 +43,7 @@ function shouldAutoAx(summary) {
 /**
  * 把"读了几个帧、并进去多少东西、帧里还有多少字没进树"算成可核对的数字。
  *
- * 存在的理由（泛雅事故）：describeAutoAx 的 `merged` 判据是
+ * 存在的理由（某教学平台事故）：describeAutoAx 的 `merged` 判据是
  * `frames.length > 0` —— 也就是"我确实拼进去了一些节点"。实测那个页面上拼进
  * 去的只有一个搜索框，正文（章节列表）一个字都没有，回执却是
  * `{auto_ax:'merged', frames_read:1}`。调用方看到 merged 会认为"内容读到了"，

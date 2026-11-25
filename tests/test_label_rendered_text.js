@@ -11,7 +11,7 @@
 // ⚠️ 这套测试的边界必须说清楚：**jsdom 没有实现 innerText**，
 // 所以真实浏览器里的行为在这里无法端到端复现。这里能钉住的只有"选择逻辑"：
 // 元素身上有 innerText 时用它，没有时回退 textContent。
-// 真实浏览器里的效果（泛雅 label 551→289 字、coverage 不变、耗时不变）
+// 真实浏览器里的效果（某教学平台 label 551→289 字、coverage 不变、耗时不变）
 // 只能靠实机验证，测试替代不了 —— 这条注释就是防止以后有人以为测试cover了它。
 // @vitest-environment jsdom
 import { describe, it, expect, beforeEach } from 'vitest';

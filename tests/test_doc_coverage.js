@@ -1,6 +1,6 @@
 // tests/test_doc_coverage.js — 「树读到了多少页面文字」的口径
 //
-// 存在的理由：2026-10-19 的泛雅事故里，默认树 27 个节点、正文 0 字，而当时
+// 存在的理由：2026-10-19 的某教学平台事故里，默认树 27 个节点、正文 0 字，而当时
 // 没有任何数字表达这件事。这个模块就是那个数字：分子是树里的正文字数，
 // 分母是主文档 innerText + 跨进程帧里的可见文字。
 //
@@ -95,7 +95,7 @@ describe('sumLabelChars()', () => {
 });
 
 describe('pageCoverage()', () => {
-  it('DC-4: 泛雅事故的那组数字 —— 主文档读得好、帧里 0 字进树', () => {
+  it('DC-4: 某教学平台事故的那组数字 —— 主文档读得好、帧里 0 字进树', () => {
     // 主文档 300 字全进了树，帧里 420 字只进了 4 字。
     const c = pageCoverage({ treeChars: 304, mainChars: 300, frameChars: 420 });
     expect(c.page_chars).toBe(720);
@@ -135,10 +135,10 @@ describe('pageCoverage()', () => {
     expect(c.hint).toBe(null);
   });
 
-  it('DC-9b: 闸门看的是"漏掉多少字"，不是"页面多大" —— 泛雅真身回归', () => {
-    // 实测：泛雅课程页 innerText 只有 185 字，修前的树只读到 25 字，
+  it('DC-9b: 闸门看的是"漏掉多少字"，不是"页面多大" —— 某教学平台真身回归', () => {
+    // 实测：某教学平台课程页 innerText 只有 185 字，修前的树只读到 25 字，
     // 缺的 160 字全在跨进程帧里。若闸门写成 `page_chars < 200 → 静音`，
-    // 这个指标存在的理由（泛雅）就被它自己的闸门排除了。
+    // 这个指标存在的理由（某教学平台）就被它自己的闸门排除了。
     const c = pageCoverage({ treeChars: 25, mainChars: 30, frameChars: 155 });
     expect(c.page_chars).toBe(185);
     expect(c.percent).toBe(14);
@@ -147,7 +147,7 @@ describe('pageCoverage()', () => {
 
   it('DC-9c: 比例闸门是主判据；绝对缺口只挡"一两个字"的噪声', () => {
     // 这条测试换过三版判据，每版都被实测推翻（见 doc_coverage.js 的 missingEnough）：
-    //   page_chars < 200 → 泛雅 185 字被静音；缺 ≥ 20 字 → /sr-only 的 73% 被静音。
+    //   page_chars < 200 → 某教学平台 185 字被静音；缺 ≥ 20 字 → /sr-only 的 73% 被静音。
     // 现在：ratio < 0.9 就说话，只用一个 5 字的下限挡碎屑。
     const pc = (treeChars, mainChars) => pageCoverage({ treeChars, mainChars });
     // 大页面 88% → 报
@@ -171,7 +171,7 @@ describe('pageCoverage()', () => {
 
   it('DC-10: 分子大于分母时不许装作 100% 没事 —— 那是分母漏了一块', () => {
     // 这条测试原来断言的是"钳到 1、不给提示"，也就是我自己第一版的行为：
-    // 泛雅页分子 547 分母 185，钳成 100%，看起来最健康，问题藏得最深。
+    // 某教学平台页分子 547 分母 185，钳成 100%，看起来最健康，问题藏得最深。
     // 现在反过来：比例照钳（1 是比例的上界），但必须带 over_measured 和一句
     // "分母漏了一个承载文字的表面"。
     const c = pageCoverage({ treeChars: 1400, mainChars: 1000, frameChars: 0 });

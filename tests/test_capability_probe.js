@@ -123,7 +123,7 @@ describe('PROBE_JS —— 表驱动测试赖以成立的 hint 格式（执行真
   });
 });
 
-// ---- 泛雅事故：树薄不等于 canvas ----
+// ---- 某教学平台事故：树薄不等于 canvas ----
 import { describeThinTree, recommend } from '../src/main/capability_probe.js';
 
 describe('describeThinTree() — 三种"树看不到内容"的归因必须分开', () => {
@@ -135,11 +135,11 @@ describe('describeThinTree() — 三种"树看不到内容"的归因必须分开
     // 推去做 L3 指针手势（在"canvas"上瞎点），而正确动作是去读那个 frame。
     const why = describeThinTree({
       ...base,
-      opaqueFrames: [{ src: 'https://mooc2-ans.example.com/mooc2-ans/mycourse/studentcourse?x=1', box: [180, 52, 1100, 646] }],
+      opaqueFrames: [{ src: 'https://course.example.com/app/course/list?x=1', box: [180, 52, 1100, 646] }],
     });
     expect(why).not.toContain('canvas-rendered');
     expect(why).toContain('cross-process iframe');
-    expect(why).toContain('studentcourse'); // 给出可用的地址
+    expect(why).toContain('course'); // 给出可用的地址
   });
 
   it('CP-017: 真有 canvas 时才说 canvas（并给出 顶层/帧内 的拆分）', () => {
@@ -168,7 +168,7 @@ describe('recommend() — 内容藏在 iframe 里时不能给出空建议', () =
     actions: i < actionable ? ['click'] : [],
   }));
 
-  it('CP-020: 泛雅形状 → recommended 非空，且归因指向 iframe 而非 canvas', () => {
+  it('CP-020: 某教学平台形状 → recommended 非空，且归因指向 iframe 而非 canvas', () => {
     const r = recommend({
       flat: thin(27, 13),
       dom: {

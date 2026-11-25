@@ -1,6 +1,6 @@
 // tests/test_frame_read.js — 跨进程子帧内容读取器的契约测试
 //
-// 事故背景（2026-10-19，超星泛雅学习页）：
+// 事故背景（2026-10-19，某教学平台学习页）：
 //   正文 iframe 里 8 个 <a>，其中 6 个是章节条目，href 为 null（onclick 驱动）。
 //   原来的采集选择器是 `...[role=button],a[href]` —— 一份**表单控件读取器**，
 //   于是章节列表一条都进不了语义树；而 context.frame_hints 照样写
@@ -32,7 +32,7 @@ function run(html, prefix = 'axf-2-', before = null) {
     get: () => document.body.textContent || '',
   });
   const fn = new Function('document', 'location', 'return ' + src);
-  return fn(document, { href: 'https://mooc2-ans.example.com/mooc2-ans/mycourse/studentcourse?x=1' });
+  return fn(document, { href: 'https://course.example.com/app/course/list?x=1' });
 }
 
 describe('buildFrameReadSource — 源码契约', () => {
@@ -47,10 +47,10 @@ describe('buildFrameReadSource — 源码契约', () => {
   });
 });
 
-describe('子帧内容读取器 — 泛雅章节列表（无 href 的 a）', () => {
+describe('子帧内容读取器 — 某教学平台章节列表（无 href 的 a）', () => {
   // 真实结构：章节条目是 <a onclick=...> 且 href 为 null。锚点标签外面还有
   // <li> 包着，如果只读 li 会得到"1 1.1 xxx 1"这种拼起来的噪声。
-  const FANYA = `
+  const COURSE_PAGE = `
     <div class="chapter_list">
       <ul>
         <li><a onclick="openChapter(1)">1 我国信息化发展的形势任务与实践启示</a>
@@ -69,7 +69,7 @@ describe('子帧内容读取器 — 泛雅章节列表（无 href 的 a）', () 
     <input type="text" placeholder="搜索">`;
 
   it('FR-1: 没有 href 的 <a> 仍然是 link 且可点（这正是原来的漏洞）', () => {
-    const out = run(FANYA);
+    const out = run(COURSE_PAGE);
     const links = out.nodes.filter((n) => n.role === 'link');
     const titles = links.map((n) => n.label);
     expect(titles).toContain('1.1 我国信息化发展的形势任务与实践启示');
@@ -80,7 +80,7 @@ describe('子帧内容读取器 — 泛雅章节列表（无 href 的 a）', () 
   });
 
   it('FR-2: 每个产出的 ref 都写进了页面的 data-ai-id（否则 act 找不到）', () => {
-    const out = run(FANYA);
+    const out = run(COURSE_PAGE);
     const ids = out.nodes.map((n) => n.id);
     expect(ids.length).toBeGreaterThan(0);
     for (const id of ids) {
@@ -90,7 +90,7 @@ describe('子帧内容读取器 — 泛雅章节列表（无 href 的 a）', () 
   });
 
   it('FR-3: 内容块让位给后代 —— 不会同时出现 li 和它里面的 a', () => {
-    const out = run(FANYA);
+    const out = run(COURSE_PAGE);
     const labels = out.nodes.map((n) => n.label);
     // 父级 li 的文本是整段拼接（"1 我国信息化… 1.1 …"），不该单独成节点
     expect(labels.some((l) => l.startsWith('1 我国信息化') && l.includes('1.1'))).toBe(false);
@@ -98,7 +98,7 @@ describe('子帧内容读取器 — 泛雅章节列表（无 href 的 a）', () 
   });
 
   it('FR-4: 覆盖率是可测的数字（这一页应该接近 1）', () => {
-    const out = run(FANYA);
+    const out = run(COURSE_PAGE);
     expect(typeof out.stats.text_chars).toBe('number');
     expect(out.stats.text_chars).toBeGreaterThan(0);
     // 这一页的文字全在链接里，所以 readonly 文本块为 0、interactive > 0 ——

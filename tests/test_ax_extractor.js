@@ -137,7 +137,7 @@ describe('mergeFrameTrees() — OOPIF down-drill (P0)', () => {
 
   it('AX-015: 只读内容节点（heading/listitem/cell）必须被保留 —— 否则正文整片消失', () => {
     // 事故：lift() 只留 `actions.length > 0` 的节点，于是跨进程帧里的标题/列表/
-    // 表格单元被丢掉第二次（第一次是采集端选择器）。泛雅章节列表就是这样消失的。
+    // 表格单元被丢掉第二次（第一次是采集端选择器）。某教学平台章节列表就是这样消失的。
     const textTree = {
       id: 'frame-1', role: 'generic', label: 'frame', states: [], actions: [],
       bounds: { x: 0, y: 0, width: 0, height: 0 },
@@ -158,10 +158,10 @@ describe('mergeFrameTrees() — OOPIF down-drill (P0)', () => {
   it('AX-016: 门节点带上绝对 src（树里出现的东西要能直接打开）', () => {
     const subTree = { id: 'frame-2', role: 'generic', label: 'f', children: [] };
     const merged = mergeFrameTrees(mainTree, [{
-      key: 'frame-2', label: 'f', src: 'https://mooc2-ans.example.com/mooc2-ans/mycourse/studentcourse?x=1', tree: subTree,
+      key: 'frame-2', label: 'f', src: 'https://course.example.com/app/course/list?x=1', tree: subTree,
     }]);
     const gate = merged.children.find((c) => c.id === 'frame-2');
-    expect(gate.src).toBe('https://mooc2-ans.example.com/mooc2-ans/mycourse/studentcourse?x=1');
+    expect(gate.src).toBe('https://course.example.com/app/course/list?x=1');
   });
 });
 

@@ -660,7 +660,7 @@ class PageManager {
         // 这里只防 unhandled。
         view.webContents.loadURL(url).catch(() => {});
       };
-      // ⚠️ **必须等垫片登记完再导航**（2026-10-20 修，超星"进入学习"第二层）。
+      // ⚠️ **必须等垫片登记完再导航**（2026-10-20 修，某教学平台"进入学习"第二层）。
       //
       // 原来这里直接 loadURL。看上去时序够用（站点 ajax 往返几十毫秒，
       // 而 about:blank 的 did-finish-load 通常更早），但那是**赌**：
@@ -1642,7 +1642,7 @@ class PageManager {
    * 每个跨进程帧里可见文字的字符数（帧那边在 frame_read_source 里已经算过）。
    *
    * 为什么必须分成"主文档 + 帧"两半：innerText 不跨 iframe，把两者混在一个
-   * 数里，任何一侧读漏都会被另一侧的平均值盖住 —— 泛雅那次就是这样，
+   * 数里，任何一侧读漏都会被另一侧的平均值盖住 —— 某教学平台那次就是这样，
    * 主文档读得很好（外壳 100%），正文一个字没有，而没有任何数字表达这件事。
    */
   _annotateCoverage(res, frames, opts) {
@@ -2280,7 +2280,7 @@ class PageManager {
             states: [],
             actions: [],
             // 门节点带上**绝对** src：树里出现的东西，调用方就应该能直接用。
-            // 相对地址（/mooc2-ans/...）没法喂给 ui.new_tab / ui.navigate，
+            // 相对地址（/app/...）没法喂给 ui.new_tab / ui.navigate，
             // 等于把"我知道内容在哪"变成一句废话。
             ...(dto.url ? { src: dto.url } : {}),
             bounds: { x: 0, y: 0, width: 0, height: 0 },
@@ -4765,7 +4765,7 @@ return {ok:true,name:file.name,size:file.size,via:via,host_sel:hostSel,clicked:c
       // 这段等待原本是纯白的 about:blank。快站约 4s，慢站实测 70s（GitHub
       // OAuth 直到 ERR_CONNECTION_TIMED_OUT 才切到错误页）—— 用户和 agent
       // 看到的都是"弹出来一个空白页面"，和"垫片没把导航发出去"那个老 bug
-      // （超星"进入学习"）在现象上完全一样，无法区分。
+      // （某教学平台"进入学习"）在现象上完全一样，无法区分。
       // loading.html 只做展示（目标地址 + 转圈），不发请求不跳转，真实导航
       // 仍由上面的 proceed 发起。无目标 URL 的占位 tab（window.open("") 的
       // 老站模式）保持 about:blank：它本来就要停在这里等 location 赋值。

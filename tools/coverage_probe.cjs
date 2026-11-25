@@ -81,7 +81,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 //   noIdChain   自己和整条祖先链都没有 id → **真缺口**
 // 真缺口 = ambiguous + noIdChain。
 const COUNT_JS = `(function(){
-  // a[href] 换成 a：无 href 的锚点（onclick 驱动）也是可点目标。超星泛雅的章节
+  // a[href] 换成 a：无 href 的锚点（onclick 驱动）也是可点目标。某教学平台的章节
   // 条目就是 <a onclick>，href 为 null —— 只认 a[href] 会把它们从**分母**里删掉，
   // 于是覆盖率虚高。帧读取器（shared/frame_read_source.js）早先踩过同一个坑。
   var INTER = 'a,button,input,select,textarea,summary,details,[role=button],[role=link],[role=checkbox],[role=radio],[role=tab],[role=menuitem],[contenteditable=true]';
@@ -92,7 +92,7 @@ const COUNT_JS = `(function(){
     // 只算**可见的、最内层的**可交互元素：
     //  - 不可见的（隐藏 input、0×0 的埋点控件）不是人能看到的目标；
     //  - 最内层的（不再包含别的可交互元素）才是真正的动作目标，外面那层是包装。
-    // 不这么筛，"这一行里到底有几个可点的东西"永远数不清 —— 实测超星章节行
+    // 不这么筛，"这一行里到底有几个可点的东西"永远数不清 —— 实测某教学平台章节行
     // 里同时有 2 个隐藏 input + 行容器 div[role=link] + 标题 a，共 4 个命中，
     // 于是"唯一可交互后代"这个前提永远不成立，6 个章节被永久误报成真缺口。
     var live = [];
@@ -125,7 +125,7 @@ const COUNT_JS = `(function(){
     // 只看交集/内层面积会把"大卡片里放个小链接"误判成壳子（点卡片 ≠ 点那个链接）。
     if (inter / (b.width * b.height) >= 0.9 && inter / (r.width * r.height) >= 0.9) return true;
     // 判据二（文本）：外层的文字**就是**这一个链接的文字（可能多个角标）。
-    // 2026-10-19 实测（超星泛雅章节行）：外层是整行
+    // 2026-10-19 实测（某教学平台章节行）：外层是整行
     //   <div class="chapter_item" role="link">1.1 标题 <b>1</b></div>
     // 内层是 <a>1.1 标题</a>，宽 996 / 行宽 1100 —— 几何上差 5% 不过线，于是
     // 6 个章节被报成"真缺口"。但点内层 a 会冒泡到整行，实测
@@ -223,7 +223,7 @@ const COUNT_JS = `(function(){
   const raw2 = JSON.parse(String(r.value));
 
   // ---- 跨进程帧：分母必须包含它们，否则这个数字会骗人 ----
-  // 2026-10-19 实测（超星泛雅学习页）：本工具报「可点目标 4，可用率 100%、
+  // 2026-10-19 实测（某教学平台学习页）：本工具报「可点目标 4，可用率 100%、
   // 真缺口 0」，而**整门课程的章节列表一个都没进树** —— 因为那 6 个条目住在
   // 跨进程 iframe 里，而 COUNT_JS 只在顶层 document 里数。
   // 100% 覆盖了 4 个按钮，同时 100% 看不见正文。

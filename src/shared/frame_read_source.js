@@ -12,7 +12,7 @@
 //   [role=button],a[href]
 // 它是一份**表单控件读取器**，为「B站图文编辑器住在 OOPIF 里」那一次事故写的。
 // 于是：
-//   1. `a[href]` 漏掉一切 JS 驱动的链接。超星泛雅的章节条目就是
+//   1. `a[href]` 漏掉一切 JS 驱动的链接。某教学平台的章节条目就是
 //      `<a onclick=...>` 且 href 为 null —— 实测该帧里 a 有 8 个、a[href] 只有 2 个，
 //      章节列表整整 6 条一个都进不了树。
 //   2. 纯文本/列表/表格结构完全没有采集通路。就算把锚点补齐，一个「没有可点
@@ -128,7 +128,7 @@ function frameRead(prefix) {
       continue;
     }
 
-    // 内容块：用 innerText（含后代文字）。**不能用"只取直接文本"**：超星的
+    // 内容块：用 innerText（含后代文字）。**不能用"只取直接文本"**：某教学平台的
     // "已完成任务点: <span>0</span>/4" 是 <h3> 里套 span，只取直接文本会得到
     // "已完成任务点: /4" —— 数字丢了，而这正是这一行唯一有用的信息。
     // 祖先重复的问题不靠这里解决，靠下面第二趟"祖先让位给后代"。
@@ -146,7 +146,7 @@ function frameRead(prefix) {
 
   // 第二趟：祖先让位给后代 —— 谁更具体谁留下。
   //
-  // 实测（超星泛雅章节行）：一行是
+  // 实测（某教学平台章节行）：一行是
   //   <div role="link" tabindex="0" class="catalog_title">1.1 标题 <b>1</b></div>
   //     └─ <a class="clicktitle">1.1 标题</a>
   // 两个都能点、文字几乎一样。全留下 = 6 个章节变成 12 个节点，全是噪声。
@@ -239,7 +239,7 @@ function frameRead(prefix) {
       text_chars: bodyChars,
       kept_chars: keptChars,
       // 覆盖率：这一帧**看得见的文字**里，有多少进了树。1 = 全进；
-      // 0.01 = 树里只有一个搜索框，正文一个字都没读到（泛雅事故现场）。
+      // 0.01 = 树里只有一个搜索框，正文一个字都没读到（某教学平台事故现场）。
       coverage: bodyChars
         ? Math.round(Math.min(1, keptChars / bodyChars) * 100) / 100
         : (out.length ? 1 : 0),

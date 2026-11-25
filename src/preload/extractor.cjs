@@ -742,7 +742,7 @@ function extractTree() {
         opaqueFrames.push({
           id: el.id || null,
           // 绝对地址（el.src 会被解析成绝对 URL）。相对地址对调用方没用：
-          // 树里写着 /mooc2-ans/xxx，agent 拿它去 navigate 只会失败。
+          // 树里写着 /app/xxx，agent 拿它去 navigate 只会失败。
           src: (el.src || '').trim() || el.getAttribute("src") || null,
           width: Math.round(ifrRect.width || 0),
           height: Math.round(ifrRect.height || 0)
@@ -1544,7 +1544,7 @@ function extractPageContext() {
       buttons: document.querySelectorAll("button").length,
       links: document.querySelectorAll("a[href]").length,
       // 没有 href 的锚点（onclick / JS 驱动）。它们仍然是可点目标，而 a[href]
-      // 数不到 —— 超星泛雅的章节条目就是这一类。只报 links 会让人以为这页
+      // 数不到 —— 某教学平台的章节条目就是这一类。只报 links 会让人以为这页
       // 一个链接都没有（实测该页 links=2、links_without_href=6）。
       links_without_href: (function() {
         try { return document.querySelectorAll("a:not([href])").length; } catch(e) { return 0; }

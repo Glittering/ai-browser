@@ -2,7 +2,7 @@
 //
 // 为什么单独建一个套件（2026-10-20 凌晨，用户第三次报"点进入学习不跳转"）：
 //
-// 超星系老站的惯用法是
+// 这类老站的惯用法是
 //     var w = window.open("", "_blank");
 //     w.location = res.url;
 // 这条路前后修过两次（200a712 让 window.open 返回可用对象，56222e7 把 location
@@ -38,7 +38,7 @@ const WS_PORT = Number(process.env.AI_BROWSER_PORT) || 9223;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---------------------------------------------------------------- fixtures
-// 每一层都是同一个写法（href="#" + onclick，和超星站点一模一样），
+// 每一层都是同一个写法（href="#" + onclick，和真实站点一模一样），
 // 因为要证明的是"这条路可以递归走通"，不是"某个特定按钮能点"。
 const LAYER = (title, next, mark) => `<!doctype html><html><head><meta charset="utf-8">
 <title>${title}</title></head><body>

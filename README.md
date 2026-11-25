@@ -935,7 +935,7 @@ per `ui.get_tree`.
 > measures every `frame-N` it can reach and **prints how many frames it could not** — an
 > unmeasured area inside the denominator is worse than a wrong measurement. Re-measured
 > 2026-10-19: Baidu 100%, CSDN 99% (8 cross-process frames now counted, 2 residual gaps),
-> and the 超星 course page 82% with the 2 remaining gaps named explicitly. The write-up of this
+> and the course page 82% with the 2 remaining gaps named explicitly. The write-up of this
 > class of mistake — a metric that silently excludes the part that matters — is
 > [`docs/POSTMORTEM_FRAME_VISIBILITY.md`](docs/POSTMORTEM_FRAME_VISIBILITY.md).
 

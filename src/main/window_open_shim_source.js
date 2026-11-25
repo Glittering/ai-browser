@@ -1,6 +1,6 @@
 // window_open_shim_source.js — 注入页面主 world 的 window.open 兼容垫片源码
 //
-// 背景：站点惯用法（超星专技平台等大量老站）是
+// 背景：站点惯用法（某网课平台等大量老站）是
 //     var w = window.open("", "_blank"); // 先开一个新页面
 //     w.location = res.url;              // 再把真实地址赋给它
 // 主进程的 setWindowOpenHandler 对 window.open 一律 deny（改为自建 tab），

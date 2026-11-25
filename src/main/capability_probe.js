@@ -389,7 +389,7 @@ export function rankAppGlobals(globals) {
 /**
  * "树为什么这么薄" —— 三种归因必须分开说。
  *
- * 事故（2026-10-19，超星泛雅学习页）：树只有 27 个节点、13 个可操作，探针**自己
+ * 事故（2026-10-19，某教学平台学习页）：树只有 27 个节点、13 个可操作，探针**自己
  * 测到了** 1 个跨进程 iframe（`iframe: 跨进程 1 个`、`canvas 顶层级 0`），却在
  * 结论里写 "the UI is largely canvas-rendered, so the tree cannot see the content"。
  * 归因错了：内容看不见是因为它在 iframe 里，不是因为它画在 canvas 上。这个错误
@@ -436,7 +436,7 @@ export function recommend({ flat, dom, endpoints, coverage }) {
   const totalCanvas = topCanvas + frameCanvas;
   const sameOriginFrame = iframes.find((f) => f.sameOrigin);
   // 跨进程、且**有尺寸**的帧：内容在另一个渲染进程里，顶层文档读不到。广告/埋点
-  // 帧通常是 0×0，不算。这是"树薄"最常见的真实原因（泛雅、B站图文、掘金都属这类）。
+  // 帧通常是 0×0，不算。这是"树薄"最常见的真实原因（某教学平台、B站图文、掘金都属这类）。
   const opaqueFrames = iframes.filter((f) => {
     if (!f || f.sameOrigin) return false;
     const box = f.box;
