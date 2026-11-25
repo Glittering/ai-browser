@@ -1,8 +1,8 @@
 ---
 name: content-publish
 description: >-
-  适用于用户要求"把内容/文章发布到某个平台（CSDN、知乎、掘金、其他博客/社区等）"、或用编辑器录入并提交内容的自动化发布/提交流程任务。触发词：发布到、发博客、发文章、submit/publish this post、发布内容。
-  注意边界：若用户只是想编辑某个已有页面而非提交发布，用 browse_navigate / browse_act 直接处理即可，不需本 skill 的发布校验步骤。
+  适用于用户要求"把内容/文章发布到某个平台（CSDN、知乎、掘金、公众号、其他博客/社区等）"、或用编辑器录入并提交内容的自动化发布/提交流程任务。触发词：发布到、发到、发博客、发文章、发帖、发一篇、投稿、发出去、上传到平台、帮我发、发布内容、submit/publish this post。
+  注意边界：若用户只是想编辑某个已有页面而非提交发布，用 browse_navigate / browse_act 直接处理即可；只是"读一篇内容"用 read-webpage，不需要本 skill 的发布校验步骤。
 ---
 
 # 内容发布 / 提交流程（content-publish）

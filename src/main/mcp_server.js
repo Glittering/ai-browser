@@ -415,8 +415,9 @@ async function main() {
     const stale = skillMod.drift();
     if (stale.length) {
       const s = stale[0];
+      const why = s.contentOnly ? `changed (still ${VERSION})` : `${s.from} -> ${VERSION}`;
       console.error(
-        `[mcp] skills out of date (${s.target}/${s.skill} ${s.from} -> ${VERSION})` +
+        `[mcp] skills out of date (${s.target}/${s.skill} ${why})` +
           (stale.length > 1 ? ` and ${stale.length - 1} more` : '') +
           ' — run `ai-browser skill install` to refresh'
       );

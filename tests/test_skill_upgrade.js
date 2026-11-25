@@ -127,7 +127,27 @@ describe('技能安装：版本漂移与幂等', () => {
     for (const row of d) {
       expect(typeof row.target).toBe('string');
       expect(typeof row.skill).toBe('string');
-      expect(row.from).not.toBe(pkg.version);
+      // contentOnly 的行 from 就是当前版本（版本对、内容不对），那是合法的
+      if (!row.contentOnly) expect(row.from).not.toBe(pkg.version);
+    }
+  });
+
+  it('U-6: 版本没变但内容变了 → 仍然重装（只比版本号会漏掉"同版本改文案"）', () => {
+    const target = freshTarget();
+    try {
+      skill.installOne(SKILL, target);
+      const dest = join(target, SKILL);
+      // 模拟"包里的技能文案改过、但版本号没动"：标记里版本对、指纹不对
+      writeFileSync(join(dest, MARKER), `ai-browser ${pkg.version} deadbeef\n`, 'utf8');
+      writeFileSync(join(dest, 'STALE_MARKER.md'), 'x', 'utf8');
+
+      const r = skill.installOne(SKILL, target);
+      expect(r.status, '内容指纹不同必须重装，否则改了描述永远装不上去').toBe('upgraded');
+      expect(r.from).toBe(pkg.version);
+      expect(existsSync(join(dest, 'STALE_MARKER.md')), '重装要先删再拷').toBe(false);
+      expect(skill.readSignature(dest)).toBe(skill.skillSignature(join(skill.SKILLS_ROOT, SKILL)));
+    } finally {
+      rmSync(target, { recursive: true, force: true });
     }
   });
 });

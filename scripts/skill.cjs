@@ -14,6 +14,7 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const pkg = require('../package.json');
 
 const SKILLS_ROOT = path.join(__dirname, '..', 'skills');
@@ -56,6 +57,45 @@ function readMarker(dest) {
   }
 }
 
+// 内容指纹。为什么需要它（2026-11-25 当晚就踩到）：
+// 只比版本号时，"同一版本里改了技能文案"这类改动永远装不上去 —— install 判定
+// up-to-date 直接跳过，用户看到的是"改了描述但 agent 行为没变"，而且没有任何
+// 报错。所以标记里再存一份内容 hash，版本相同但内容变了也要重装。
+function skillSignature(dir) {
+  if (!fs.existsSync(dir)) return '';
+  const h = crypto.createHash('sha256');
+  const walk = (cur) => {
+    const entries = fs.readdirSync(cur, { withFileTypes: true })
+      .sort((a, b) => (a.name < b.name ? -1 : 1));
+    for (const e of entries) {
+      if (e.name === MARKER) continue;
+      const p = path.join(cur, e.name);
+      if (e.isDirectory()) walk(p);
+      else {
+        h.update(path.relative(dir, p));
+        h.update(fs.readFileSync(p));
+      }
+    }
+  };
+  walk(dir);
+  return h.digest('hex').slice(0, 8);
+}
+
+function readSignature(dest) {
+  const marker = path.join(dest, MARKER);
+  if (!fs.existsSync(marker)) return null;
+  try {
+    const m = fs.readFileSync(marker, 'utf8').match(/ai-browser\s+\S+\s+([0-9a-f]{4,})/);
+    return m ? m[1] : '';
+  } catch {
+    return '';
+  }
+}
+
+function markerText(sig) {
+  return `ai-browser ${pkg.version} ${sig}\n`;
+}
+
 // 已装副本与当前包的版本差。为什么需要它（2026-11-25）：
 // install 只在有人手动跑的时候写盘，`npm i -g` / `npx` 升级都不会碰用户目录，
 // 于是"包装到了 2.4.1、技能还停在 2.1.1"是**静默**发生的 —— 用户看到的现象是
@@ -66,8 +106,19 @@ function drift() {
   for (const t of detectTargets()) {
     if (!t.exists) continue;
     for (const s of t.installed) {
-      const v = readMarker(path.join(t.dir, s));
-      if (v !== pkg.version) out.push({ target: t.label, dir: t.dir, skill: s, from: v || '?' });
+      const dest = path.join(t.dir, s);
+      const v = readMarker(dest);
+      const sig = readSignature(dest);
+      const want = skillSignature(path.join(SKILLS_ROOT, s));
+      if (v !== pkg.version || sig !== want) {
+        out.push({
+          target: t.label,
+          dir: t.dir,
+          skill: s,
+          from: v || '?',
+          contentOnly: v === pkg.version,
+        });
+      }
     }
   }
   return out;
@@ -83,8 +134,11 @@ function installOne(skill, targetDir) {
   if (fs.existsSync(dest) && installedVersion === null) {
     return { skill, status: 'skipped-user-owned' };
   }
-  // 同版本：不重复写盘。幂等让 install 可以随便跑，也让"是否需要升级"可判断。
-  if (installedVersion === pkg.version) {
+
+  const srcSig = skillSignature(src);
+  // 版本 + 内容都一致才算最新：只比版本会把"同版本改了文案"判成 up-to-date，
+  // 改动永远装不上去，而且不报错。
+  if (installedVersion === pkg.version && readSignature(dest) === srcSig) {
     return { skill, status: 'up-to-date' };
   }
 
@@ -94,9 +148,10 @@ function installOne(skill, targetDir) {
   // 而且 agent 会继续读到已经作废的 reference。
   if (fs.existsSync(dest)) fs.rmSync(dest, { recursive: true, force: true });
   fs.cpSync(src, dest, { recursive: true });
-  fs.writeFileSync(path.join(dest, MARKER), `ai-browser ${pkg.version}\n`, 'utf8');
+  fs.writeFileSync(path.join(dest, MARKER), markerText(srcSig), 'utf8');
 
-  return { skill, status: installedVersion ? 'upgraded' : 'installed', from: installedVersion || null };
+  const status = installedVersion ? 'upgraded' : 'installed';
+  return { skill, status, from: installedVersion || null };
 }
 
 function install({ dir, all }) {
@@ -129,7 +184,10 @@ function install({ dir, all }) {
         note = `✓ ${s}`;
         changed++;
       } else if (r.status === 'upgraded') {
-        note = `↑ ${s}  ${r.from} → ${pkg.version}`;
+        note =
+          r.from === pkg.version
+            ? `↻ ${s}  内容变了（版本仍是 ${pkg.version}）`
+            : `↑ ${s}  ${r.from} → ${pkg.version}`;
         changed++;
       } else if (r.status === 'up-to-date') {
         note = `· ${s}  已是最新（${pkg.version}）`;
@@ -171,8 +229,11 @@ function run(argv) {
     // 版本漂移必须在人主动查看时就能看见，而不是等 agent 用旧技能出错。
     const stale = drift();
     if (stale.length) {
-      console.log(`\n! ${stale.length} 个副本是旧版（当前包 ${pkg.version}）：`);
-      for (const d of stale) console.log(`    ${d.target}/${d.skill}  ${d.from} → ${pkg.version}`);
+      console.log(`\n! ${stale.length} 个副本需要刷新：`);
+      for (const d of stale) {
+        const why = d.contentOnly ? `内容变了（版本仍是 ${pkg.version}）` : `${d.from} → ${pkg.version}`;
+        console.log(`    ${d.target}/${d.skill}  ${why}`);
+      }
       console.log('  运行 `ai-browser skill install` 刷新。');
     }
     console.log('\n装上：ai-browser skill install        只装到已存在的客户端目录');
@@ -198,6 +259,8 @@ module.exports = {
   detectTargets,
   drift,
   readMarker,
+  readSignature,
+  skillSignature,
   installOne,
   SKILLS_ROOT,
   MARKER,
