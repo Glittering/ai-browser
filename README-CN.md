@@ -54,7 +54,7 @@ Windows 用户直接下 Release 里的 `AI-Browser-<版本>-win32-x64-Setup.exe`
 这个场景之所以值得看：**纯 Canvas 应用里没有任何 DOM 节点**，所以基于 DOM / accessibility tree 的方案在这里是全瞎的；而截图方案要烧视觉 token，还不知道坐标和字体。打开 `AI_BROWSER_CANVAS_HOOK=1` 后，AI Browser 直接在 2D 绘制调用层把 `fillText` 的字符串截获下来。
 
 > canvas 捕获默认关闭，用环境变量 `AI_BROWSER_CANVAS_HOOK=1` 启动才会装上——这是取舍，不是遗漏。
-> 更准的用法是按域开（`AI_BROWSER_CANVAS_HOOK=b.chaoxing.com,excalidraw.com`）或在需要的那一页
+> 更准的用法是按域开（`AI_BROWSER_CANVAS_HOOK=example.com,excalidraw.com`）或在需要的那一页
 > 现场装：`browse_canvas {operation:"configure", reload:true}`。包一层 `getContext` 是站点
 > 一次 `toString` 就能看见的痕迹，不能让全站替几页白板买单。
 

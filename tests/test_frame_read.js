@@ -32,7 +32,7 @@ function run(html, prefix = 'axf-2-', before = null) {
     get: () => document.body.textContent || '',
   });
   const fn = new Function('document', 'location', 'return ' + src);
-  return fn(document, { href: 'https://mooc2-ans.xidian.edu.cn/mooc2-ans/mycourse/studentcourse?x=1' });
+  return fn(document, { href: 'https://mooc2-ans.example.com/mooc2-ans/mycourse/studentcourse?x=1' });
 }
 
 describe('buildFrameReadSource — 源码契约', () => {

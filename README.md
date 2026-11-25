@@ -1133,7 +1133,7 @@ this browser carried, and every site paid for it while only canvas apps gained f
 
 - per tab, on demand: `browse_canvas(operation: "configure", reload: true)` installs it and gives
   the full history for that page;
-- for a whole origin: `AI_BROWSER_CANVAS_HOOK=b.chaoxing.com,excalidraw.com` (comma-separated,
+- for a whole origin: `AI_BROWSER_CANVAS_HOOK=example.com,excalidraw.com` (comma-separated,
   subdomains included);
 - everywhere: `AI_BROWSER_CANVAS_HOOK=1` — what v2.4 and earlier did, and what risk controls
   noticed.

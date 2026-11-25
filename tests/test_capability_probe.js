@@ -135,7 +135,7 @@ describe('describeThinTree() — 三种"树看不到内容"的归因必须分开
     // 推去做 L3 指针手势（在"canvas"上瞎点），而正确动作是去读那个 frame。
     const why = describeThinTree({
       ...base,
-      opaqueFrames: [{ src: 'https://mooc2-ans.xidian.edu.cn/mooc2-ans/mycourse/studentcourse?x=1', box: [180, 52, 1100, 646] }],
+      opaqueFrames: [{ src: 'https://mooc2-ans.example.com/mooc2-ans/mycourse/studentcourse?x=1', box: [180, 52, 1100, 646] }],
     });
     expect(why).not.toContain('canvas-rendered');
     expect(why).toContain('cross-process iframe');

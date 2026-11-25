@@ -114,15 +114,15 @@ describe('preload 暴露面白名单', () => {
     expect(own.exposed.__ai_browser__, '自家下载页必须拿得到 dl 通道').toBeTruthy();
 
     const gated = loadBridge({
-      href: 'https://course.example.chaoxing.com/x',
-      env: { AI_BROWSER_POPUP_SHIM: 'chaoxing.com' },
+      href: 'https://course.example.com/x',
+      env: { AI_BROWSER_POPUP_SHIM: 'example.com' },
     });
     expect(gated.exposed.__ai_browser__, '垫片本体在主 world，它发的消息要走这个桥')
       .toBeTruthy();
 
     const notMine = loadBridge({
       href: 'https://www.baidu.com/',
-      env: { AI_BROWSER_POPUP_SHIM: 'chaoxing.com' },
+      env: { AI_BROWSER_POPUP_SHIM: 'example.com' },
     });
     expect(notMine.exposed.__ai_browser__, '白名单外的站点仍然被贴了我们的标记').toBeUndefined();
 
@@ -137,7 +137,7 @@ describe('preload 暴露面白名单', () => {
   //  catch 吞掉；2026-11-02 丢 features 同理：任何一侧单测都不报错，症状却在用户面前。）
   it('B8 垫片 → 桥 → IPC：payload 形状与 features 传递是通的', () => {
     const { exposed, sends } = loadBridge({
-      href: 'https://course.example.chaoxing.com/x',
+      href: 'https://course.example.com/x',
       env: { AI_BROWSER_POPUP_SHIM: 'on' },
     });
     const bridge = exposed.__ai_browser__;
@@ -146,7 +146,7 @@ describe('preload 暴露面白名单', () => {
     const shimWindow = { __ai_browser__: bridge };
     // eslint-disable-next-line no-new-func
     new Function('window', 'document', 'URL', WINDOW_OPEN_SHIM_SOURCE)(
-      shimWindow, { baseURI: 'https://course.example.chaoxing.com/x' }, URL);
+      shimWindow, { baseURI: 'https://course.example.com/x' }, URL);
 
     const w = shimWindow.open('', '_blank', 'width=420,height=520,left=10,top=20');
     expect(w, '桥存在时 window.open 不许返回 null（返回 null = 站点以为弹窗被拦）').toBeTruthy();
@@ -160,15 +160,15 @@ describe('preload 暴露面白名单', () => {
     // 不写第三参数时也不能留 undefined：主进程判据拿的是字符串，
     // 而 contextBridge 两岸参数数量不一致会抛错（历史症状 = 静默 null）。
     sends.length = 0;
-    shimWindow.open('https://course.example.chaoxing.com/y', '_blank');
+    shimWindow.open('https://course.example.com/y', '_blank');
     const plain = sends.find((s) => s.channel === 'ai:window_open');
     expect(plain.payload.features, '缺省特性串必须是空串，不是 undefined').toBe('');
 
     sends.length = 0;
-    w.location = 'https://course.example.chaoxing.com/target';
+    w.location = 'https://course.example.com/target';
     const nav = sends.find((s) => s.channel === 'ai:window_open_nav');
     expect(nav, 'location 赋值没有落到 ai:window_open_nav').toBeTruthy();
-    expect(nav.payload.url).toBe('https://course.example.chaoxing.com/target');
+    expect(nav.payload.url).toBe('https://course.example.com/target');
     expect(nav.payload.features, 'nav 不该带 features（特性只在 open 这一发有效）').toBeUndefined();
   });
 });

@@ -144,14 +144,14 @@ describe('summarizeFrameRead() — 把"合并了"变成可核对的数字', () =
     // 而回执写的是 {auto_ax:"merged", frames_read:1}。
     const s = summarizeFrameRead([{
       key: 'frame-1',
-      src: 'https://mooc2-ans.xidian.edu.cn/mooc2-ans/mycourse/studentcourse?x=1',
+      src: 'https://mooc2-ans.example.com/mooc2-ans/mycourse/studentcourse?x=1',
       tree: { children: [{ id: 'axf-1-0', role: 'textbox' }] },
       stats: { text_chars: 420, kept_chars: 4 },
     }]);
     expect(s.frames_read).toBe(1);
     expect(s.nodes_added).toBe(1);
     expect(s.text_coverage).toBe(0.01);
-    expect(s.frames[0]).toEqual({ ref: 'frame-1', src: 'https://mooc2-ans.xidian.edu.cn/mooc2-ans/mycourse/studentcourse?x=1', nodes: 1, chars: 420 });
+    expect(s.frames[0]).toEqual({ ref: 'frame-1', src: 'https://mooc2-ans.example.com/mooc2-ans/mycourse/studentcourse?x=1', nodes: 1, chars: 420 });
   });
 
   it('SR-2: 正常帧覆盖率接近 1', () => {

@@ -1158,7 +1158,7 @@ node bin/ai-browser.cjs call ui.errors '{"limit":20}'   # 找 kind=captcha_wall 
 | `AI_BROWSER_WATCHDOG` | 开 | `0`/`off`/`false`/`no` 关闭网络看门狗 |
 | `AI_BROWSER_WATCHDOG_URLS` | `example.com, baidu.com` | 看门狗探测目标（任一可达即算存活） |
 | `AI_BROWSER_NETWORK_CAPTURE` | 开 | `0` 关闭默认抓包 |
-| `AI_BROWSER_CANVAS_HOOK` | **关** | 站点能一眼看见我们改过 `getContext`，所以默认不开。`on`/`1`/`all`=全站开；`a.com,b.chaoxing.com`=只在这些域（含子域）开；`0`/`off`=关。agent 临时需要就在 tab 上 `ui.canvas_configure{reload:true}` |
+| `AI_BROWSER_CANVAS_HOOK` | **关** | 站点能一眼看见我们改过 `getContext`，所以默认不开。`on`/`1`/`all`=全站开；`a.com,example.com`=只在这些域（含子域）开；`0`/`off`=关。agent 临时需要就在 tab 上 `ui.canvas_configure{reload:true}` |
 | `AI_BROWSER_POPUP_SHIM` | **关** | `window.open("")` 兼容垫片的开关，形状同上（`on` / 域名列表 / `0`）。它替换页面可见的原生 `window.open`，代价由全站付；老站模式在原生路径下回到"返回 null"。同时决定 preload 桥要不要暴露给这个域 |
 | `AI_BROWSER_CLIENT_HINTS` | 开 | `0` 关闭"给文档导航补 `sec-ch-ua*`"的出口钩子（critical 三个 + 被 `Accept-CH` 授权过 origin 的高熵那批一起关）。只用于二分定位（关掉后导航请求回到内核那套：一个 `sec-ch-ua*` 头都没有） |
 | `AI_BROWSER_DIALOG_POLICY` | `auto` | `alert/confirm/beforeunload` 的应答策略：`auto` / `accept` / `dismiss` / `manual`（不自动应答，交给人） |

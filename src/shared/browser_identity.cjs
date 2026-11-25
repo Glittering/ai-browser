@@ -220,7 +220,7 @@ function buildIdentity(opts = {}) {
 // Function.prototype.toString 就能看见。所以它们默认**不开**，并且支持三种写法：
 //   off / 0 / 空          → 全关
 //   on / 1 / all          → 全开
-//   a.com,b.chaoxing.com  → 只在这些域（含子域）开
+//   a.com,example.com  → 只在这些域（含子域）开
 function parseHostSwitch(value) {
   const raw = (value === undefined || value === null) ? '' : String(value).trim();
   if (!raw) return { mode: 'off', hosts: [] };

@@ -6,7 +6,7 @@
 // 主进程的 setWindowOpenHandler 对 window.open 一律 deny（改为自建 tab），
 // deny 之后 window.open 返回 null，页面再赋 w.location 直接抛 TypeError ——
 // 用户看到的就是一个光秃秃的 about:blank 标签，站点逻辑静默断裂。
-// （实测：pxsxzj.xidian.edu.cn「进入学习」，2026-10-19。）
+// （实测：某网课平台点「进入学习」，2026-10-19。）
 //
 // ⚠️ 第二层根因（同一天发现，比第一层更隐蔽）：光让 window.open 返回一个
 // 非 null 的对象还不够。真实 Window 的 location 是 [LegacyUnforgeable] +

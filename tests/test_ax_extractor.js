@@ -158,10 +158,10 @@ describe('mergeFrameTrees() — OOPIF down-drill (P0)', () => {
   it('AX-016: 门节点带上绝对 src（树里出现的东西要能直接打开）', () => {
     const subTree = { id: 'frame-2', role: 'generic', label: 'f', children: [] };
     const merged = mergeFrameTrees(mainTree, [{
-      key: 'frame-2', label: 'f', src: 'https://mooc2-ans.xidian.edu.cn/mooc2-ans/mycourse/studentcourse?x=1', tree: subTree,
+      key: 'frame-2', label: 'f', src: 'https://mooc2-ans.example.com/mooc2-ans/mycourse/studentcourse?x=1', tree: subTree,
     }]);
     const gate = merged.children.find((c) => c.id === 'frame-2');
-    expect(gate.src).toBe('https://mooc2-ans.xidian.edu.cn/mooc2-ans/mycourse/studentcourse?x=1');
+    expect(gate.src).toBe('https://mooc2-ans.example.com/mooc2-ans/mycourse/studentcourse?x=1');
   });
 });
 
