@@ -11,7 +11,7 @@ export const MCP_TOOLS = [
   {
     name: 'browse_navigate',
     title: 'Navigate tab',
-    description: 'Navigate your tab to a URL. Returns at the requested milestone (default: DOM ready) — it does not wait for load, which SPAs often never fire.',
+    description: 'Use when the user wants to open a page or reach a URL in your tab, before reading or acting. Returns at the milestone (default: DOM ready), not load, which SPAs never fire.',
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     inputSchema: {
       type: 'object',
@@ -26,7 +26,7 @@ export const MCP_TOOLS = [
   {
     name: 'browse_get_tree',
     title: 'Read semantic tree',
-    description: 'Return the page semantic tree (roles, labels, actions, bounds). Root adds editors (primary) when 2+ editable.',
+    description: 'Use to read the page: every element as a node with role, label, id and its actions. This is how you see the screen and find click targets. subset:"interactive" saves tokens.',
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     inputSchema: {
       type: 'object',
@@ -42,7 +42,7 @@ export const MCP_TOOLS = [
   {
     name: 'browse_act',
     title: 'Act on element',
-    description: 'Act on a data-ai-id element. type appends at caret, setContent replaces all. page_changed:false = dispatched but page unchanged (wrapper).',
+    description: 'Use to click, type, fill, select, upload or press keys — the act that does the work. target = an id from browse_get_tree, never visible text. type appends at caret; setContent replaces all.',
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     inputSchema: {
       type: 'object',
@@ -172,7 +172,7 @@ export const MCP_TOOLS = [
   {
     name: 'browse_auth_state',
     title: 'Check login / auth-wall state',
-    description: 'Is this tab still logged in, or bounced to a login wall? auth_wall.detected=true means stop debugging and re-authenticate first. logged_in is heuristic; auth_wall is the signal to trust.',
+    description: 'Is this tab still logged in, or bounced to a wall? auth_wall.detected=true means stop debugging and re-authenticate first. logged_in is heuristic; auth_wall is the signal.',
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     inputSchema: {
       type: 'object',
@@ -184,7 +184,7 @@ export const MCP_TOOLS = [
   {
     name: 'browse_screenshot',
     title: 'Screenshot the viewport',
-    description: 'Screenshot the viewport (base64). Use FIRST when an action misbehaves: the tree cannot show overlays, canvas, occlusion or glitches. Warns about visible password inputs.',
+    description: 'Screenshot the viewport (base64). Use FIRST when an action misbehaves — the tree cannot show overlays, occlusion or glitches. Warns about password inputs.',
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     inputSchema: {
       type: 'object',
@@ -235,7 +235,7 @@ export const MCP_TOOLS = [
   {
     name: 'browse_network',
     title: 'Inspect network',
-    description: 'Query captured HTTP requests: list/get/clear/configure. Captures headers and POST bodies; sensitive headers redacted. Each op reads its own group: filters / include / body_offset / configure.',
+    description: 'Query captured HTTP requests: list/get/clear/configure. Headers and POST bodies captured; sensitive headers redacted. Each op reads its own group.',
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     inputSchema: {
       type: 'object',
@@ -294,7 +294,7 @@ export const MCP_TOOLS = [
   {
     name: 'browse_canvas',
     title: 'Read canvas',
-    description: 'Read <canvas> via captured draw calls (not pixels): list, read texts/regions, configure, or capture a PNG fallback. 2D text comes from fillText, so no OCR; WebGL is opaque.',
+    description: 'Read <canvas> from captured draw calls, not pixels: list/read/configure/capture. 2D text comes from fillText, so no OCR; WebGL is opaque.',
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     inputSchema: {
       type: 'object',
@@ -333,7 +333,7 @@ export const MCP_TOOLS = [
   {
     name: 'browse_capabilities',
     title: 'Probe capabilities',
-    description: 'Probe how to operate a page: DOM vs canvas, iframes, app objects on window, JSON endpoints, plus a plan. deep=true also probes closure-hidden models (canvas editors that report none).',
+    description: 'Probe how to operate a page: DOM vs canvas, iframes, window objects, JSON endpoints, plus a plan. deep=true also probes closure-hidden models.',
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     inputSchema: {
       type: 'object',
@@ -360,7 +360,7 @@ export const MCP_TOOLS = [
   {
     name: 'browse_downloads',
     title: 'List downloads',
-    description: 'List a tab\'s downloads with on-disk paths. Downloads are async: poll this after clicking export/download instead of expecting the path in the click response.',
+    description: 'List a tab\'s downloads with on-disk paths. Downloads are async: poll this after clicking export, not in the click response.',
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     inputSchema: {
       type: 'object',
@@ -372,7 +372,7 @@ export const MCP_TOOLS = [
   {
     name: 'browse_errors',
     title: 'Read error log',
-    description: 'Read the main-process error log: uncaught exceptions, crashes, failed navigations, RPC errors. Each entry includes recent calls as context. Returns the on-disk JSONL path.',
+    description: 'Read the main-process error log: uncaught exceptions, crashes, failed navigations, RPC errors. Returns the on-disk JSONL path.',
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     inputSchema: {
       type: 'object',

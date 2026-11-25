@@ -14,7 +14,9 @@ import { fileURLToPath } from 'node:url';
 // 启动逻辑与 CLI 共用一份（scripts/ensure_running.cjs）。曾经这里有一份私有实现，
 // 结果 MCP 能自动拉起浏览器、CLI 不能 —— 同一件事两个行为。
 import ensureMod from '../../scripts/ensure_running.cjs';
+import skillMod from '../../scripts/skill.cjs';
 import { MCP_TOOLS } from './mcp_tools.js';
+import { MCP_INSTRUCTIONS } from './mcp_instructions.js';
 import { actParams, networkParams } from './mcp_args.js';
 import { evaluateGuardError } from '../shared/guards.js';
 import { timeoutForTool } from '../shared/tool_timeout.js';
@@ -78,7 +80,12 @@ const server = new Server(
   // resources/prompts 声明为空能力：协议要求即使一个都没有也要正常应答这两个
   // list 请求（部分目录扫描器，如 Smithery，会把 "Method not found" 记为健康
   // 检查失败）。能力清单保留声明，客户端据此知道服务端支持该方法族。
-  { capabilities: { tools: {}, resources: {}, prompts: {} } }
+  //
+  // instructions：客户端会把它拼进 system prompt，是协议里唯一能让服务端主动
+  // 说"我是什么、什么时候用我"的地方。此前这一位是空的，agent 只看到一份
+  // 名字像通用动词的工具清单 —— 用户说"用 ai-browser"，新会话根本不知道那是
+  // 什么。内容与成本见 ./mcp_instructions.js。
+  { capabilities: { tools: {}, resources: {}, prompts: {} }, instructions: MCP_INSTRUCTIONS }
 );
 
 // Tool definitions — curated minimal MCP_TOOLS (see mcp_tools.js). Kept small
@@ -400,6 +407,24 @@ async function main() {
   // up on first use, inside wsClient's connection-retry loop (via ensureRunning).
   const listening = await checkPort(ELECTRON_PORT);
   if (!listening) console.error('[mcp] ai-browser not running — will auto-start on first browse_* call');
+
+  // 技能漂移提示：package upgrade 不会刷新用户目录里的技能副本，agent 会继续
+  // 照着旧说明操作（实测有机器停在 2.1.1 而包已 2.4.1，缺 tabs.md 整节）。
+  // 只提示、不自动写盘 —— 启动过程不该有副作用，也可能根本没有写权限。
+  try {
+    const stale = skillMod.drift();
+    if (stale.length) {
+      const s = stale[0];
+      console.error(
+        `[mcp] skills out of date (${s.target}/${s.skill} ${s.from} -> ${VERSION})` +
+          (stale.length > 1 ? ` and ${stale.length - 1} more` : '') +
+          ' — run `ai-browser skill install` to refresh'
+      );
+    }
+  } catch {
+    // 技能目录存在与否绝不能影响 MCP 启动
+  }
+
   const transport = new StdioServerTransport();
   await server.connect(transport);
   // stderr is for logging only; stdout is the MCP protocol

@@ -42,19 +42,61 @@ function detectTargets() {
   }));
 }
 
+// 标记文件里记的是"装它的那个包版本"。返回值语义必须分清：
+//   null = 这个目录没有标记（不是本工具装的，绝不碰）
+//   ''   = 有标记但读不出/格式旧（当作需要重装，不要当成"已是最新"）
+function readMarker(dest) {
+  const marker = path.join(dest, MARKER);
+  if (!fs.existsSync(marker)) return null;
+  try {
+    const m = fs.readFileSync(marker, 'utf8').match(/ai-browser\s+(\S+)/);
+    return m ? m[1] : '';
+  } catch {
+    return '';
+  }
+}
+
+// 已装副本与当前包的版本差。为什么需要它（2026-11-25）：
+// install 只在有人手动跑的时候写盘，`npm i -g` / `npx` 升级都不会碰用户目录，
+// 于是"包装到了 2.4.1、技能还停在 2.1.1"是**静默**发生的 —— 用户看到的现象是
+// "模型还是照着旧说明乱来"，而没有任何地方提示这件事。实测就有一台机器停在
+// 2.1.1，缺 references/tabs.md 整节。
+function drift() {
+  const out = [];
+  for (const t of detectTargets()) {
+    if (!t.exists) continue;
+    for (const s of t.installed) {
+      const v = readMarker(path.join(t.dir, s));
+      if (v !== pkg.version) out.push({ target: t.label, dir: t.dir, skill: s, from: v || '?' });
+    }
+  }
+  return out;
+}
+
 function installOne(skill, targetDir) {
   const src = path.join(SKILLS_ROOT, skill);
   const dest = path.join(targetDir, skill);
-  const marker = path.join(dest, MARKER);
 
-  if (fs.existsSync(dest) && !fs.existsSync(marker)) {
+  const installedVersion = fs.existsSync(dest) ? readMarker(dest) : null;
+
+  // 没有标记 = 用户自己写的同名技能，跳过（这条永远优先）
+  if (fs.existsSync(dest) && installedVersion === null) {
     return { skill, status: 'skipped-user-owned' };
+  }
+  // 同版本：不重复写盘。幂等让 install 可以随便跑，也让"是否需要升级"可判断。
+  if (installedVersion === pkg.version) {
+    return { skill, status: 'up-to-date' };
   }
 
   fs.mkdirSync(targetDir, { recursive: true });
+  // 必须先删干净再拷：cpSync 只会覆盖同名文件，包里**已经删掉**的文件会一直
+  // 留在用户目录里。那样"升级成功"和"还是旧版"在文件系统上无法区分，
+  // 而且 agent 会继续读到已经作废的 reference。
+  if (fs.existsSync(dest)) fs.rmSync(dest, { recursive: true, force: true });
   fs.cpSync(src, dest, { recursive: true });
-  fs.writeFileSync(marker, `ai-browser ${pkg.version}\n`, 'utf8');
-  return { skill, status: 'installed' };
+  fs.writeFileSync(path.join(dest, MARKER), `ai-browser ${pkg.version}\n`, 'utf8');
+
+  return { skill, status: installedVersion ? 'upgraded' : 'installed', from: installedVersion || null };
 }
 
 function install({ dir, all }) {
@@ -77,18 +119,31 @@ function install({ dir, all }) {
   }
 
   let failed = 0;
+  let changed = 0;
   for (const t of dirs) {
     console.log(`\n→ ${t.label} (${t.dir})`);
     for (const s of skills) {
       const r = installOne(s, t.dir);
-      const note =
-        r.status === 'installed'
-          ? `✓ ${s}`
-          : `! ${s} —— 这个目录已有同名技能且不是本工具装的，跳过（要覆盖请先手动删掉）`;
+      let note;
+      if (r.status === 'installed') {
+        note = `✓ ${s}`;
+        changed++;
+      } else if (r.status === 'upgraded') {
+        note = `↑ ${s}  ${r.from} → ${pkg.version}`;
+        changed++;
+      } else if (r.status === 'up-to-date') {
+        note = `· ${s}  已是最新（${pkg.version}）`;
+      } else {
+        note = `! ${s} —— 这个目录已有同名技能且不是本工具装的，跳过（要覆盖请先手动删掉）`;
+      }
       console.log('  ' + note);
     }
   }
-  console.log(`\n装了 ${skills.length} 个技能。新开会话时客户端会自动发现它们，不需要再贴说明书。`);
+  if (changed) {
+    console.log(`\n更新了 ${changed} 个技能（共 ${skills.length} 个 × ${dirs.length} 个位置）。新开会话时客户端会自动发现它们。`);
+  } else {
+    console.log('\n全部已是最新，没有写盘。');
+  }
   return failed;
 }
 
@@ -113,6 +168,13 @@ function run(argv) {
       const state = !t.exists ? '目录不存在' : t.installed.length ? `已装 ${t.installed.length} 个` : '未装';
       console.log(`  ${t.label.padEnd(12)} ${state.padEnd(12)} ${t.dir}`);
     }
+    // 版本漂移必须在人主动查看时就能看见，而不是等 agent 用旧技能出错。
+    const stale = drift();
+    if (stale.length) {
+      console.log(`\n! ${stale.length} 个副本是旧版（当前包 ${pkg.version}）：`);
+      for (const d of stale) console.log(`    ${d.target}/${d.skill}  ${d.from} → ${pkg.version}`);
+      console.log('  运行 `ai-browser skill install` 刷新。');
+    }
     console.log('\n装上：ai-browser skill install        只装到已存在的客户端目录');
     console.log('      ai-browser skill install --all  三个位置都装');
     console.log('      ai-browser skill print          打印入口 SKILL.md（手动粘贴用）');
@@ -130,4 +192,13 @@ function run(argv) {
   return 2;
 }
 
-module.exports = { run, listSkills, detectTargets, SKILLS_ROOT };
+module.exports = {
+  run,
+  listSkills,
+  detectTargets,
+  drift,
+  readMarker,
+  installOne,
+  SKILLS_ROOT,
+  MARKER,
+};

@@ -16,7 +16,8 @@ npx -y @glittering0717/ai-browser skill install
 | `read-webpage` | 读一篇文章正文并总结 |
 | `web-network-monitor` | 长时间盯某个页面的请求 |
 
-不装技能也能用——20 个 `browse_*` 工具的 schema 本身自带说明。技能只是把"怎么组合"讲清楚。
+不装技能也能用——17 个工具的 schema 之外，MCP 初始化时还会给客户端一段 `instructions`
+（我是谁、什么时候用我、最小循环）。技能只是把"怎么组合"讲得更细。
 
 ---
 

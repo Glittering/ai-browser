@@ -62,7 +62,7 @@
 | 内核 | 自带 Electron 33 / Chromium 130+，每 tab 一个 BrowserView | 复用用户的 Chrome/Edge（扩展要求 Chromium 125+） |
 | 进程 | main + renderer + preload + 各 tab CDP | CLI(Rust) + daemon + MV3 扩展(service worker) + 页面 CDP |
 | 内部传输 | 进程内 IPC（`ai:*`） | CLI ↔ daemon：UDS 上的 JSON Lines；daemon ↔ 扩展：loopback WebSocket（默认 52800） |
-| Agent 接入 | MCP stdio（20 个 `browse_*`）+ WS JSON-RPC（`ui.*`） | **`bsk` 命令行**（21 个 tool handler）+ 可选 MCP/DSH 插件 |
+| Agent 接入 | MCP stdio（17 个 `browse_*`）+ WS JSON-RPC（`ui.*`） | **`bsk` 命令行**（21 个 tool handler）+ 可选 MCP/DSH 插件 |
 | 会话模型 | 单浏览器实例，多 tab，`activeTab` 隐式 | session = 随机 ID + 独立 Agent Window + 会话级元素 refstore + 借用表 |
 | 元素寻址 | `data-ai-id`（注入的稳定 ID） | `@e1`（**会话作用域**的 ref，随会话销毁） |
 | 并发 | 未做队列（同 tab 靠调用方自律） | **每 session 串行队列**，不同 session 并行 |
@@ -168,7 +168,7 @@
 3. **`browse_diff`**。显式 changed/unchanged。他们只有 observe，没有"证明"这个概念。**这一条加上 5.1 的 effect_state，就是完整的正确性闭环**：动作声明效果 → 页面证明变化。
 4. **工具面的 token 经济**。他们每次调用要带 `--session ab12 --tab-id 42`；我们的 tab 是隐式 active。**对 agent 来说这是每步都省一笔上下文开销**，长期跑长任务的差距会累积。这一点别改。
 
-顺带一个反直觉的观察：他们的 21 个 tool 和我们的 20 个数量相当，但**他们的工具是"动词-名词"命令式（`bsk click @e1`），我们的是"读—动—验"三元组（get_tree / act / diff）**。后者的形状更贴近 agent 的实际循环：看 → 动 → 确认。这是设计上的优势，不是巧合。
+顺带一个反直觉的观察：他们的 21 个 tool 和我们的 17 个数量相当，但**他们的工具是"动词-名词"命令式（`bsk click @e1`），我们的是"读—动—验"三元组（get_tree / act / diff）**。后者的形状更贴近 agent 的实际循环：看 → 动 → 确认。这是设计上的优势，不是巧合。
 
 ---
 
