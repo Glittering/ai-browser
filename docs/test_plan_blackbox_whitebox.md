@@ -10,7 +10,7 @@
 | 项 | 值 |
 |---|---|
 | 架构 | Electron 33 + ESM；主进程 = WS JSON-RPC 服务 + CDP 网络监控；渲染端 preload = 语义提取/动作执行/事件观测 |
-| 对外入口 | ① MCP server（`browse_*` 工具，stdio）② WS JSON-RPC（`ui.*`，`ws://127.0.0.1:9223`）③ Skills（read-webpage / web-network-monitor / content-publish） |
+| 对外入口 | ① MCP server（`browse_*` 工具，stdio）② WS JSON-RPC（`ui.*`，`ws://127.0.0.1:9223`）③ Skills（ai-browser / read-webpage / content-publish） |
 | 单测 | `npm test`（Vitest，jsdom 环境） |
 | 集成真实层 | `npm run smoke`（真实 Electron + 本地 CSP 页，自包含，失败退出码非零） |
 | 真实站点 E2E | `node e2e/e2e_realsites.cjs`（需已登录态，外网） |
@@ -47,7 +47,7 @@
 | 执行动作 | `ui.act` / `browse_act` | click/type/setContent/select/clear/focus/hover/scroll_to/submit/toggle | DOM 按真实期望变化（计数/值/焦点/禁用态） | U(部分)/S |
 | 页面求值 | `ui.evaluate` / `browse_evaluate` | 任意 JS 表达式/函数 | 返回 JSON 值（含 CSP 严格站） | S |
 | 事件订阅 | `ui.subscribe` / `browse_subscribe` | 订阅 dom_change/state_changed/captcha/message/js_error/network_response | 页面变化时收到对应事件 | 手动 |
-| 抓包 | `browse_network_body`/Skill `web-network-monitor` | 触发行 {{a}} 接口 | 拿到请求/响应体 | 手动 |
+| 抓包 | `browse_network`（配方见 `skills/ai-browser/references/network.md`） | 触发行 {{a}} 接口 | 拿到请求/响应体 | 手动 |
 | 等待 | `ui.wait` | 动态元素出现/消失 | 条件满足后返回 | 手动 |
 | 滚动 | `ui.scroll` / `browse_scroll` | 长页面 | `scroll_y` 变化、树 relayout | 手动 |
 | 标签 | `ui.{new,list,set_active,close}_tab` / `browse_*` | 多标签 CRUD + 切换 + 上下文切换 | 计数/活动态/`document.title`/URL 正确 | S |

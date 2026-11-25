@@ -39,6 +39,6 @@ browse_diff { operation:"diff", snapshot:"<基线>" }     // verdict: changed | 
 
 这三类别在这里硬做，用对应的技能（它们带更细的校验步骤）：
 
-- 把文章发布到 CSDN / 知乎 / 掘金 → `content-publish`
-- 读一篇文章的正文并总结 → `read-webpage`
-- 长时间盯某个页面的请求 → `web-network-monitor`
+- 把文章发布到 CSDN / 知乎 / 掘金 → `content-publish` 技能
+- 读一篇文章的正文并总结 → `read-webpage` 技能
+- 盯某个页面的请求 / 看登录后的接口 → `references/network.md`（本技能内，不用另找）

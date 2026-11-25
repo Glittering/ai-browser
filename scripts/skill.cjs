@@ -96,6 +96,24 @@ function markerText(sig) {
   return `ai-browser ${pkg.version} ${sig}\n`;
 }
 
+// 包里已经删掉的技能，在用户目录里不会自己消失 —— 它会继续被客户端发现、
+// 继续按旧描述触发。2026-11-25 合并 web-network-monitor 时踩到的就是这个：
+// 新版明明不带了，老用户那边还在跑。所以 install 必须负责收尸。
+// 只删带 marker 的目录（= 本工具装的），用户自己写的同名技能永远不碰。
+function removeOrphans(targetDir) {
+  if (!fs.existsSync(targetDir)) return [];
+  const current = new Set(listSkills());
+  const removed = [];
+  for (const e of fs.readdirSync(targetDir, { withFileTypes: true })) {
+    if (!e.isDirectory() || current.has(e.name)) continue;
+    const dir = path.join(targetDir, e.name);
+    if (!fs.existsSync(path.join(dir, MARKER))) continue;
+    fs.rmSync(dir, { recursive: true, force: true });
+    removed.push(e.name);
+  }
+  return removed;
+}
+
 // 已装副本与当前包的版本差。为什么需要它（2026-11-25）：
 // install 只在有人手动跑的时候写盘，`npm i -g` / `npx` 升级都不会碰用户目录，
 // 于是"包装到了 2.4.1、技能还停在 2.1.1"是**静默**发生的 —— 用户看到的现象是
@@ -196,6 +214,11 @@ function install({ dir, all }) {
       }
       console.log('  ' + note);
     }
+    const removed = removeOrphans(t.dir);
+    if (removed.length) {
+      console.log(`  − 已移除 ${removed.join('、')}（包里不再带这个技能了）`);
+      changed++;
+    }
   }
   if (changed) {
     console.log(`\n更新了 ${changed} 个技能（共 ${skills.length} 个 × ${dirs.length} 个位置）。新开会话时客户端会自动发现它们。`);
@@ -262,6 +285,7 @@ module.exports = {
   readSignature,
   skillSignature,
   installOne,
+  removeOrphans,
   SKILLS_ROOT,
   MARKER,
 };

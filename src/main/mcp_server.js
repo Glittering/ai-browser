@@ -90,7 +90,7 @@ const server = new Server(
 
 // Tool definitions — curated minimal MCP_TOOLS (see mcp_tools.js). Kept small
 // to reduce per-message token cost; low-frequency/flow capabilities live in
-// skills/ (read-webpage, web-network-monitor).
+// skills/ (ai-browser + read-webpage / content-publish) and its references/.
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: MCP_TOOLS
 }));

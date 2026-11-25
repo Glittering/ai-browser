@@ -2,7 +2,7 @@
 name: ai-browser
 description: >-
   ai-browser（AI Browser）—— 一个真实、可见、可被人接管的浏览器：带登录态、跑 JS、人随时能抢鼠标。替用户在网页上拿东西、做事。
-  适用：任何要在网页上完成的任务 —— 包括搜索（含小红书/头条这类登录才看得到结果的）、页面操作（点击/填表/登录/提交/上传下载）、抓数据、看登录后才有的接口。整篇正文交给 read-webpage 技能，接口交给 web-network-monitor 技能。用户点名 ai-browser / AI Browser 时直接用。
+  适用：任何要在网页上完成的任务 —— 包括搜索（含小红书/头条这类登录才看得到结果的）、页面操作（点击/填表/登录/提交/上传下载）、抓数据、看登录后才有的接口。整篇正文交给 read-webpage 技能，接口见 `references/network.md`。用户点名 ai-browser / AI Browser 时直接用。
   不适用：完全不碰网页的任务（本地文件、命令、代码、纯写作、跑测试）。
   触发词（用户嘴里的说法）：看看这个网页、这链接里写了啥、帮我搜一下、帮我点一下、登录态过期。
 ---
@@ -53,5 +53,5 @@ ai-browser call ui.act '{"action":"click","target":"e:a-3"}'  # 点它
 - `references/cli.md` — CLI 全量对照
 - `references/troubleshooting.md` — 排查顺序
 - `references/hard-pages.md` — canvas / 富文本 / iframe / 上传
-- `references/network.md` — 抓请求
+- `references/network.md` — 抓请求 / 接口
 - `references/tasks.md` — 发文章 / 读正文配方

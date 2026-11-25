@@ -150,4 +150,27 @@ describe('技能安装：版本漂移与幂等', () => {
       rmSync(target, { recursive: true, force: true });
     }
   });
+
+  it('U-7: 包里已删掉的技能，install 时要被清走（否则它继续按旧描述触发）', () => {
+    const target = freshTarget();
+    try {
+      // 一个"以前装过、现在包里没有"的技能
+      const gone = join(target, 'removed-skill');
+      mkdirSync(gone, { recursive: true });
+      writeFileSync(join(gone, 'SKILL.md'), '---\nname: removed-skill\n---\n旧的', 'utf8');
+      writeFileSync(join(gone, MARKER), 'ai-browser 1.0.0 aaaaaaaa\n', 'utf8');
+
+      // 一个用户自己写的同名目录（没有 marker）
+      const mine = join(target, 'my-own-skill');
+      mkdirSync(mine, { recursive: true });
+      writeFileSync(join(mine, 'SKILL.md'), '---\nname: my-own-skill\n---\n', 'utf8');
+
+      const removed = skill.removeOrphans(target);
+      expect(removed).toEqual(['removed-skill']);
+      expect(existsSync(gone), '包里没有的旧技能必须删掉').toBe(false);
+      expect(existsSync(mine), '没有 marker 的是用户的，绝不能删').toBe(true);
+    } finally {
+      rmSync(target, { recursive: true, force: true });
+    }
+  });
 });

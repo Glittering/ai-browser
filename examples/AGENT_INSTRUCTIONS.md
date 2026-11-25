@@ -11,10 +11,9 @@ npx -y @glittering0717/ai-browser skill install
 
 | 技能 | 干什么 |
 |---|---|
-| `ai-browser` | 最小循环、卡住时的第一反应、难搞页面的处理 |
+| `ai-browser` | 最小循环、卡住时的第一反应、难搞页面的处理（抓请求/看接口在它的 `references/network.md`） |
 | `content-publish` | 把文章发布到 CSDN / 知乎 / 掘金 |
 | `read-webpage` | 读一篇文章正文并总结 |
-| `web-network-monitor` | 长时间盯某个页面的请求 |
 
 不装技能也能用——17 个工具的 schema 之外，MCP 初始化时还会给客户端一段 `instructions`
 （我是谁、什么时候用我、最小循环）。技能只是把"怎么组合"讲得更细。

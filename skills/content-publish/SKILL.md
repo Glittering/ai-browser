@@ -2,7 +2,7 @@
 name: content-publish
 description: >-
   适用于用户要求"把内容/文章发布到某个平台（CSDN、知乎、掘金、公众号、其他博客/社区等）"、或用编辑器录入并提交内容的自动化发布/提交流程任务。触发词：发布到、发到、发博客、发文章、发帖、发一篇、投稿、发出去、上传到平台、帮我发、发布内容、submit/publish this post。
-  注意边界：若用户只是想编辑某个已有页面而非提交发布，用 browse_navigate / browse_act 直接处理即可；只是"读一篇内容"用 read-webpage，不需要本 skill 的发布校验步骤。
+  不适用：只编辑已有页面、不提交 → browse_navigate / browse_act；只读一篇文章 → read-webpage 技能；目标是接口而不是页面 → ai-browser 的 references/network.md。
 ---
 
 # 内容发布 / 提交流程（content-publish）
@@ -54,7 +54,13 @@ description: >-
 | 审核 / 待审核 | 进入人工/系统审核 |
 | 报错 toast / message_appeared 事件体 | 失败，需读取提示原文 |
 
-## 边界与替代
+## 不适用（交给谁）
+- 只是编辑已有页面、不提交 → `browse_navigate` / `browse_act`，不需要发布校验
+- 只是读一篇文章 → `read-webpage` 技能
+- 还不知道正文从哪来（要先抓文章内容）→ 先用 `ai-browser` 取，再回来发布
+- 目标是某个接口而不是页面 → `ai-browser` 的 `references/network.md`
+
+## 操作边界
 - skill 不保存账号/密码，登录与验证码需用户配合。
 - 若某平台按钮文案不同，用 `browse_get_tree` 的 label 动态定位，不要硬编码选择器。
 - 发布属于不可逆操作：点击前可用 `browse_get_tree` 确认拿到的确实是发布按钮（label 含"发布/提交"），避免误点。

@@ -2,7 +2,7 @@
 name: read-webpage
 description: >-
   适用于需要阅读、理解或总结某个网页的正文文章内容（标题 + 段落）的任务，尤其是新闻/博客/公众号等文章型页面。触发词：读这篇文章、阅读该页、看看这篇、帮我读一下、这页讲了啥、这篇写的是什么、总结内容、提炼要点、提取正文、正文内容、翻译这页、extract the article、summarize this page。
-  注意边界：若只需读取页面上的控件/标签/按钮/少量文本，请用 browse_get_tree，不要用本 skill；目标是交互（登录、表单、评论）而非读正文时也不要用本 skill。
+  不适用：只要读控件/标签/少量文本 → browse_get_tree；要交互（登录/表单/评论/发布）→ 回 ai-browser 主循环；要接口 JSON → ai-browser 的 references/network.md。
 ---
 
 # 网页正文提取（read-webpage）
@@ -46,7 +46,13 @@ description: >-
 - 输出为标题 + 段落数组（同一套提取脚本主体），可直接交给用户阅读或总结。
 - 空结果时明确提示，不强行拼接垃圾文本。
 
-## 边界与替代
+## 不适用（交给谁）
+- 只要读控件 / 标签 / 按钮 / 少量文本 → `browse_get_tree`，不要提正文
+- 目的是交互（登录、填表、评论、发布）→ 回 `ai-browser` 的主循环
+- 要的是接口返回的 JSON，而不是页面上的字 → `ai-browser` 的 `references/network.md`
+- 页面根本还没打开、不知道在哪 → 先用 `browse_navigate` 过去（`ai-browser` 主循环）
+
+## 技术边界
 - 只用于"正文文章"。登录框、评论、表格、导航等非文章内容走 `browse_get_tree` / `browse_act`。
 - 不分页/不处理懒加载（动态新增段落不会出现）；长文分段处理或提示用户。
 - 静默失败判据：若取回的 title 与 paras 均为空，判为"非文章页"。
