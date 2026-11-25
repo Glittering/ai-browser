@@ -1,8 +1,9 @@
 ---
 name: content-publish
 description: >-
-  适用于用户要求"把内容/文章发布到某个平台（CSDN、知乎、掘金、公众号、其他博客/社区等）"、或用编辑器录入并提交内容的自动化发布/提交流程任务。触发词：发布到、发到、发博客、发文章、发帖、发一篇、投稿、发出去、上传到平台、帮我发、发布内容、submit/publish this post。
-  不适用：只编辑已有页面、不提交 → browse_navigate / browse_act；只读一篇文章 → read-webpage 技能；目标是接口而不是页面 → ai-browser 的 references/network.md。
+  content-publish —— 只在「要把内容提交到某个平台」时用我：CSDN / 知乎 / 掘金 / 公众号 / 其它博客社区。
+  触发词：发布到、发到、发博客、发帖、发一篇、投稿、发出去、上传到平台、帮我发。
+  不适用：只编辑不提交 → ai-browser 的 browse_act；只读文章 → read-webpage 技能。
 ---
 
 # 内容发布 / 提交流程（content-publish）

@@ -1,8 +1,9 @@
 ---
 name: read-webpage
 description: >-
-  适用于需要阅读、理解或总结某个网页的正文文章内容（标题 + 段落）的任务，尤其是新闻/博客/公众号等文章型页面。触发词：读这篇文章、阅读该页、看看这篇、帮我读一下、这页讲了啥、这篇写的是什么、总结内容、提炼要点、提取正文、正文内容、翻译这页、extract the article、summarize this page。
-  不适用：只要读控件/标签/少量文本 → browse_get_tree；要交互（登录/表单/评论/发布）→ 回 ai-browser 主循环；要接口 JSON → ai-browser 的 references/network.md。
+  read-webpage —— 只在「要把一整篇文章的正文取出来」时用我：标题 + 段落，新闻/博客/公众号/掘金这类页面。
+  触发词：读这篇文章、看看这篇、帮我读一下、这页讲了啥、这篇写的是什么、提取正文、翻译这页、总结这篇。
+  不适用：读控件 / 按钮 / 少量文本 → browse_get_tree；要交互（登录 / 表单 / 评论 / 发布）→ ai-browser 主循环。
 ---
 
 # 网页正文提取（read-webpage）
