@@ -2,7 +2,7 @@
 //
 // # 为什么需要它（2026-10-27 用户报"点证书下载 → 正在打开… → 一坨 png 链接"）
 //
-// 沧州教师继续教育网的证书地址回的是：
+// 省级教师继续教育平台的证书地址回的是：
 //   Content-Type: image/png
 //   Content-Disposition: attachment;filename=<uuid>.png
 // 站点用新标签打开它，于是 Electron 把它当下载处理 —— **导航永远不会提交**，
