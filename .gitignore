@@ -34,3 +34,35 @@ docs/**/img_*
 .trae-html-share-packages/
 .workbuddy/
 .exec-trail/
+
+# ── 个人内容与凭据：不属于项目，绝不入库 ────────────────────────────────────
+# 这个仓库要公开分发（npm / GitHub / MCP registry），下面几类是"用起来才会
+# 产生"的东西。判断标准只有一条：**换个用户还可能存在吗？** 不会 → 忽略。
+# 这几类一旦提交，删掉也还在 git 历史里，所以入口收窄比事后清理划算。
+
+# 针对具体网站的自动化脚本（刷课 / 抢购 / 某个后台的固定流程…）。
+# 它们绑死某个站点的选择器和业务流程，和浏览器本身无关；进仓库既泄露
+# 使用意图，也会被误当成官方能力。放在 sites/<网站名>/ 下，永不入库。
+sites/
+
+# 个人文件：抓下来的数据、导出的表格、截图、临时笔记。
+# 用 local/ 而不是放宽到 *.csv / *.xlsx —— 后者会误伤示例数据。
+local/
+local-*/
+
+# 登录态与 cookie。浏览器本体把登录态存在 ~/.ai-browser（仓库之外），
+# 但手工导出/调试用的副本经常落在工作区里。
+*.cookies
+cookies.json
+cookies.txt
+.auth/
+*_auth_state.json
+auth_state*.json
+
+# 凭据文件
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+id_rsa*
