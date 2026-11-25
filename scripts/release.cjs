@@ -60,8 +60,31 @@ function ghToken() {
   catch { return ''; }
 }
 
-const done = [];
-function mark(m) { done.push(m); }
+const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+// npm publish 返回 202 + exit 0 ≠ registry 立刻可读（实测约 105s）。
+// MCP registry 在注册前会去 npm 校验"这个版本存不存在"，看不见就 400/404 拒绝，
+// 而 mcp-publisher 的错误信息只说"version not found"，看起来像版本号写错。
+// 所以真正该等的是 npm 的索引，不是隔着 mcp-publisher 盲重试。
+//
+// 判据用 registry 的 HTTP 状态（200 = 已索引），不用 `npm view`：
+// 后者有本地缓存，曾在明明没同步时回报旧版本，会让人过早放弃等待。
+function waitForNpmVersion(pkgName, version, maxMs = 300000) {
+  const url = `https://registry.npmjs.org/${pkgName.replace('/', '%2F')}/${version}`;
+  const t0 = Date.now();
+  let wait = 2000;
+  for (;;) {
+    const r = spawnSync('curl', ['-sS', '-o', '/dev/null', '-w', '%{http_code}', '--max-time', '10', url], { encoding: 'utf8' });
+    const code = (r.stdout || '').trim();
+    if (code === '200') return { ok: true, waited: Math.round((Date.now() - t0) / 1000) };
+    const left = maxMs - (Date.now() - t0);
+    if (left <= 0) return { ok: false, waited: Math.round((Date.now() - t0) / 1000), lastCode: code || 'no-response' };
+    const nap = Math.min(wait, left);
+    warn(`npm registry 还没索引到 v${version}（HTTP ${code || '无响应'}），${Math.round(nap / 1000)}s 后再查…`);
+    sleepSync(nap);
+    wait = Math.min(Math.round(wait * 1.6), 20000);
+  }
+}
 
 // ---- 0. 前置检查 ----------------------------------------------------------
 step('前置检查');
@@ -290,10 +313,15 @@ step('打包桌面 App');
 
 // ---- 6. npm ---------------------------------------------------------------
 step('发布到 npm');
+const PKG_NAME = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).name;
 const npm = spawnSync('npm', ['publish'], { cwd: ROOT, encoding: 'utf8' });
 if (npm.status === 0) {
   ok(`@glittering0717/ai-browser@${to} 已发布`);
   mark('npm publish');
+  // 在这里把传播延迟等完（见 waitForNpmVersion 注释），别让下一步去撞 404。
+  const w = waitForNpmVersion(PKG_NAME, to);
+  if (w.ok) ok(`npm registry 已索引 v${to}（等了 ${w.waited}s）`);
+  else warn(`npm registry ${w.waited}s 仍未见 v${to}（${w.lastCode}），下一步的 registry 注册可能失败`);
 } else {
   const out = `${npm.stdout || ''}${npm.stderr || ''}`;
   // 三层认证失败的表现各不相同，逐条给可执行的下一步（2026-10-23 一天踩完）：
@@ -324,58 +352,62 @@ if (!publisher) {
   warn('未找到 mcp-publisher，跳过。安装：gh release download --repo modelcontextprotocol/registry \\');
   console.log('      --pattern "mcp-publisher_darwin_arm64.tar.gz" && tar xzf ...');
 } else {
+  const doPublish = () => spawnSync(publisher, ['publish'], { cwd: ROOT, encoding: 'utf8' });
+  const readOut = (r) => `${r.stdout || ''}${r.stderr || ''}`;
+
   // registry 的登录态是一枚短期 JWT（几小时就过期）。过期表现是 401
   // "token has invalid claims: token is expired" —— 不是"没登录"，
-  // 所以 `login` 会直接成功但不会有人去重跑它。这里自动续一次：
-  // MCP_GITHUB_TOKEN 让 login 走非交互路径（device flow 在无 TTY 时会静默卡住）。
-  const doPublish = () => spawnSync(publisher, ['publish'], { cwd: ROOT, encoding: 'utf8' });
-  let pub = doPublish();
-  let pubOut = `${pub.stdout || ''}${pub.stderr || ''}`;
-  if (pub.status !== 0 && /expired|invalid or expired|status 401/i.test(pubOut)) {
-    warn('registry 登录已过期，自动续期一次…');
-    const relogin = spawnSync(publisher, ['login', 'github'], {
-      cwd: ROOT,
-      encoding: 'utf8',
-      env: { ...process.env, MCP_GITHUB_TOKEN: ghToken() },
-    });
-    const reloginOut = `${relogin.stdout || ''}${relogin.stderr || ''}`;
-    if (relogin.status === 0 && /logged in/i.test(reloginOut)) {
-      ok('已重新登录');
-      pub = doPublish();
-      pubOut = `${pub.stdout || ''}${pub.stderr || ''}`;
-    } else {
-      warn('自动续期失败（需要 gh CLI 已登录）：' + reloginOut.trim().split('\n').pop());
+  // 所以 `login` 会直接成功、但没人会想到去重跑 publish。
+  // MCP_GITHUB_TOKEN 让 login 走非交互路径（device flow 在无 TTY 时静默卡住）。
+  // 整段只续一次：第二次还 401 说明是令牌本身无效，不是过期，多试无益。
+  let relogged = false;
+  const publishOnce = () => {
+    let r = doPublish();
+    let out = readOut(r);
+    if (r.status !== 0 && /expired|invalid or expired|status 401/i.test(out) && !relogged) {
+      relogged = true;
+      warn('registry 登录已过期，自动续期一次…');
+      const relogin = spawnSync(publisher, ['login', 'github'], {
+        cwd: ROOT,
+        encoding: 'utf8',
+        env: { ...process.env, MCP_GITHUB_TOKEN: ghToken() },
+      });
+      if (relogin.status === 0 && /logged in/i.test(readOut(relogin))) {
+        ok('已重新登录');
+        r = doPublish();
+        out = readOut(r);
+      } else {
+        warn('自动续期失败（需要 gh CLI 已登录）：' + readOut(relogin).trim().split('\n').pop());
+      }
     }
+    return { r, out };
+  };
+  const published = ({ r, out }) => r.status === 0 && /successfully published/i.test(out);
+  const notFound = ({ out }) => /was not found|status: 404/i.test(out);
+
+  let res = publishOnce();
+
+  // 404 = registry 去 npm 校验时仍看不到这个版本。上面 npm 段已经等到可见，
+  // 这里再最多补 3 轮，每轮先确认 npm 索引（避免在没同步时空转）。
+  for (let i = 1; i <= 3 && !published(res) && notFound(res); i++) {
+    warn(`mcp-publisher 仍看不到 v${to}，第 ${i}/3 轮：先确认 npm 索引…`);
+    const w = waitForNpmVersion(PKG_NAME, to, 120000);
+    if (!w.ok) warn(`npm 索引侧仍未见 v${to}（${w.lastCode}）`);
+    res = publishOnce();
   }
-  if (pub.status === 0 && /successfully published/i.test(pubOut)) {
+
+  if (published(res)) {
     ok('MCP registry 已发布');
     mark('mcp registry');
-  } else if (pub.status !== 0 && /was not found \(status: 404\)/i.test(pubOut)) {
-    // npm 刚发完，registry 的校验端还看不到新版本 —— 这是 npm CDN 的传播
-    // 延迟（实测 1-3 分钟），不是真的没发上去。连续两次发版都在这里被打断
-    // 叫回来手工重跑，所以直接自动等待重试。
-    let ok404 = false;
-    for (let i = 1; i <= 4; i++) {
-      warn(`registry 还没看到 npm 上的 v${to}（传播延迟），45s 后重试 ${i}/4…`);
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 45000);
-      pub = doPublish();
-      pubOut = `${pub.stdout || ''}${pub.stderr || ''}`;
-      if (pub.status === 0 && /successfully published/i.test(pubOut)) { ok404 = true; break; }
-      // 错误形态变了（不再是传播延迟）就交回统一处理，别空转
-      if (!/was not found \(status: 404\)/i.test(pubOut)) break;
-    }
-    if (ok404) { ok('MCP registry 已发布'); mark('mcp registry'); }
-    else {
-      const pkgName = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).name;
-      fail('MCP registry 发布失败：' + pubOut.split('\n').filter(Boolean).slice(-6).join(' | '));
-      warn(`补救：确认 npm 上有 ${to}（npm view ${pkgName} version）后执行  mcp-publisher publish`);
-    }
   } else {
-    fail('MCP registry 发布失败：' + pubOut.split('\n').filter(Boolean).slice(-6).join(' | '));
-    if (/auth|login|token|unauthor/i.test(pubOut)) {
+    fail('MCP registry 发布失败：' + res.out.split('\n').filter(Boolean).slice(-6).join(' | '));
+    if (/auth|login|token|unauthor/i.test(res.out)) {
       warn('需要先登录一次：mcp-publisher login github（device flow，点一下浏览器）');
     }
-    warn('补救：登录后执行  mcp-publisher publish');
+    warn(
+      `补救：确认 npm 已索引（curl -s -o /dev/null -w '%{http_code}' ` +
+        `https://registry.npmjs.org/${PKG_NAME.replace('/', '%2F')}/${to}）后执行  mcp-publisher publish`
+    );
   }
 }
 
