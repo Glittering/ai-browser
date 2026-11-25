@@ -171,4 +171,4 @@
 ## 附：本次审计的可复用产物
 
 - `docs/marketing/PER_PLATFORM_PLAYBOOK.md` —— 逐平台的写作规范（调性 / 字数 / 标题公式 / 结构 / 发布时间 / 禁忌 / 首篇选题），下次写稿直接照抄。
-- `/Users/Zhuanz/WorkBuddy/2026-10-18-23-53-03/ops-audit/` —— 本次全平台数据采集脚本（aib_driver.mjs + collect*.mjs），改造后可做每周数据快照。
+- `<工作目录>/ops-audit/` —— 本次全平台数据采集脚本（aib_driver.mjs + collect*.mjs），改造后可做每周数据快照。

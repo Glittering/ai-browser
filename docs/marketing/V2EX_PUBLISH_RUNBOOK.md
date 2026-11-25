@@ -11,8 +11,8 @@ V2EX 首页按最后回复时间排序。发布时间优先：**工作日 08:30�
 ## 主路径（脚本）
 
 ```bash
-cd /Users/Zhuanz/WorkBuddy/2026-10-18-23-53-03/ops-audit
-/Users/Zhuanz/.workbuddy/binaries/node/versions/22.22.2-6/bin/node aib_driver.mjs v2ex_publish.mjs --timeout=240000
+cd <工作目录>/ops-audit
+node aib_driver.mjs v2ex_publish.mjs --timeout=240000
 ```
 
 脚本行为：进 `/write?node=create` → 校验登录态 → 填标题与正文 → **校验字数确实写进去了** → 点发布 → 处理最多 4 轮确认弹窗 → 抓 URL → 自动回填 `docs/marketing/CHANNEL_POSTS.md`。

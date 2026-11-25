@@ -26,7 +26,7 @@ cd /tmp/mcp-pub && tar xzf mcp-publisher_darwin_arm64.tar.gz && chmod +x mcp-pub
 #    校验 package.json 的 mcpName == server.json 的 name（io.github.Glittering/ai-browser）
 
 # 3. 登录（token 只经内存/环境变量传递，不落盘）
-cd /Users/Zhuanz/Documents/trae_projects/ai-browser
+cd <仓库根目录>
 /tmp/mcp-pub/mcp-publisher login github -token "$(gh auth token)"
 
 # 4. 校验 + 发布（必须在仓库根目录跑，server.json 在当前目录查找）

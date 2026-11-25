@@ -79,7 +79,6 @@ function pickPython() {
   const cands = [
     process.env.AIB_PYTHON,
     'python3',
-    '/Users/Zhuanz/.workbuddy/binaries/python/envs/default/bin/python',
     'python3.13',
     'python3.12',
     '/opt/homebrew/bin/python3',

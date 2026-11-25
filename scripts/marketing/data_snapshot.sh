@@ -3,7 +3,8 @@
 # 用法：bash scripts/marketing/data_snapshot.sh [备注]
 # 输出：追加一行到 docs/marketing/DATA_LOG.md
 set -u
-REPO="/Users/Zhuanz/Documents/trae_projects/ai-browser"
+# 从脚本位置推导仓库根（scripts/marketing/ → 上两级），换台机器也能跑。
+REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 LOG="$REPO/docs/marketing/DATA_LOG.md"
 DATE=$(date +%Y-%m-%d)
 TIME=$(date +%H:%M)
