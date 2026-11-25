@@ -149,4 +149,26 @@ describe('技能的形态（决定弱模型能不能用起来）', () => {
       expect(len, `${name} 的 description 有 ${len} 字符，超过 600`).toBeLessThanOrEqual(600);
     }
   });
+
+  // 依据（2026-11-25 实测，不是推测）：造一个 description 恰好 374 字符的技能，
+  // 让干净 agent 逐字照抄它从技能索引里看到的内容 —— 它抄到第 201 字符
+  // （...PROBE18 PROB…）就断了，末尾是客户端加的省略号，后面 173 字符它完全看不到，
+  // 并主动声明"不是我省略，我看到的就到这里"。
+  // 结论：超过约 200 字符的部分对"模型选不选这个技能"零贡献，
+  // 只是白占冷启动体积。所以 S-3 的 600 是反模糊的软上限，这条 200 才是硬边界。
+  it('S-4: description 不超过 200 字符 —— 超出部分在技能索引里被截断，对匹配零贡献', () => {
+    const LIMIT = 200;
+    for (const name of skillDirs) {
+      const text = read(name);
+      const m = text.match(/description:\s*>-?\s*([\s\S]*?)\n---/);
+      const desc = (m ? m[1].trim() : '').replace(/\s+/g, ' ');
+      const len = desc.length;
+      expect(
+        len,
+        `${name} 的 description 有 ${len} 字符，超过索引可见窗口 ${LIMIT}。\n` +
+          `被截掉的部分是：「${desc.slice(LIMIT)}」\n` +
+          `这段模型看不到。要么压进前 ${LIMIT} 字符，要么挪到 SKILL.md 正文里。`
+      ).toBeLessThanOrEqual(LIMIT);
+    }
+  });
 });
