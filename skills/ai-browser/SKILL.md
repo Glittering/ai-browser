@@ -2,7 +2,7 @@
 name: ai-browser
 description: >-
   ai-browser（AI Browser）—— 一个真实、可见、可被人接管的浏览器：带登录态、跑 JS、人随时能抢鼠标。替用户在网页上拿东西、做事。
-  适用：任何要在网页上完成的任务 —— 包括搜索（含小红书/头条这类登录才看得到结果的）、读正文、点击填表登录提交、上传下载、抓数据、看登录后才有的接口。文章正文的提取配方见 read-webpage。用户点名 ai-browser / AI Browser 时直接用。
+  适用：任何要在网页上完成的任务 —— 包括搜索（含小红书/头条这类登录才看得到结果的）、页面操作（点击/填表/登录/提交/上传下载）、抓数据、看登录后才有的接口。整篇正文交给 read-webpage 技能，接口交给 web-network-monitor 技能。用户点名 ai-browser / AI Browser 时直接用。
   不适用：完全不碰网页的任务（本地文件、命令、代码、纯写作、跑测试）。
   触发词（用户嘴里的说法）：看看这个网页、这链接里写了啥、帮我搜一下、帮我点一下、登录态过期。
 ---
@@ -14,7 +14,7 @@ description: >-
 工具在就 `browse_navigate {"url":"https://example.com"}`；不在走 CLI（同一引擎；没这个命令就加 `npx -y @glittering0717/ai-browser`）：
 
 ```
-ai-browser call ui.get_tree '{"subset":"interactive"}'        # 读页面，拿 e:xxx
+ai-browser call ui.get_tree '{"subset":"interactive"}'        # 读页面
 ai-browser call ui.act '{"action":"click","target":"e:a-3"}'  # 点它
 ```
 
@@ -22,7 +22,7 @@ ai-browser call ui.act '{"action":"click","target":"e:a-3"}'  # 点它
 
 ## 你的标签组
 
-第一次动手给你一页**空白工作页**，归在你自己的标签组（多 agent 各一组互不相干）；省略 `tab` 就打它，用户的页不会被碰。组有上限，满了先关再开。
+第一次动手给你一页**空白工作页**，归在你自己的标签组；省略 `tab` 就打它，用户的页不会被碰。组有上限，满了先关再开。
 
 ## 点东西只认 id
 
