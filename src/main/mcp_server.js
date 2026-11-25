@@ -314,8 +314,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return { content: [{ type: 'text', text: JSON.stringify(result) }] };
       }
       if (op === 'configure') {
+        // reload 必须转发：hook 对"安装之前已经画完"的内容无能为力，重载是拿到
+        // 完整绘制历史的唯一办法（hard-pages.md 就是按这个教 agent 的）。
+        // 曾被漏在这里 —— schema 也没声明，于是文档教的"现装现读"静默无效。
         const result = await wsClient.call('ui.canvas_configure', {
-          tab: args.tab, mode: args.mode, clear: args.clear,
+          tab: args.tab, mode: args.mode, clear: args.clear, reload: args.reload,
         });
         return { content: [{ type: 'text', text: JSON.stringify(result) }] };
       }

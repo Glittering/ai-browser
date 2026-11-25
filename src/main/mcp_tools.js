@@ -306,7 +306,8 @@ export const MCP_TOOLS = [
         since_seq: { type: 'integer', description: 'read: cursor from pagination.next_seq.' },
         limit: { type: 'integer', description: 'read: page size (default 200, max 1000).' },
         mode: { type: 'string', enum: ['off', 'semantic', 'trace'], description: 'configure: recording mode.' },
-        clear: { type: 'boolean', description: 'configure: drop retained calls.' }
+        clear: { type: 'boolean', description: 'configure: drop retained calls.' },
+        reload: { type: 'boolean', description: 'configure: reload to record earlier draws.' }
       },
       required: ['operation']
     }
@@ -348,7 +349,7 @@ export const MCP_TOOLS = [
   {
     name: 'browse_repaint',
     title: 'Force repaint',
-    description: "Force the compositor to redraw a tab's BrowserView when the window shows a stale page; returns repaint_count so the repaint is provable.",
+    description: "Force the compositor to redraw a tab's BrowserView when the window shows a stale page; returns repaint_count.",
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     inputSchema: {
       type: 'object',
