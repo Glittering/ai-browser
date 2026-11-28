@@ -21,10 +21,18 @@ const SKILLS_ROOT = path.join(__dirname, '..', 'skills');
 const MARKER = '.ai-browser-skill';
 
 // 已知客户端的技能目录。宁可只列确定正确的几个，也不猜。
+// 每个客户端从自己的目录扫 SKILL.md（frontmatter 里 name + description），
+// 格式一致，所以同一份文件能直接拷。目录不存在说明没装那个客户端，跳过。
+//
+// Trae CN 是 2026-11-28 补上的：之前只装 WorkBuddy / Claude / Codex，
+// 用户在 Trae 里让 agent「用 ai-browser」，agent 根本看不到这个技能 ——
+// 而 Trae 索引里恰好有一个 Vercel 的 `agent-browser`（名字相近、场景重叠），
+// 于是它要么匹配到那个，要么退回去用 Trae 内置的 Chrome 通道。
 const TARGETS = [
   { id: 'workbuddy', label: 'WorkBuddy', dir: path.join(os.homedir(), '.workbuddy', 'skills') },
   { id: 'claude', label: 'Claude Code', dir: path.join(os.homedir(), '.claude', 'skills') },
   { id: 'codex', label: 'Codex', dir: path.join(os.homedir(), '.codex', 'skills') },
+  { id: 'trae', label: 'Trae CN', dir: path.join(os.homedir(), '.trae-cn', 'skills') },
 ];
 
 function listSkills() {
