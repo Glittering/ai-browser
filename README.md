@@ -1193,7 +1193,7 @@ the single source for `evaluate` limits, enforced identically on both transports
 |---|---|
 | Agents | Any MCP stdio client; alternatively raw WS from any language |
 | Node | ≥ 18 |
-| OS | **macOS** and **Linux** — developed and tested on these. **Windows: experimental and untested.** It is plain Electron plus CDP, so it ought to build, but no one has run it; expect to debug `npm install` and the window layer yourself. Please report back either way. |
+| OS | **macOS (arm64)**, **Windows (x64)** and **Linux** — all three run. macOS and Windows ship packaged installers; Linux installs from npm (no package yet). The e2e suite is developed on macOS and Linux, and the Windows build has been through a real install/uninstall cycle plus the same e2e suite on Windows 10 x64. CI runs unit tests on macOS only, so a given release is not automatically re-checked on Windows — report what breaks and it gets a real-machine repro. |
 | Page frameworks | React / Vue / Angular / vanilla DOM — element locating is DOM-based, not framework-based |
 | Editors | Rich editors driven through trusted input rather than per-framework code paths |
 | Page types | Static and SPA; dynamic updates observable via the tree, `dom_change` / `state_changed` events |

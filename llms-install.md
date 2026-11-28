@@ -18,17 +18,20 @@ the same JSON-RPC and needs **no registration at all** — see "Fastest path" be
 ## Requirements
 
 - Node.js **≥ 18**
-- A desktop session (GUI app): macOS or Linux. Windows is experimental/untested.
+- A desktop session (GUI app): macOS, Linux, or Windows (x64). Windows has a packaged NSIS
+  installer (README "Option A2"); that packaged app has been installed, launched and uninstalled
+  on Windows 10 x64. Linux has no package — install from npm.
 - ~110 MB download for the Electron engine (prepared on first launch / `npm install`, from GitHub
   releases); it expands to ~245 MB on disk. Do not judge the install by the download size alone.
 
-> **Installation priority.** The prebuilt macOS `.dmg` (README "Option A") is the recommended
-> install for humans: one file, no Node.js, no dependency tree. The npx path below is for agents
-> and for machines that already have Node — it is also how the MCP server gets registered, so it
-> stays necessary even when the packaged app is installed. The two cooperate: if the packaged app
-> is already running, the MCP server reuses it on port 9223 instead of downloading a second
-> Electron. Source install is the fallback — only when no package fits, the package misbehaves,
-> or the code itself needs changes; it pulls ~276 MB of dependencies plus the engine.
+> **Installation priority.** The prebuilt macOS `.dmg` (README "Option A") and the Windows
+> `Setup.exe` (README "Option A2") are the recommended installs for humans: one file, no Node.js,
+> no dependency tree. On Linux — and for agents — use the npx path below; it is also how the MCP
+> server gets registered, so it stays necessary even when the packaged app is installed. The two
+> cooperate: if the packaged app is already running, the MCP server reuses it on port 9223 instead
+> of downloading a second Electron. Source install is the fallback — only when no package fits,
+> the package misbehaves, or the code itself needs changes; it pulls ~276 MB of dependencies plus
+> the engine.
 
 ## Install
 

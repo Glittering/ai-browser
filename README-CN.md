@@ -200,7 +200,7 @@ agent 的任务一点不受影响。
 
 ## 诚实边界（请先看这里）
 
-- **macOS / Linux 已测，Windows 未测**（不是不支持，是没测过，不想让你以为我们测了）
+- **macOS / Windows / Linux 都能跑，入口不同**：macOS 用 arm64 的 dmg；Windows 用 x64 的 `Setup.exe`（装/卸载和 e2e 套件都在 Win10 上验过，不是"应该能跑"）；Linux 没有安装包，走 `npx`。CI 只在 macOS 跑单测，所以新版本不会每版都在 Windows 上复测——真出问题提 Issue，我按真机复现
 - 首次启动要准备 ~110MB Electron 引擎
 - WebSocket 控制端口只绑 `127.0.0.1`，**且没有鉴权**——不要转发这个端口，不要在不可信网络里暴露
 - canvas 捕获默认关闭（见上）

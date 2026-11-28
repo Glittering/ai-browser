@@ -1,5 +1,8 @@
 # 明日待发成稿包（READY_TO_POST）
 
+> ⚠️ 2026-11-28 平台边界更正：本文成稿里的「Windows 未测 / experimental」已作废并就地改过。
+> 一切平台边界以 `PLATFORM_FACTS.md` 为准（Windows x64 有安装包，装/卸载与 e2e 已于 10-25~11-06 在 Win10 验过）。
+
 > 生成：2026-10-19 01:10 · 依据：全平台后台真实数据 + 知乎竞品对照
 > **核心结论（决定所有稿子的写法）**：知乎/掘金/B站上，「介绍自己项目」的稿子全部只有 1–5 个赞；而「讲原理 / 讲怎么实现」的同类内容拿到 35–161 赞。
 > 所以：**不写产品软文，写实现原理与真实实验数据**，项目在文中自然出现。
@@ -103,7 +106,7 @@ ComfyUI 这类只改 canvas 数据、DOM 零变动的操作，也能被识别。
 3. 标签类控件是自定义组件，合成 `click()` 不吃 → 用 `press ArrowDown` + `Enter` 受信选中。
 4. 发布结果别信 toast，以 URL 跳转 + 文章页 200 + 正文可读为准。
 
-仓库：https://github.com/Glittering/ai-browser · MIT · macOS/Linux 已测，Windows 未测。
+仓库：https://github.com/Glittering/ai-browser · MIT · macOS（arm64 dmg）/ Windows（x64 安装包）/ Linux（npx）都能跑。
 ```
 
 **发布时间**：明晚 **20:30**（工作日晚上是掘金次高峰；若错过则后天 08:30）
@@ -178,7 +181,7 @@ Coding Agent 之所以强，是因为它操作的对象是文本——代码文�
 
 ## 边界
 
-macOS / Linux 已测，Windows 没测；首次启动要拉 ~110MB Electron 引擎；控制端口只绑 127.0.0.1 且没有鉴权，别转发这个端口。
+macOS 用 arm64 的 dmg、Windows 用 x64 的 Setup.exe（装/卸载实测过）、Linux 走 npx；首次启动要拉 ~110MB Electron 引擎；控制端口只绑 127.0.0.1 且没有鉴权，别转发这个端口。
 ```
 
 一、路线一：像素。截图 → 视觉模型 → 输出坐标 → 点。
@@ -198,7 +201,7 @@ macOS / Linux 已测，Windows 没测；首次启动要拉 ~110MB Electron 引�
    工具返回 success 但页面没变，是最高频也最贵的一类故障。
    所以验证必须是原语：显式 changed/unchanged + 前后值 + 路径。
 
-五、边界（如实说）：macOS/Linux 已测，Windows 没测；首次启动 ~110MB；控制端口只绑 localhost 且无鉴权。
+五、边界（如实说）：macOS（arm64 dmg）/ Windows（x64 安装包，实测装过）/ Linux（npx）都能跑；首次启动 ~110MB；控制端口只绑 localhost 且无鉴权。
 ```
 
 **禁忌**：禁用"宝藏/封神/豁然开朗/彻底解放"；外链只放文末（放开头会被压推荐）；**同一题材在知乎只发一次**（我们已经发过 3 次，这是教训）。

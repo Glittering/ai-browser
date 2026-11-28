@@ -76,9 +76,10 @@
 
 先把边界讲清楚，省得照着做的人踩空：
 
-- **安装包（dmg）**：只构建了 macOS `arm64`。它没做公证，首次打开会被 Gatekeeper 拦，需要右键 → 打开。Windows 和 Linux 没有安装包。
+- **macOS 安装包（dmg）**：只构建了 `arm64`。它没做公证，首次打开会被 Gatekeeper 拦，需要右键 → 打开。
+- **Windows 安装包（`Setup.exe`）**：x64 版本，按用户装到 `%LOCALAPPDATA%\Programs\AI Browser`，不需要管理员权限，装完自动建开始菜单和桌面快捷方式。装、卸、从快捷方式启动我都验过，e2e 套件也在 Win10 上跑过。它没有代码签名，SmartScreen 会拦一次：**更多信息 → 仍要运行**。
+- **Linux**：没有安装包，走 `npx`。
 - **npx 方式**：macOS 和 Linux 我都实测跑通了，这是 Agent 接入最常用的通道。
-- **Windows**：experimental，未经测试。理论上就是 Electron + CDP，应该能编译，但没人验证过，装依赖和窗口层大概率要自己调。
 
 ## 五、安装：三条路
 
@@ -169,8 +170,8 @@ A：会。它指向"当次读到的节点"，页面刷新或重新读树后要�
 **Q：iframe 或 canvas 里的元素怎么办？**
 A：iframe 会遇到 `present_in_tree`，需要切到对应 frame 上下文。canvas 则是另一回事——它是语义树的盲区，得走专门的绘制层拦截，那是另一个话题了。
 
-**Q：Windows 真不能用吗？**
-A：目前标 experimental、未测试。能编译不代表跑得顺，遇到问题欢迎来提 Issue，我这边没有 Windows 环境，不敢打包票。
+**Q：Windows 能用吗？**
+A：能。x64 有 `Setup.exe`，装/卸载和 e2e 套件都在 Win10 上跑过，不是"能编译但不敢担保"的状态。唯一要提前知道的是没做代码签名，SmartScreen 会拦一次（更多信息 → 仍要运行）。CI 只在 macOS 跑单测，所以不是每个版本都在 Windows 复测过——真出问题提 Issue，我按真机复现。
 
 ## 九、小结
 

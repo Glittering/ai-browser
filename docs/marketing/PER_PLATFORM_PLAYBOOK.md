@@ -1,5 +1,8 @@
 # 逐平台写稿规范（PER_PLATFORM_PLAYBOOK）
 
+> **平台边界（能不能装、哪个系统）禁止凭记忆写**，一律整段抄 `PLATFORM_FACTS.md`（2026-11-28 立）。
+> 历史 `COPY_*.md` 里的「Windows experimental / 未测」已作废；再写一次就是没看仓库。
+
 ---
 
 ## §0. 标题与内容公式（2026-10-22 由实测数据反推，所有新稿发前必查）
@@ -125,8 +128,8 @@
 - [ ] 有没有**至少一个可验证的真实数字或具体失败**？（虚构的一律删掉）
 - [ ] 跑过矩阵起题法的 5 个维度吗，还是凭感觉搓了一个？
 - [ ] 前 12–15 字里有核心词吗？（手机端只看这么多）
-- [ ] **边界声明照 README 抄**（10-22 新增）：写「只支持 XX 系统」之前，去 README Compatibility 表核对原文。
-  （曾凭印象写成「只有 macOS arm64 有包，Windows 和 Linux 都没有」——实际口径是：dmg 只发 macOS arm64；`npx ... mcp` 这条路径 macOS + Linux 都实测过；只有 Windows 是 experimental。**写过头 = 把 Linux 读者一起劝退，而且不诚实**）
+- [ ] **边界声明照 `PLATFORM_FACTS.md` 整段抄**（2026-11-28 重写）：动手前打开 `README.md` Compatibility 行 + `README-CN.md`「诚实边界」第一条核对，两处必须一致；写完在内部笔记留 `平台事实核对：PLATFORM_FACTS.md @ <日期>`。
+  （摔过两次：一次凭印象写成「只有 macOS arm64 有包，Windows 和 Linux 都没有」，把 Linux 读者一起劝退；一次更严重——Windows 早在 10-25 就在 Win10 跑过 e2e、11-06 就把安装包真装真卸验过，稿子却还在写「experimental / 我没有 Windows 环境」。**写过头和写落后都是不诚实，而且都是没回仓库核对**）
 - [ ] **CTA 不在文末**（10-22 新增）：转化动作有没有出现在**读完全文之前**？只在结尾放一个裸链接，等于九成人根本到不了
 - [ ] **可复制内容全部实测**（10-22 新增）：正文里每条命令、每个给 agent 的参数取值，发前真跑过吗？（踩过两次：`node` 绝对路径配 npx 的 `-y` → `bad option: -y`；`role=button/label=Star` 当定位语法 → `target` 实际只收 `data-ai-id`）
 - [ ] **诚实测试**：标题说的每一条，正文里真的有吗？
@@ -199,7 +202,7 @@
 2）做了什么来破（1 段，一句话说清机制，不堆叠特性）。
 3）实测数据 / 对比（最重要，必须有数字）。
 4）一条安装命令。
-5）Honest caveats：现在哪些做不到（macOS/Linux only、Windows 未测、100MB 首次下载）。
+5）Honest caveats：现在哪些做不到（Linux 没有安装包、~110MB 首次下载、端口只绑 localhost 且无鉴权）。**平台支持照 `PLATFORM_FACTS.md` 抄，不要写「Windows 未测」。**
 6）一句提问收尾（Reddit 吃"提问"，不吃"请去看我的仓库"）。
 ```
 
